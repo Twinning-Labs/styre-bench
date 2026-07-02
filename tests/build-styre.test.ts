@@ -36,6 +36,17 @@ const FIXTURE_WITHOUT_WEB_TOOLS = `const ALLOWLISTS: Record<string, string[]> = 
 };
 `;
 
+// Simulates a PARTIAL styre refactor: "WebFetch" survives untouched but "WebSearch" was
+// renamed/removed from the allowlist shape. This is the exact contamination scenario the
+// fail-closed `||` guard exists to catch — the old `&&` guard would happily patch out
+// "WebFetch" here and report a clean web-off build while "WebSearch" (renamed away, so not
+// even present to strip) is moot, but a REAL renamed-in-place tool would survive silently.
+const FIXTURE_WITH_ONLY_WEBFETCH = `const ALLOWLISTS: Record<string, string[]> = {
+  "design:dispatch": ["Read", "Grep", "Glob", "Write", "Edit", "WebFetch"],
+  "implement:dispatch": ["Read", "Grep", "Glob", "Write", "Edit", "Bash"],
+};
+`;
+
 describe("applyWebOffPatch (pure, no clone/build needed)", () => {
   test("removes both WebSearch and WebFetch literals", () => {
     const patched = applyWebOffPatch(FIXTURE_WITH_WEB_TOOLS);
@@ -54,11 +65,14 @@ describe("applyWebOffPatch (pure, no clone/build needed)", () => {
     expect(patched).toContain('"docs:revise": [...READ_ONLY, "Write", "Edit"]');
   });
 
-  test("produces syntactically plausible TS: no dangling/double commas or empty array slots", () => {
+  test("produces syntactically valid TS: real-parses via Bun.Transpiler (not just a comma-regex heuristic)", () => {
     const patched = applyWebOffPatch(FIXTURE_WITH_WEB_TOOLS);
-    expect(patched).not.toMatch(/,\s*,/); // no double comma left behind
-    expect(patched).not.toMatch(/,\s*\]/); // no trailing comma before a closing bracket
-    expect(patched).not.toMatch(/\[\s*,/); // no leading comma after an opening bracket
+    // A dangling/double comma or empty array slot would fail to transpile — this is a real
+    // parse, so it catches actual syntax breakage, not just the specific comma shapes a
+    // regex heuristic happens to check for.
+    expect(() => new Bun.Transpiler({ loader: "ts" }).transformSync(patched)).not.toThrow();
+    expect(patched).not.toContain('"WebSearch"');
+    expect(patched).not.toContain('"WebFetch"');
   });
 
   test("is pure: does not mutate its input string (strings are immutable, but assert no aliasing surprises)", () => {
@@ -73,6 +87,19 @@ describe("applyWebOffPatch (pure, no clone/build needed)", () => {
 
   test("anchor-missing guard: error message names what a styre refactor moved (actionable, not generic)", () => {
     expect(() => applyWebOffPatch(FIXTURE_WITHOUT_WEB_TOOLS)).toThrow(/applyWebOffPatch/);
+  });
+
+  test("fail-closed guard: throws when exactly ONE anchor is missing (partial refactor, not just both gone)", () => {
+    // Before the fix this was an `&&` guard, so a fixture with only one literal present
+    // would NOT throw — the patch would strip that one literal, report webTools: "off", and
+    // silently leave a renamed/relocated web tool grant in place. The guard must fail closed
+    // on a partial match, not just a total one.
+    expect(() => applyWebOffPatch(FIXTURE_WITH_ONLY_WEBFETCH)).toThrow(/WebSearch/);
+  });
+
+  test("fail-closed guard: still throws when the OTHER single anchor is missing (WebSearch present, WebFetch gone)", () => {
+    const fixtureWithOnlyWebSearch = FIXTURE_WITH_ONLY_WEBFETCH.replace("WebFetch", "WebSearch");
+    expect(() => applyWebOffPatch(fixtureWithOnlyWebSearch)).toThrow(/WebFetch/);
   });
 });
 

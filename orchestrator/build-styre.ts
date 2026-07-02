@@ -37,16 +37,21 @@ function removeToolLiteral(text: string, tool: string): string {
  * step, so the dispatched agent cannot fetch the real fix off the web via styre's own
  * allowlist (belt-and-suspenders atop the container's `--disallowedTools` — see Task 6).
  *
- * THROWS if neither literal is present anywhere in `text` — a styre refactor that renames,
- * relocates, or restructures the allowlist must never silently no-op this guarantee; a
- * missing anchor is treated as a hard failure, not a no-op success.
+ * THROWS if either literal is missing from `text` — a styre refactor that renames, relocates,
+ * or restructures the allowlist (even partially, e.g. renaming just one of the two tools)
+ * must never silently leave the other tool's grant in place; a missing anchor is treated as
+ * a hard failure, not a no-op success. Fail-closed: if we can't be sure BOTH tools were
+ * actually removed, we refuse to report a "web-off" build at all.
  */
 export function applyWebOffPatch(fileText: string): string {
   const hasWebSearch = fileText.includes('"WebSearch"');
   const hasWebFetch = fileText.includes('"WebFetch"');
-  if (!hasWebSearch && !hasWebFetch) {
+  if (!hasWebSearch || !hasWebFetch) {
+    const missing = [!hasWebSearch ? '"WebSearch"' : null, !hasWebFetch ? '"WebFetch"' : null]
+      .filter((x): x is string => x !== null)
+      .join(" and ");
     throw new Error(
-      `applyWebOffPatch: neither the "WebSearch" nor the "WebFetch" string literal was found in ${ALLOWLIST_FILE_REL} — the web-off patch anchor is missing (styre likely refactored its tool-allowlist shape). Refusing to silently no-op the web-off guarantee; update this patch to match the new shape before re-running.`,
+      `applyWebOffPatch: the ${missing} string literal anchor was not found in ${ALLOWLIST_FILE_REL} — the web-off patch anchor is missing (styre likely refactored its tool-allowlist shape, possibly renaming only one of the two tools). Refusing to silently leave a web tool grant in place; update this patch to match the new shape before re-running.`,
     );
   }
   let patched = fileText;
