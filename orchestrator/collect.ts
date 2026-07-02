@@ -1,4 +1,4 @@
-import { touchedPaths } from "./firewall";
+import { addedPaths, touchedPaths } from "./firewall";
 import type { Instance, TaskRecord } from "./types";
 
 /** Minimal shape of styre's `profile.json` this module needs — NOT the full styre
@@ -44,8 +44,15 @@ interface SummaryEventLike {
   escalation_reasons: string[];
 }
 
+/** `isSummaryEvent` requires the load-bearing fields to actually be present/typed —
+ * `type==="summary"` alone is not enough. A malformed summary line (e.g. missing
+ * `outcome`) must NOT be accepted as THE summary: everything downstream keys off
+ * `outcome` (taxonomy derivation, `parked`), and a stray `undefined` there would read as
+ * a silently-broken record rather than the no-summary/infra case it actually is. */
 function isSummaryEvent(v: unknown): v is SummaryEventLike {
-  return typeof v === "object" && v !== null && (v as { type?: unknown }).type === "summary";
+  if (typeof v !== "object" || v === null) return false;
+  const obj = v as { type?: unknown; outcome?: unknown };
+  return obj.type === "summary" && typeof obj.outcome === "string";
 }
 
 /** PURE. Parses styre's NDJSON stdout and returns the LAST `type==="summary"` event (styre
@@ -111,17 +118,31 @@ export function isTestPath(path: string, lang: TestLang): boolean {
   const base = path.split("/").pop() ?? path;
   switch (lang) {
     case "python":
-      return /^test_.*\.py$/.test(base) || /(^|\/)tests\/.*\.py$/.test(path);
+      // pytest's default discovery matches BOTH test_*.py and *_test.py. conftest.py and
+      // __init__.py are pytest support files, never a self-authored test, even though
+      // they commonly live under a tests/ dir (which the directory-convention match
+      // below would otherwise false-positive on).
+      if (base === "conftest.py" || base === "__init__.py") return false;
+      return (
+        /^test_.*\.py$/.test(base) || /_test\.py$/.test(base) || /(^|\/)tests\/.*\.py$/.test(path)
+      );
     case "ts":
     case "js":
+      // Includes the mocha `test/` directory convention (common in Multi-SWE-bench JS
+      // corpora) alongside the jest/vitest `.test.`/`.spec.`/`__tests__` conventions.
       return (
-        /\.(test|spec)\.(ts|tsx|js)$/.test(base) || /(^|\/)__tests__\/.*\.(ts|tsx|js)$/.test(path)
+        /\.(test|spec)\.(ts|tsx|js)$/.test(base) ||
+        /(^|\/)__tests__\/.*\.(ts|tsx|js)$/.test(path) ||
+        /(^|\/)test\/.*\.(ts|tsx|js)$/.test(path)
       );
     case "go":
       return /_test\.go$/.test(base);
     case "java":
       return /(^|\/)src\/test\/java\/.*\.java$/.test(path);
     case "rust":
+      // TODO(phase-2 rust): also detect #[cfg(test)]-bearing files (inline unit tests) —
+      // isTestPath currently only matches tests/*.rs (brief spec gap; rust not in the
+      // TS+Python pilot).
       return /(^|\/)tests\/.*\.rs$/.test(path);
     default:
       return false;
@@ -138,22 +159,28 @@ function isUnrunnableTestCommand(component: ProbeComponent | undefined): boolean
 
 /** PURE. `probe` taxonomy check: true iff the setup profile's sole/first component has no
  * runnable `commands.test` (absent, or the `{unavailable: true}` sentinel `styre setup`
- * writes for a detected-but-unrunnable toolchain — the §4-anticipated Python case). */
+ * writes for a detected-but-unrunnable toolchain — the §4-anticipated Python case).
+ * Inspecting only `components[0]` is valid under the single-stack pilot assumption; a
+ * multi-component (polyglot) profile would need a different rule. */
 function isProbeProfile(profile: ProbeProfile): boolean {
   return isUnrunnableTestCommand(profile.components?.[0]);
 }
 
 /** PURE. Derives `taxonomy` from `outcome` — NEVER the process exit code (design §9a: exit
  * codes lie, e.g. `blocked`/`no-progress` both exit 1 but still emit a `summary` first).
- * Checked in this order: `parked` (outcome==="parked", which styre only reaches via the
- * exit-75 park path) > `loop-exhausted` (outcome ∈ {blocked, no-progress}) > `probe` (the
- * setup profile can't run any test at all — an environment failure, not a run failure) >
- * pending (`undefined` — Task 11 resolves this to `resolved`/`opened-but-unresolved` from
- * the score). */
-function deriveTaxonomy(outcome: string | undefined, profile: ProbeProfile): string | undefined {
+ * Only called when a valid `summary` exists (the no-summary case is handled upstream in
+ * `collect` as `infra`, before `outcome` is even available). Checked in this order:
+ * `parked` (outcome==="parked", which styre only reaches via the exit-75 park path) >
+ * `probe` (the setup profile can't run any test at all — an environment failure, not a
+ * run failure; checked BEFORE loop-exhausted so an unrunnable-profile run that ends
+ * blocked/no-progress is excluded as `probe` rather than counted as a styre loop failure,
+ * which would deflate the resolve rate) > `loop-exhausted` (outcome ∈ {blocked,
+ * no-progress}) > pending (`undefined` — Task 11 resolves this to
+ * `resolved`/`opened-but-unresolved` from the score). */
+function deriveTaxonomy(outcome: string, profile: ProbeProfile): string | undefined {
   if (outcome === "parked") return "parked";
-  if (outcome === "blocked" || outcome === "no-progress") return "loop-exhausted";
   if (isProbeProfile(profile)) return "probe";
+  if (outcome === "blocked" || outcome === "no-progress") return "loop-exhausted";
   return undefined;
 }
 
@@ -161,11 +188,26 @@ function deriveTaxonomy(outcome: string | undefined, profile: ProbeProfile): str
  * PURE. Parses styre's NDJSON stdout into a `TaskRecord` fragment, derives the failure
  * taxonomy, and extracts/strips the PR diff for downstream scoring/review.
  *
+ * `self_authored_test` is computed from ADDED test paths only (`addedPaths`, not
+ * `touchedPaths`) — reconciled with `scorer.run_self_test` (Task 3), which keys on
+ * newly-added test paths. A diff that only MODIFIES an existing test file does not count:
+ * it isn't a test styre authored, and counting it would both inflate the headline
+ * self-authored-test rate and get scored by this module's weaker pass/fail approximation
+ * instead of the rigorous per-test runner.
+ *
  * `self_test_passed` is a documented APPROXIMATION ("passed under styre's own verify"): styre
  * only opens a PR when its own verify step — which runs the test it just wrote — is green, so
  * `self_authored_test && pr_opened` stands in for a rigorous per-test check until the pipeline
  * wires `scorer.run_self_test` (Task 11). `null` when no self-authored test exists at all (the
  * approximation doesn't apply, so it must not silently read as `false`).
+ *
+ * `taxonomy: "infra"` is set whenever `parseLastSummary` finds no VALID summary event at
+ * all — either styre hard-crashed before emitting one, or the only `summary`-typed line
+ * was malformed (missing `outcome`) and `isSummaryEvent` rejected it. Per design §9a, a
+ * summary-less crash is infra, not a pending/unscored record: returning a fragment with no
+ * `outcome`/`taxonomy` would let a later stage mis-score it as something else. This check
+ * short-circuits before `deriveTaxonomy` runs, since `deriveTaxonomy` needs a real
+ * `outcome` string to work from.
  */
 export function collect(
   ndjson: string,
@@ -175,27 +217,30 @@ export function collect(
 ): Partial<TaskRecord> {
   const summary = parseLastSummary(ndjson);
   const strippedDiff = extractStrippedDiff(prDiff);
-  const touched = touchedPaths(strippedDiff);
-  const self_authored_test = touched.some((p) => isTestPath(p, ctx.language));
+  const added = addedPaths(strippedDiff);
+  const self_authored_test = added.some((p) => isTestPath(p, ctx.language));
   const self_test_passed = self_authored_test ? ctx.pr_opened : null;
 
   const result: Partial<TaskRecord> = { self_authored_test, self_test_passed };
 
-  const taxonomy = deriveTaxonomy(summary?.outcome, profile);
+  if (!summary) {
+    result.taxonomy = "infra";
+    return result;
+  }
+
+  const taxonomy = deriveTaxonomy(summary.outcome, profile);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
-  if (summary) {
-    result.ticks = summary.ticks;
-    result.cycle_count = summary.cycle_count;
-    result.escalation_count = summary.escalation_count;
-    result.escalation_reasons = summary.escalation_reasons;
-    result.outcome = summary.outcome;
-    result.status = summary.status;
-    result.cost_usd = summary.cost_usd;
-    result.tokens_in = summary.tokens_in;
-    result.tokens_out = summary.tokens_out;
-    result.parked = summary.outcome === "parked";
-  }
+  result.ticks = summary.ticks;
+  result.cycle_count = summary.cycle_count;
+  result.escalation_count = summary.escalation_count;
+  result.escalation_reasons = summary.escalation_reasons;
+  result.outcome = summary.outcome;
+  result.status = summary.status;
+  result.cost_usd = summary.cost_usd;
+  result.tokens_in = summary.tokens_in;
+  result.tokens_out = summary.tokens_out;
+  result.parked = summary.outcome === "parked";
 
   return result;
 }

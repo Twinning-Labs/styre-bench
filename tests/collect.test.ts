@@ -220,11 +220,25 @@ describe("isTestPath: per-language matcher", () => {
     expect(isTestPath("tests/x.test.ts", "python")).toBe(false);
   });
 
+  test("python: *_test.py (pytest's other default discovery pattern) matches", () => {
+    expect(isTestPath("pkg/foo_test.py", "python")).toBe(true);
+  });
+
+  test("python: tests/conftest.py and tests/__init__.py are NOT self-authored tests", () => {
+    expect(isTestPath("tests/conftest.py", "python")).toBe(false);
+    expect(isTestPath("tests/__init__.py", "python")).toBe(false);
+  });
+
   test("ts/js: *.test.ts, *.spec.ts, __tests__/*.ts match", () => {
     expect(isTestPath("src/x.test.ts", "ts")).toBe(true);
     expect(isTestPath("src/x.spec.ts", "ts")).toBe(true);
     expect(isTestPath("src/__tests__/x.ts", "ts")).toBe(true);
     expect(isTestPath("src/x.ts", "ts")).toBe(false);
+  });
+
+  test("js: mocha test/ directory convention matches", () => {
+    expect(isTestPath("test/foo.js", "js")).toBe(true);
+    expect(isTestPath("test/nested/foo.js", "js")).toBe(true);
   });
 
   test("go: *_test.go matches", () => {
@@ -240,5 +254,99 @@ describe("isTestPath: per-language matcher", () => {
   test("rust: tests/** matches", () => {
     expect(isTestPath("tests/foo.rs", "rust")).toBe(true);
     expect(isTestPath("src/foo.rs", "rust")).toBe(false);
+  });
+});
+
+describe("collect: self_authored_test uses ADDED test paths, not touched", () => {
+  test("diff that only MODIFIES an existing test file (no new file) -> self_authored_test false", () => {
+    const modifyOnlyTestDiff = [
+      "diff --git a/tests/x.test.ts b/tests/x.test.ts",
+      "index abc..def 100644",
+      "--- a/tests/x.test.ts",
+      "+++ b/tests/x.test.ts",
+      "@@ -1,3 +1,3 @@",
+      ' test("x returns 2", () => {',
+      "-  expect(x()).toBe(1);",
+      "+  expect(x()).toBe(2);",
+      " });",
+      "",
+    ].join("\n");
+    const ndjson = summaryLine({ outcome: "pr-ready" });
+    const rec = collect(ndjson, modifyOnlyTestDiff, RUNNABLE_PROFILE, {
+      language: "ts",
+      pr_opened: true,
+    });
+    expect(rec.self_authored_test).toBe(false);
+  });
+
+  test("diff that ADDS a new test file -> self_authored_test true", () => {
+    const addedTestDiff = [
+      "diff --git a/tests/y.test.ts b/tests/y.test.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/tests/y.test.ts",
+      "@@ -0,0 +1,3 @@",
+      '+test("y", () => {});',
+      "",
+    ].join("\n");
+    const ndjson = summaryLine({ outcome: "pr-ready" });
+    const rec = collect(ndjson, addedTestDiff, RUNNABLE_PROFILE, {
+      language: "ts",
+      pr_opened: true,
+    });
+    expect(rec.self_authored_test).toBe(true);
+  });
+});
+
+describe("collect: no-summary / malformed-summary -> taxonomy infra", () => {
+  test("ndjson with NO summary event at all -> taxonomy infra", () => {
+    const ndjson = [
+      JSON.stringify({ type: "event", kind: "transition" }),
+      JSON.stringify({ type: "dispatch", outcome: "ok" }),
+    ].join("\n");
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.outcome).toBeUndefined();
+  });
+
+  test("ndjson whose only summary line lacks `outcome` -> taxonomy infra, not a bogus record", () => {
+    const malformedSummary = JSON.stringify({ type: "summary", ticks: 5, status: "ok" });
+    const rec = collect(malformedSummary, PR_DIFF, RUNNABLE_PROFILE, {
+      language: "ts",
+      pr_opened: false,
+    });
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.outcome).toBeUndefined();
+    expect(rec.ticks).toBeUndefined();
+  });
+
+  test("a corrupt (non-JSON) line among otherwise-valid lines is skipped, collection still succeeds", () => {
+    const ndjson = ["not json at all {{{", summaryLine({ outcome: "pr-ready", ticks: 7 })].join(
+      "\n",
+    );
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: true });
+    expect(rec.taxonomy).toBeUndefined();
+    expect(rec.ticks).toBe(7);
+    expect(rec.outcome).toBe("pr-ready");
+  });
+});
+
+describe("collect: taxonomy ordering — probe before loop-exhausted", () => {
+  test("unrunnable profile + outcome blocked -> taxonomy probe, not loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "blocked" });
+    const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
+      language: "ts",
+      pr_opened: false,
+    });
+    expect(rec.taxonomy).toBe("probe");
+  });
+
+  test("unrunnable profile + outcome no-progress -> taxonomy probe, not loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "no-progress" });
+    const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
+      language: "ts",
+      pr_opened: false,
+    });
+    expect(rec.taxonomy).toBe("probe");
   });
 });
