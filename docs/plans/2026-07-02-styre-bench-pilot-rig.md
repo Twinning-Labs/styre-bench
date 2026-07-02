@@ -24,6 +24,7 @@
 - **Reproducibility:** every report records dataset version, sampling seed, **styre commit**, and cohort (web-off/on).
 - **Pilot scope:** TS + Python × {Easy, Medium, Hard} = 6 instances. Ruby/PHP out (no corpus); multi-stack out (deferred).
 - **Determinism where the exit code lies:** classify a run by `summary.outcome`, never the exit code (design §9a).
+- **A/B label-neutrality (Task-9 crux):** the PR diff fed to the reviewers must be a **bare tree diff** (`git diff <base>..<head>`) — NO commit messages / `Co-Authored-By: Claude` / `Claude-Session:` trailers (styre's commits carry these; they're a hard label tell that `extractStrippedDiff` does NOT remove). And the A/B order is keyed per-instance: `abReview(issue, styreDiff, fixPatch, inst.id, cfg.seed)` — never the run seed alone (a constant seed pins styre to one A/B slot for the whole run → position bias).
 
 ---
 
