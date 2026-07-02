@@ -1,0 +1,158 @@
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { $ } from "bun";
+import type { Cohort } from "./types";
+
+/** Path (relative to a styre checkout root) of the file that carries the WebSearch/WebFetch
+ *  capability grant this patch removes. Confirmed against the styre repo's
+ *  src/dispatch/tool-allowlists.ts: a `design:dispatch` allowlist array literal containing
+ *  the string literals "WebSearch" and "WebFetch" among other tool names. */
+const ALLOWLIST_FILE_REL = "src/dispatch/tool-allowlists.ts";
+
+/**
+ * Removes every occurrence of the quoted literal `"<tool>"` from `text`, preferring to also
+ * consume an adjacent comma so the surrounding array literal stays syntactically valid
+ * (no dangling/double commas). Order of preference: a comma BEFORE the literal (the common
+ * case — the literal is a non-first array element, e.g. `..., "WebSearch"`), then a comma
+ * AFTER (the literal is the first element, e.g. `"WebSearch", ...`), then the bare literal
+ * as a last resort (single-element array — not the real styre shape today, but handled
+ * rather than left to produce broken syntax).
+ */
+function removeToolLiteral(text: string, tool: string): string {
+  const commaBefore = `, "${tool}"`;
+  const commaAfter = `"${tool}", `;
+  const bare = `"${tool}"`;
+  if (text.includes(commaBefore)) return text.split(commaBefore).join("");
+  if (text.includes(commaAfter)) return text.split(commaAfter).join("");
+  if (text.includes(bare)) return text.split(bare).join("");
+  return text;
+}
+
+/**
+ * PURE. Removes the `"WebSearch"` and `"WebFetch"` string literals from the text of
+ * styre's `src/dispatch/tool-allowlists.ts`, leaving every other tool/allowlist entry
+ * untouched. This is the load-bearing web-off guarantee for the "web-off" cohort: with
+ * these literals gone, `claude -p --allowed-tools` is never handed either tool for any
+ * step, so the dispatched agent cannot fetch the real fix off the web via styre's own
+ * allowlist (belt-and-suspenders atop the container's `--disallowedTools` — see Task 6).
+ *
+ * THROWS if neither literal is present anywhere in `text` — a styre refactor that renames,
+ * relocates, or restructures the allowlist must never silently no-op this guarantee; a
+ * missing anchor is treated as a hard failure, not a no-op success.
+ */
+export function applyWebOffPatch(fileText: string): string {
+  const hasWebSearch = fileText.includes('"WebSearch"');
+  const hasWebFetch = fileText.includes('"WebFetch"');
+  if (!hasWebSearch && !hasWebFetch) {
+    throw new Error(
+      `applyWebOffPatch: neither the "WebSearch" nor the "WebFetch" string literal was found in ${ALLOWLIST_FILE_REL} — the web-off patch anchor is missing (styre likely refactored its tool-allowlist shape). Refusing to silently no-op the web-off guarantee; update this patch to match the new shape before re-running.`,
+    );
+  }
+  let patched = fileText;
+  patched = removeToolLiteral(patched, "WebSearch");
+  patched = removeToolLiteral(patched, "WebFetch");
+  return patched;
+}
+
+export interface BuildStyreConfig {
+  styreRepo: string;
+  styreCommit: string;
+  cohort: Cohort;
+}
+
+export interface BuildStyreResult {
+  binaryPath: string;
+  commit: string;
+  webTools: "off" | "on";
+}
+
+/** Side-effecting steps, split out so `buildStyre`'s cohort-branching logic (does it patch
+ *  the allowlist or not, in what order) can be unit-tested with stubs — no network, no
+ *  clone, no compile. The default implementations (used in production and the RUN_BUILD=1
+ *  gated tests) do the real git/bun/build.sh work. */
+export interface BuildStyreDeps {
+  clone: (repo: string, cacheDir: string) => Promise<void>;
+  checkout: (cacheDir: string, commit: string) => Promise<void>;
+  bunInstall: (cacheDir: string) => Promise<void>;
+  readAllowlist: (cacheDir: string) => Promise<string>;
+  writeAllowlist: (cacheDir: string, text: string) => Promise<void>;
+  runBuildScript: (cacheDir: string) => Promise<void>;
+}
+
+const defaultDeps: BuildStyreDeps = {
+  async clone(repo, cacheDir) {
+    if (existsSync(path.join(cacheDir, ".git"))) return; // reuse an existing cache dir
+    await mkdir(path.dirname(cacheDir), { recursive: true });
+    await $`git clone --no-checkout ${repo} ${cacheDir}`;
+  },
+  async checkout(cacheDir, commit) {
+    // Fetch first so a commit not already in the shallow/default clone is reachable; ignore
+    // fetch failures (e.g. the commit is already present) and let checkout be the real check.
+    await $`git -C ${cacheDir} fetch origin ${commit}`.quiet().nothrow();
+    await $`git -C ${cacheDir} checkout ${commit}`;
+  },
+  async bunInstall(cacheDir) {
+    // REQUIRED before `bun build --compile`: a fresh --no-checkout clone has no
+    // node_modules, and the compile bundles from node_modules — it fails without this.
+    await $`bun install --frozen-lockfile`.cwd(cacheDir);
+  },
+  async readAllowlist(cacheDir) {
+    return readFile(path.join(cacheDir, ALLOWLIST_FILE_REL), "utf8");
+  },
+  async writeAllowlist(cacheDir, text) {
+    // Applied to the local checkout ONLY — never committed or pushed back to styre.
+    await writeFile(path.join(cacheDir, ALLOWLIST_FILE_REL), text, "utf8");
+  },
+  async runBuildScript(cacheDir) {
+    await $`bash scripts/build.sh`.cwd(cacheDir);
+  },
+};
+
+export interface BuildStyreOpts {
+  /** Directory the styre checkout is cloned/built into. Defaults to a commit-scoped cache
+   *  dir under .cache/, so re-runs at the same commit reuse the clone. */
+  cacheDir?: string;
+  /** Override any subset of the side-effecting steps (tests only — production always uses
+   *  the real git/bun/build.sh implementations). */
+  deps?: Partial<BuildStyreDeps>;
+}
+
+/**
+ * Builds styre from a pinned commit into a single self-contained binary.
+ *
+ * 1. `git clone --no-checkout` into a cache dir + `git checkout <styreCommit>`.
+ * 2. `bun install --frozen-lockfile` (required — see `bunInstall` above).
+ * 3. If `cfg.cohort === "web-off"`, applies `applyWebOffPatch` to the local checkout's
+ *    `src/dispatch/tool-allowlists.ts` (never committed/pushed to styre). `"web-on"` skips
+ *    this step entirely — the file is left byte-for-byte untouched.
+ * 4. Runs `scripts/build.sh` (bun `--compile` + macOS ad-hoc re-sign) and returns the
+ *    resulting binary path (`<cacheDir>/dist/styre`, matching `build.sh`'s `OUTFILE`
+ *    default).
+ */
+export async function buildStyre(
+  cfg: BuildStyreConfig,
+  opts: BuildStyreOpts = {},
+): Promise<BuildStyreResult> {
+  const deps: BuildStyreDeps = { ...defaultDeps, ...opts.deps };
+  const cacheDir =
+    opts.cacheDir ?? path.join(process.cwd(), ".cache", "styre-build", cfg.styreCommit);
+
+  await deps.clone(cfg.styreRepo, cacheDir);
+  await deps.checkout(cacheDir, cfg.styreCommit);
+  await deps.bunInstall(cacheDir);
+
+  if (cfg.cohort === "web-off") {
+    const original = await deps.readAllowlist(cacheDir);
+    const patched = applyWebOffPatch(original);
+    await deps.writeAllowlist(cacheDir, patched);
+  }
+
+  await deps.runBuildScript(cacheDir);
+
+  return {
+    binaryPath: path.join(cacheDir, "dist", "styre"),
+    commit: cfg.styreCommit,
+    webTools: cfg.cohort === "web-off" ? "off" : "on",
+  };
+}
