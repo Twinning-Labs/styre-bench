@@ -12,10 +12,12 @@ export interface Instance {
   fail_to_pass: string[];
   pass_to_pass: string[];
   merge_date?: string; // ISO; for cutoff split
+  fix_patch: string; // FIREWALL: the accepted human fix — scorer/reviewer ONLY, NEVER seeded/mounted into styre's env
+  test_patch: string; // FIREWALL: the held-out regression tests — scorer ONLY, NEVER seeded/mounted into styre's env
 }
 export interface TaskRecord {
   instance: string;
-  language: string;
+  language: "ts" | "python";
   difficulty: Difficulty;
   styre_commit: string;
   cohort: Cohort;
@@ -39,5 +41,6 @@ export interface TaskRecord {
   ab_preference: "A(styre)" | "B(human)" | "tie" | null;
   ab_notes: string | null;
   suspected_leak: boolean;
+  leak_reasons: string[]; // from detect_leak; e.g. ["high-similarity"] or ["transcript-unavailable"] — Task 10 validity panel needs this to state whether the URL-scan ran
   taxonomy: string;
 }
