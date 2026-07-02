@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,17 +12,24 @@ import type { Instance } from "./types";
  * Pinned Claude Code CLI version installed inside the benchmark container (Step 1 of the
  * entrypoint). SWE-bench/Multi-SWE-bench images do NOT ship `claude` — styre shells out to
  * `claude -p` for every agent step, including the mandatory `styre setup` Opus call — so a
- * version must be pinned here before ANY live run. **UNVERIFIED in this session** (no
- * container was actually run): confirm this resolves via the native installer
+ * version must be pinned here before ANY live run. **KNOWN-BROKEN-UNTIL-LIVE** (no container
+ * was actually run in this session): confirm this resolves via the native installer
  * (`curl -fsSL https://claude.ai/install.sh | bash -s <version>`) or `npm install -g
- * @anthropic-ai/claude-code@<version>` before the first RUN_LIVE=1 pass, and bump it here.
+ * @anthropic-ai/claude-code@<version>` before the first RUN_LIVE=1 pass, and bump it here —
+ * verify-at-Task-7-smoke. (Separately: the `-p`/`--print` + `--output-format stream-json`
+ * requiring `--verbose` — see the wrapper in `buildEntrypoint` step 2 — IS confirmed against
+ * Anthropic's CLI docs; only the exact behavior of *this pinned version* is unverified.)
  */
 export const CLAUDE_CLI_VERSION = "2.0.1";
 
 /** SWE-bench convention: the pre-built instance image has the repo already checked out here.
  *  **UNVERIFIED for Multi-SWE-bench** (the TS/JS/Go/Java/Rust corpus) in this session — its
  *  images may use a different path; confirm per-corpus before a live run and override via
- *  `RunStyreConfig.repoDirInImage` if it differs. */
+ *  `RunStyreConfig.repoDirInImage` if it differs.
+ *  **KNOWN-BROKEN-UNTIL-LIVE for `webOffProbe` specifically**: see that function's doc — a
+ *  probe image with no repo checked out at this path makes `buildEntrypoint` step 4 die before
+ *  styre ever runs, which is why `webOffProbe` now requires an explicit, repo-provisioned
+ *  `probeImage` rather than defaulting to a vanilla image. */
 export const DEFAULT_REPO_DIR_IN_IMAGE = "/testbed";
 
 // Fixed container-side paths — compile-time constants, never derived from instance/seed data,
@@ -74,16 +82,23 @@ export interface BuildEntrypointInput {
  * 2. Installs a `claude` WRAPPER at `WRAPPER_PATH`, on a directory prepended to PATH so it
  *    shadows the real CLI for every subsequent invocation (including inside `styre setup`
  *    and `styre run`, which shell out to the bare `claude` command). The wrapper: strips any
- *    `--output-format <fmt>` pair the caller passed, forces `--output-format stream-json`,
- *    tees the full NDJSON event stream to `CONTAINER_TRANSCRIPT_PATH` (append mode — the
- *    transcript accumulates across every `claude` call in the run, which is what the leak
- *    detector's URL-scan needs), and prints only the LAST stream-json line (the terminal
+ *    `--output-format <fmt>` pair and any bare `--verbose` flag the caller passed, then forces
+ *    `--output-format stream-json --verbose`. `--verbose` is REQUIRED alongside
+ *    `--output-format stream-json` in `-p`/`--print` mode — Claude Code errors without it
+ *    (confirmed against Anthropic's CLI docs; the exact behavior for the pinned
+ *    `CLAUDE_CLI_VERSION` is still KNOWN-BROKEN-UNTIL-LIVE, verify-at-Task-7-smoke — see that
+ *    constant's doc). `--verbose` is also what makes stream-json emit the intermediate
+ *    `assistant`/`tool_use` lines the leak detector's WebFetch URL-scan (and the web-off
+ *    probe's liveness gate, `hasAgentActivity`) depend on — without it only the terminal
+ *    `result` event would stream. The wrapper tees the full NDJSON event stream to
+ *    `CONTAINER_TRANSCRIPT_PATH` (append mode — the transcript accumulates across every
+ *    `claude` call in the run) and prints only the LAST stream-json line (the terminal
  *    `result` event) to stdout — matching the shape `claude.ts`'s `parseClaudeJson` expects
- *    from `--output-format json` (UNVERIFIED against a real CLI run in this session: confirmed
- *    only by inspection of styre's `src/agent/providers/claude.ts`, which itself notes its
- *    flag/field assumptions are "verified against a real `claude` run in the Task 7 smoke" —
- *    re-verify this wrapper the same way before trusting it live). Exit code is passed through
- *    via `PIPESTATUS[0]`, not the tee/tail tail-of-pipe status.
+ *    from `--output-format json` (KNOWN-BROKEN-UNTIL-LIVE: confirmed only by inspection of
+ *    styre's `src/agent/providers/claude.ts`, which itself notes its flag/field assumptions
+ *    are "verified against a real `claude` run in the Task 7 smoke" — re-verify this wrapper
+ *    the same way before trusting it live). Exit code is passed through via `PIPESTATUS[0]`,
+ *    not the tee/tail tail-of-pipe status.
  * 3. `git config --global user.email/user.name` — else styre's first implement commit dies in
  *    a bare image (no committer identity).
  * 4. Points the ALREADY-checked-out repo's `origin` at `seed.repoUrl` and resets the local
@@ -139,9 +154,10 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     'for a in "$@"; do',
     "  if $skip_next; then skip_next=false; continue; fi",
     '  if [ "$a" = "--output-format" ]; then skip_next=true; continue; fi',
+    '  if [ "$a" = "--verbose" ]; then continue; fi',
     '  args+=("$a")',
     "done",
-    'args+=("--output-format" "stream-json")',
+    'args+=("--output-format" "stream-json" "--verbose")',
     "set +e",
     '"$REAL_CLAUDE" "${args[@]}" | tee -a "$TRANSCRIPT_PATH" | tail -n 1',
     'wrapper_exit="${PIPESTATUS[0]}"',
@@ -226,7 +242,9 @@ export interface RunStyreResult {
 
 export interface RunStyreConfig {
   /** HOST directory the container's `/out` is mounted from. Default: a fresh temp dir per
-   *  call (`os.tmpdir()/styre-bench-run-<instance-id>-<ts>`). */
+   *  call (`os.tmpdir()/styre-bench-run-<instance-id>-<ts>-<rand>`) — the trailing random
+   *  suffix (Task-6 review fix) avoids a `Date.now()` collision under rapid re-invocation of
+   *  the same instance id (e.g. retries within the same millisecond). */
   outDir?: string;
   repoDirInImage?: string;
   claudeCliVersion?: string;
@@ -260,6 +278,12 @@ const defaultDeps: RunStyreDeps = {
 
 export interface RunStyreOpts {
   deps?: Partial<RunStyreDeps>;
+}
+
+/** Short random hex suffix for the default `outDir` (Task-6 review fix) — `Date.now()` alone
+ *  can collide under rapid re-invocation of the same instance id. */
+function randomSuffix(): string {
+  return randomBytes(4).toString("hex");
 }
 
 function resolveCreds(overrides: Partial<RunStyreCreds> | undefined): RunStyreCreds {
@@ -299,7 +323,9 @@ export async function runStyre(
 ): Promise<RunStyreResult> {
   const deps: RunStyreDeps = { ...defaultDeps, ...opts.deps };
 
-  const outDir = cfg.outDir ?? path.join(os.tmpdir(), `styre-bench-run-${inst.id}-${Date.now()}`);
+  const outDir =
+    cfg.outDir ??
+    path.join(os.tmpdir(), `styre-bench-run-${inst.id}-${Date.now()}-${randomSuffix()}`);
   await deps.ensureOutDir(outDir);
 
   const creds = resolveCreds(cfg.creds);
@@ -380,6 +406,37 @@ export function detectWebReachable(diff: string, transcript: string): boolean {
   return forward.test(transcript) || backward.test(transcript);
 }
 
+const ACTIVITY_MARKERS = ['"type":"assistant"', '"type":"tool_use"'];
+
+/**
+ * PURE. Liveness gate for the web-off probe (Task-6 review fix). A `webReachable: false` result
+ * is only trustworthy if the agent actually ran; otherwise a crashed container, a dead
+ * entrypoint, or a broken `claude` wrapper produces an empty/inert transcript that looks
+ * identical to a correctly-blocked web-off build. Returns `true` iff the transcript shows
+ * evidence of at least one real assistant turn or tool invocation — checked both structurally
+ * (parses each NDJSON line, greps the serialized event for an `assistant`/`tool_use` `type`)
+ * and, as a fallback, as raw text (covers a non-NDJSON or truncated transcript).
+ */
+export function hasAgentActivity(transcript: string): boolean {
+  if (transcript.trim().length === 0) return false;
+
+  for (const rawLine of transcript.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      const serialized = JSON.stringify(parsed);
+      if (ACTIVITY_MARKERS.some((marker) => serialized.includes(marker))) {
+        return true;
+      }
+    } catch {
+      // not a JSON line — fall through to the raw-text fallback below
+    }
+  }
+
+  return /"type"\s*:\s*"(assistant|tool_use)"/.test(transcript);
+}
+
 export interface WebOffProbeConfig {
   benchGithubOrg: string;
   linearProjectId: string;
@@ -387,10 +444,21 @@ export interface WebOffProbeConfig {
    *  is irrelevant, only used as a checkout target. Default: octocat/Hello-World. */
   probeRepo?: string;
   probeBaseCommit?: string;
-  /** A generic base image (not a SWE-bench instance image) the probe container runs in —
-   *  needs only git + whatever `buildEntrypoint`'s claude-install step needs (curl or npm).
-   *  Default: "node:20-bookworm". */
-  probeImage?: string;
+  /**
+   * A container image with a REAL git repo already checked out at
+   * `runStyreConfig.repoDirInImage` (default `DEFAULT_REPO_DIR_IN_IMAGE`, "/testbed") — REQUIRED,
+   * no default (Task-6 review fix). `buildEntrypoint`'s step 4 unconditionally `cd`s into
+   * `repoDirInImage`; a repo-less image (e.g. a vanilla "node:20-bookworm") dies there before
+   * styre ever runs, which previously made this probe silently report a false
+   * `webReachable: false` for every call. `webOffProbe` throws if this is omitted.
+   *
+   * KNOWN-BROKEN-UNTIL-LIVE: no such image is wired here yet. Task 11 owns the real path —
+   * either reuse `runStyre`'s throwaway-repo flow with a proper image, or provision a minimal
+   * git repo at `repoDirInImage` inside the probe's own container. Until then, callers must
+   * supply this explicitly (and keep it consistent with `runStyreConfig.repoDirInImage` if that
+   * is also overridden away from the "/testbed" default).
+   */
+  probeImage: string;
   runStyreConfig?: RunStyreConfig;
 }
 
@@ -409,7 +477,11 @@ export interface WebOffProbeDeps {
     cfg: RunStyreConfig,
   ) => Promise<RunStyreResult>;
   readDiff: (result: RunStyreResult, seed: RunSeed) => Promise<string>;
-  readTranscript: (transcriptPath: string) => Promise<string>;
+  /** Returns `null` (Task-6 review fix), not `""`, when the transcript file is missing or
+   *  unreadable — an infra failure (crashed container, missing wrapper, bad mount) the caller
+   *  must treat as "cannot certify web-off", never as "no web access" / "no activity". Returns
+   *  `""` only when the file exists and is genuinely empty. */
+  readTranscript: (transcriptPath: string) => Promise<string | null>;
 }
 
 const defaultWebOffProbeDeps: WebOffProbeDeps = {
@@ -423,7 +495,13 @@ const defaultWebOffProbeDeps: WebOffProbeDeps = {
     return "";
   },
   async readTranscript(transcriptPath) {
-    return readFile(transcriptPath, "utf8").catch(() => "");
+    // See the interface doc: missing/unreadable (any error, e.g. ENOENT) -> null, an infra
+    // failure. A file that exists and is empty resolves normally with content "".
+    try {
+      return await readFile(transcriptPath, "utf8");
+    } catch {
+      return null;
+    }
   },
 };
 
@@ -440,12 +518,39 @@ export interface WebOffProbeOpts {
  * `applyWebOffPatch`) this MUST be `false`; a `true` result means the web-off guarantee has a
  * hole (allowlist patch didn't take, or a belt-and-suspenders layer — container egress /
  * stripped `.claude/settings.json` — is the only thing actually stopping it).
+ *
+ * BEHAVIORAL GUARANTEE, not vacuous (Task-6 review fix). A `webReachable: false` result is only
+ * trustworthy if the run actually executed:
+ * - Throws if `cfg.probeImage` is omitted — see that field's doc; there is no safe default
+ *   image with a repo pre-checked-out at `repoDirInImage`.
+ * - Throws if the transcript file is missing/unreadable (`readTranscript` returned `null`) —
+ *   an infra failure, not a "no activity" signal.
+ * - Before trusting a `false` detection, requires liveness: `result.exitCode === 0` AND
+ *   `hasAgentActivity(transcript)`. If either fails, throws `"web-off probe did not execute —
+ *   cannot certify web-off"` instead of silently returning `false`.
+ *
+ * POSITIVE CONTROL (not yet wired here — documented, not skipped): a `false` result alone
+ * proves nothing without a paired positive-control run — the SAME probe, against a web-ON
+ * build, MUST yield `webReachable: true`. Without that paired run you cannot distinguish "the
+ * allowlist patch works" from "the probe itself is broken and always returns false". See the
+ * `RUN_LIVE=1`-gated placeholder test in `tests/run-task.test.ts`; Task 11's live gated pass is
+ * expected to run both and assert the contrast.
  */
 export async function webOffProbe(
   binaryPath: string,
   cfg: WebOffProbeConfig,
   opts: WebOffProbeOpts = {},
 ): Promise<{ webReachable: boolean }> {
+  if (!cfg.probeImage) {
+    throw new Error(
+      "webOffProbe: cfg.probeImage is required (KNOWN-BROKEN-UNTIL-LIVE, see that field's " +
+        'doc) -- there is no safe default: a repo-less image (e.g. "node:20-bookworm") makes ' +
+        "buildEntrypoint's step 4 `cd` into repoDirInImage and die before styre ever runs, " +
+        "which used to surface as a silent, wrong `webReachable: false`. Pass an image with a " +
+        'real repo checked out at cfg.runStyreConfig.repoDirInImage (default "/testbed").',
+    );
+  }
+
   const deps: WebOffProbeDeps = { ...defaultWebOffProbeDeps, ...opts.deps };
 
   const inst: Instance = {
@@ -455,7 +560,7 @@ export async function webOffProbe(
     repo: cfg.probeRepo ?? "octocat/Hello-World",
     base_commit: cfg.probeBaseCommit ?? "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
     problem_statement: WEB_OFF_PROBE_STATEMENT,
-    image: cfg.probeImage ?? "node:20-bookworm",
+    image: cfg.probeImage,
     fail_to_pass: [],
     pass_to_pass: [],
     fix_patch: "",
@@ -467,10 +572,21 @@ export async function webOffProbe(
   const seed: RunSeed = { ...seedGh, ident: seedLi.ident };
 
   const result = await deps.runStyre(inst, seed, binaryPath, cfg.runStyreConfig ?? {});
-  const [diff, transcript] = await Promise.all([
-    deps.readDiff(result, seed),
-    deps.readTranscript(result.transcriptPath),
-  ]);
 
-  return { webReachable: detectWebReachable(diff, transcript) };
+  const transcript = await deps.readTranscript(result.transcriptPath);
+  if (transcript === null) {
+    throw new Error(
+      "web-off probe: transcript file missing or unreadable -- infra failure (crashed " +
+        "container, missing wrapper, bad mount), not a web-off signal; cannot certify web-off",
+    );
+  }
+
+  const diff = await deps.readDiff(result, seed);
+  const webReachable = detectWebReachable(diff, transcript);
+
+  if (!webReachable && (result.exitCode !== 0 || !hasAgentActivity(transcript))) {
+    throw new Error("web-off probe did not execute — cannot certify web-off");
+  }
+
+  return { webReachable };
 }

@@ -6,6 +6,7 @@ import {
   buildDockerArgs,
   buildEntrypoint,
   detectWebReachable,
+  hasAgentActivity,
   runStyre,
   webOffProbe,
 } from "../orchestrator/run-task";
@@ -74,9 +75,9 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).not.toContain(`bash -s ${CLAUDE_CLI_VERSION}`);
   });
 
-  test("the wrapper forces --output-format stream-json and tees to the transcript path", () => {
+  test("the wrapper forces --output-format stream-json --verbose and tees to the transcript path", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
-    expect(script).toContain('args+=("--output-format" "stream-json")');
+    expect(script).toContain('args+=("--output-format" "stream-json" "--verbose")');
     expect(script).toContain('tee -a "$TRANSCRIPT_PATH"');
     expect(script).toContain('TRANSCRIPT_PATH="/out/transcript.jsonl"');
   });
@@ -84,6 +85,11 @@ describe("buildEntrypoint (pure)", () => {
   test("the wrapper strips any caller-supplied --output-format before forcing stream-json", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain('if [ "$a" = "--output-format" ]; then skip_next=true; continue; fi');
+  });
+
+  test("the wrapper strips any caller-supplied --verbose before forcing it back on (robustness)", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    expect(script).toContain('if [ "$a" = "--verbose" ]; then continue; fi');
   });
 
   test("the wrapper passes through all other args and the exit code (via PIPESTATUS, not tee's)", () => {
@@ -357,12 +363,64 @@ describe("detectWebReachable (pure — the webOffProbe detection logic)", () => 
   });
 });
 
+describe("hasAgentActivity (pure — the webOffProbe liveness gate)", () => {
+  test("true for a transcript containing a structured assistant event", () => {
+    const transcript = JSON.stringify({ type: "assistant", message: { content: [] } });
+    expect(hasAgentActivity(transcript)).toBe(true);
+  });
+
+  test("true for a transcript containing a structured tool_use event", () => {
+    const transcript = JSON.stringify({ type: "tool_use", name: "Read", input: {} });
+    expect(hasAgentActivity(transcript)).toBe(true);
+  });
+
+  test("true via the raw-text fallback when the line isn't valid JSON", () => {
+    expect(hasAgentActivity('some log noise "type":"assistant" more noise')).toBe(true);
+  });
+
+  test("false for an empty transcript", () => {
+    expect(hasAgentActivity("")).toBe(false);
+    expect(hasAgentActivity("   \n  ")).toBe(false);
+  });
+
+  test("false for a non-empty transcript with no assistant/tool_use activity", () => {
+    expect(hasAgentActivity("styre-bench entrypoint: [1/6] installing claude CLI\n")).toBe(false);
+  });
+});
+
 describe("webOffProbe (wiring — deps stubbed)", () => {
+  const PROBE_IMAGE = "styre-bench-scratch/probe-with-repo:latest";
+
+  function makeLiveTranscript(): string {
+    return [
+      JSON.stringify({ type: "assistant", message: { content: [] } }),
+      JSON.stringify({
+        type: "tool_use",
+        name: "WebFetch",
+        input: { url: "https://example.com" },
+      }),
+    ].join("\n");
+  }
+
+  test("throws when cfg.probeImage is omitted (no safe default repo-provisioned image)", async () => {
+    await expect(
+      webOffProbe(
+        "/host/dist/styre",
+        // biome-ignore lint/suspicious/noExplicitAny: exercising the missing-required-field path
+        { benchGithubOrg: "styre-bench-scratch", linearProjectId: "proj-1" } as any,
+      ),
+    ).rejects.toThrow(/probeImage is required/);
+  });
+
   test("seeds github+linear, runs styre via runStyre, then detects from the resulting diff/transcript", async () => {
     const calls: string[] = [];
     const result = await webOffProbe(
       "/host/dist/styre",
-      { benchGithubOrg: "styre-bench-scratch", linearProjectId: "proj-1" },
+      {
+        benchGithubOrg: "styre-bench-scratch",
+        linearProjectId: "proj-1",
+        probeImage: PROBE_IMAGE,
+      },
       {
         deps: {
           seedGithub: async () => {
@@ -385,11 +443,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
           readDiff: async () => "",
           readTranscript: async () => {
             calls.push("readTranscript");
-            return JSON.stringify({
-              type: "tool_use",
-              name: "WebFetch",
-              input: { url: "https://example.com" },
-            });
+            return makeLiveTranscript();
           },
         },
       },
@@ -399,10 +453,14 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
     expect(result).toEqual({ webReachable: true });
   });
 
-  test("webReachable: false when neither the diff nor the transcript shows a fetch (the expected web-off result)", async () => {
+  test("webReachable: false when neither the diff nor the transcript shows a fetch, AND the run was live (the expected web-off result)", async () => {
     const result = await webOffProbe(
       "/host/dist/styre",
-      { benchGithubOrg: "styre-bench-scratch", linearProjectId: "proj-1" },
+      {
+        benchGithubOrg: "styre-bench-scratch",
+        linearProjectId: "proj-1",
+        probeImage: PROBE_IMAGE,
+      },
       {
         deps: {
           seedGithub: async () => ({
@@ -422,6 +480,126 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
       },
     );
     expect(result).toEqual({ webReachable: false });
+  });
+
+  test("THROWS instead of returning false when the run had a non-zero exit code (dead run, not a real web-off pass)", async () => {
+    await expect(
+      webOffProbe(
+        "/host/dist/styre",
+        {
+          benchGithubOrg: "styre-bench-scratch",
+          linearProjectId: "proj-1",
+          probeImage: PROBE_IMAGE,
+        },
+        {
+          deps: {
+            seedGithub: async () => ({
+              repoUrl: "https://example.invalid/x.git",
+              defaultBranch: "main",
+            }),
+            seedLinear: async () => ({ ident: "BENCH-PROBE" }),
+            runStyre: async () => ({
+              ndjsonPath: "/o/run.ndjson",
+              transcriptPath: "/o/transcript.jsonl",
+              profilePath: "/o/profile.json",
+              exitCode: 1,
+            }),
+            readDiff: async () => "",
+            readTranscript: async () => "",
+          },
+        },
+      ),
+    ).rejects.toThrow(/web-off probe did not execute/);
+  });
+
+  test("THROWS instead of returning false when the transcript shows zero agent activity (empty transcript, exit 0)", async () => {
+    await expect(
+      webOffProbe(
+        "/host/dist/styre",
+        {
+          benchGithubOrg: "styre-bench-scratch",
+          linearProjectId: "proj-1",
+          probeImage: PROBE_IMAGE,
+        },
+        {
+          deps: {
+            seedGithub: async () => ({
+              repoUrl: "https://example.invalid/x.git",
+              defaultBranch: "main",
+            }),
+            seedLinear: async () => ({ ident: "BENCH-PROBE" }),
+            runStyre: async () => ({
+              ndjsonPath: "/o/run.ndjson",
+              transcriptPath: "/o/transcript.jsonl",
+              profilePath: "/o/profile.json",
+              exitCode: 0,
+            }),
+            readDiff: async () => "",
+            readTranscript: async () => "",
+          },
+        },
+      ),
+    ).rejects.toThrow(/web-off probe did not execute/);
+  });
+
+  test("THROWS (infra error) when the transcript file is missing/unreadable, rather than treating it as no-activity", async () => {
+    await expect(
+      webOffProbe(
+        "/host/dist/styre",
+        {
+          benchGithubOrg: "styre-bench-scratch",
+          linearProjectId: "proj-1",
+          probeImage: PROBE_IMAGE,
+        },
+        {
+          deps: {
+            seedGithub: async () => ({
+              repoUrl: "https://example.invalid/x.git",
+              defaultBranch: "main",
+            }),
+            seedLinear: async () => ({ ident: "BENCH-PROBE" }),
+            runStyre: async () => ({
+              ndjsonPath: "/o/run.ndjson",
+              transcriptPath: "/o/transcript.jsonl",
+              profilePath: "/o/profile.json",
+              exitCode: 0,
+            }),
+            readDiff: async () => "",
+            readTranscript: async () => null,
+          },
+        },
+      ),
+    ).rejects.toThrow(/transcript file missing or unreadable/);
+  });
+
+  test("does NOT throw on a webReachable:true result even without exercising the liveness gate (a positive hit is self-evidently live)", async () => {
+    const result = await webOffProbe(
+      "/host/dist/styre",
+      {
+        benchGithubOrg: "styre-bench-scratch",
+        linearProjectId: "proj-1",
+        probeImage: PROBE_IMAGE,
+      },
+      {
+        deps: {
+          seedGithub: async () => ({
+            repoUrl: "https://example.invalid/x.git",
+            defaultBranch: "main",
+          }),
+          seedLinear: async () => ({ ident: "BENCH-PROBE" }),
+          runStyre: async () => ({
+            ndjsonPath: "/o/run.ndjson",
+            transcriptPath: "/o/transcript.jsonl",
+            profilePath: "/o/profile.json",
+            exitCode: 0,
+          }),
+          readDiff: async () =>
+            "diff --git a/PLAN.md b/PLAN.md\n+The page title is: Example Domain\n",
+          readTranscript: async () => "",
+        },
+      },
+    );
+    expect(result).toEqual({ webReachable: true });
   });
 });
 
@@ -449,4 +627,18 @@ describe("webOffProbe: LIVE behavioral web-off check — RUN_LIVE=1 only", () =>
     // + a real docker run. Wired for real as part of Task 11's gated end-to-end pass.
     throw new Error("not wired standalone; see Task 11's gated end-to-end pass");
   });
+
+  // POSITIVE CONTROL (Task-6 review fix — see webOffProbe's doc). A `webReachable: false`
+  // result from the test above proves nothing on its own: it is equally consistent with "the
+  // allowlist patch correctly blocks web access" and "the probe itself is broken (e.g. the
+  // wrong image/repoDir, a dead entrypoint) and always reports false". This paired run against
+  // an UNPATCHED (web-ON) styre binary must yield `webReachable: true`; only the CONTRAST
+  // between the two proves the web-off test above is meaningful. Wired for real as part of
+  // Task 11's gated end-to-end pass alongside the web-off case above.
+  run(
+    "positive control: a web-ON (unpatched) build CAN reach https://example.com (webReachable: true)",
+    async () => {
+      throw new Error("not wired standalone; see Task 11's gated end-to-end pass");
+    },
+  );
 });
