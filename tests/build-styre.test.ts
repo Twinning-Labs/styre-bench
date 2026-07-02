@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { $ } from "bun";
 import { applyWebOffPatch, buildStyre } from "../orchestrator/build-styre";
+
+const ALLOWLIST_FILE_REL = "src/dispatch/tool-allowlists.ts";
 
 // Representative fixture mirroring the REAL shape of styre's
 // src/dispatch/tool-allowlists.ts (confirmed against the styre repo, ~line 10): a
@@ -240,4 +246,92 @@ describe("buildStyre: heavy end-to-end (real clone + bun install + compile) — 
   // the gap is visible, not silently dropped; wire this up for real once Task 6 lands,
   // and re-run it as part of Task 11 Step 5's live gate.
   test.skip("behavioral: built binary cannot fetch a URL on a 'fetch https://example.com' ticket (BLOCKED on Task 6 run-task.ts)", () => {});
+});
+
+/** Creates a real (local, no network) temp git repo with a single commit containing a fixture
+ *  `src/dispatch/tool-allowlists.ts` (WebSearch/WebFetch present) — used by the
+ *  sequential-cache-reuse tests below, which exercise the REAL checkout+patch+read flow
+ *  against real git state, not just in-memory stubs (Task-4 independent-review gap: the
+ *  original tests never caught the stale-patch cohort mislabel because they always started
+ *  from a fresh in-memory stub, never a REUSED cache dir on disk). */
+async function createTempStyreRepo(): Promise<{ repoPath: string; commit: string }> {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "styre-bench-fake-repo-"));
+  await $`git init -q -b main ${repoPath}`;
+  await $`git -C ${repoPath} config user.email test@example.invalid`;
+  await $`git -C ${repoPath} config user.name test`;
+  const filePath = path.join(repoPath, ALLOWLIST_FILE_REL);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, FIXTURE_WITH_WEB_TOOLS, "utf8");
+  await $`git -C ${repoPath} add -A`;
+  await $`git -C ${repoPath} commit -q -m "fixture: tool-allowlists with web tools"`;
+  const commit = (await $`git -C ${repoPath} rev-parse HEAD`.text()).trim();
+  return { repoPath, commit };
+}
+
+describe("buildStyre: SEQUENTIAL cache-dir reuse against a REAL temp git repo (Task-4 independent-review Critical: stale-patch cohort mislabel)", () => {
+  test("repeat web-off build at the SAME cacheDir does NOT throw a false anchor-missing error (force-reset restores anchors before the second patch)", async () => {
+    const { repoPath, commit } = await createTempStyreRepo();
+    const cacheDir = await mkdtemp(path.join(os.tmpdir(), "styre-bench-cache-"));
+    try {
+      const cfg = { styreRepo: repoPath, styreCommit: commit, cohort: "web-off" as const };
+      const opts = {
+        cacheDir,
+        deps: { bunInstall: async () => {}, runBuildScript: async () => {} },
+      };
+
+      // Run 1: strips WebSearch/WebFetch from the cache dir's working tree.
+      const result1 = await buildStyre(cfg, opts);
+      expect(result1.webTools).toBe("off");
+      const afterRun1 = await readFile(path.join(cacheDir, ALLOWLIST_FILE_REL), "utf8");
+      expect(afterRun1).not.toContain('"WebSearch"');
+      expect(afterRun1).not.toContain('"WebFetch"');
+
+      // Run 2: SAME cacheDir, SAME cohort, SAME commit. Before the fix, `clone()` no-ops
+      // (cache dir already has a .git) and `checkout()` never force-reset the tree, so this
+      // reads the ALREADY-stripped file from run 1 and `applyWebOffPatch` throws a false
+      // anchor-missing error. The checkout force-reset must restore the anchors first.
+      const result2 = await buildStyre(cfg, opts);
+      expect(result2.webTools).toBe("off");
+    } finally {
+      await rm(repoPath, { recursive: true, force: true });
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("web-off then web-on at the SAME cacheDir: the web-on build sees the PRISTINE file, not the stale web-off patch", async () => {
+    const { repoPath, commit } = await createTempStyreRepo();
+    const cacheDir = await mkdtemp(path.join(os.tmpdir(), "styre-bench-cache-"));
+    try {
+      const deps = { bunInstall: async () => {}, runBuildScript: async () => {} };
+
+      // Run 1: web-off patches the file in the shared cache dir.
+      const webOffResult = await buildStyre(
+        { styreRepo: repoPath, styreCommit: commit, cohort: "web-off" },
+        { cacheDir, deps },
+      );
+      expect(webOffResult.webTools).toBe("off");
+      const afterWebOff = await readFile(path.join(cacheDir, ALLOWLIST_FILE_REL), "utf8");
+      expect(afterWebOff).not.toContain('"WebSearch"');
+      expect(afterWebOff).not.toContain('"WebFetch"');
+
+      // Run 2: web-on, SAME cacheDir, SAME commit (the documented way to get the web-on
+      // delta). web-on skips the patch step entirely, so whatever is on disk when
+      // `runBuildScript` runs is what would get compiled. Before the fix, that was the
+      // STALE web-off-patched file — the binary would be silently web-OFF while the
+      // function reports `webTools: "on"`, mislabeling the cohort and invalidating the
+      // contamination delta. The checkout force-reset must restore the pristine file first.
+      const webOnResult = await buildStyre(
+        { styreRepo: repoPath, styreCommit: commit, cohort: "web-on" },
+        { cacheDir, deps },
+      );
+      expect(webOnResult.webTools).toBe("on");
+
+      const fileAtBuildTime = await readFile(path.join(cacheDir, ALLOWLIST_FILE_REL), "utf8");
+      expect(fileAtBuildTime).toContain('"WebSearch"');
+      expect(fileAtBuildTime).toContain('"WebFetch"');
+    } finally {
+      await rm(repoPath, { recursive: true, force: true });
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

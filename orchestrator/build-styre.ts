@@ -95,7 +95,18 @@ const defaultDeps: BuildStyreDeps = {
     // Fetch first so a commit not already in the shallow/default clone is reachable; ignore
     // fetch failures (e.g. the commit is already present) and let checkout be the real check.
     await $`git -C ${cacheDir} fetch origin ${commit}`.quiet().nothrow();
-    await $`git -C ${cacheDir} checkout ${commit}`;
+    // Force a byte-pristine tree on EVERY build, regardless of what a previous cohort's run
+    // left behind in a REUSED cache dir. `-f` discards local modifications to tracked files
+    // (e.g. a prior web-off run's stripped tool-allowlists.ts), and `clean -fdx` removes any
+    // untracked/ignored leftovers (build artifacts, stray files). Without this, a repeat
+    // web-off build reads the already-stripped file and throws a false anchor-missing error,
+    // and a web-off-then-web-on sequence silently compiles the STALE web-off-patched file
+    // under a "web-on" label — mislabeling the cohort and invalidating the contamination
+    // delta. Defense-in-depth: `cacheDir` is also cohort-scoped (see `buildStyre`) so web-off
+    // and web-on never share a working tree, but this reset is the real fix — cohort-scoping
+    // alone does not protect a REPEATED build of the SAME cohort against its own prior patch.
+    await $`git -C ${cacheDir} checkout -f ${commit}`;
+    await $`git -C ${cacheDir} clean -fdx`;
   },
   async bunInstall(cacheDir) {
     // REQUIRED before `bun build --compile`: a fresh --no-checkout clone has no
@@ -115,8 +126,12 @@ const defaultDeps: BuildStyreDeps = {
 };
 
 export interface BuildStyreOpts {
-  /** Directory the styre checkout is cloned/built into. Defaults to a commit-scoped cache
-   *  dir under .cache/, so re-runs at the same commit reuse the clone. */
+  /** Directory the styre checkout is cloned/built into. Defaults to a commit-AND-cohort-scoped
+   *  cache dir under .cache/, so re-runs at the same commit+cohort reuse the clone. Cohort is
+   *  part of the default key (not just the commit) as defense-in-depth so web-off and web-on
+   *  never share a working tree — the `checkout` force-reset above is the primary fix for
+   *  cache reuse mislabeling a cohort; this alone would not fix a REPEATED build of the same
+   *  cohort clobbering itself. */
   cacheDir?: string;
   /** Override any subset of the side-effecting steps (tests only — production always uses
    *  the real git/bun/build.sh implementations). */
@@ -126,7 +141,10 @@ export interface BuildStyreOpts {
 /**
  * Builds styre from a pinned commit into a single self-contained binary.
  *
- * 1. `git clone --no-checkout` into a cache dir + `git checkout <styreCommit>`.
+ * 1. `git clone --no-checkout` into a cache dir + `git checkout -f <styreCommit>` +
+ *    `git clean -fdx` (force-resets the tree to a byte-pristine checkout on EVERY call, so a
+ *    REUSED cache dir — same commit, same or different cohort — can never carry forward a
+ *    prior run's web-off patch or other leftovers; see `checkout` above).
  * 2. `bun install --frozen-lockfile` (required — see `bunInstall` above).
  * 3. If `cfg.cohort === "web-off"`, applies `applyWebOffPatch` to the local checkout's
  *    `src/dispatch/tool-allowlists.ts` (never committed/pushed to styre). `"web-on"` skips
@@ -141,7 +159,8 @@ export async function buildStyre(
 ): Promise<BuildStyreResult> {
   const deps: BuildStyreDeps = { ...defaultDeps, ...opts.deps };
   const cacheDir =
-    opts.cacheDir ?? path.join(process.cwd(), ".cache", "styre-build", cfg.styreCommit);
+    opts.cacheDir ??
+    path.join(process.cwd(), ".cache", "styre-build", `${cfg.styreCommit}-${cfg.cohort}`);
 
   await deps.clone(cfg.styreRepo, cacheDir);
   await deps.checkout(cacheDir, cfg.styreCommit);
