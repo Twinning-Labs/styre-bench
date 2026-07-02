@@ -61,6 +61,13 @@ describe("normalizeInstance: swe-bench", () => {
     expect(inst.pass_to_pass).toEqual([]);
     expect(inst.fail_to_pass.length).toBeGreaterThan(0);
   });
+
+  test("org/repo_name/pr_number are NOT populated (swe-bench has no MSB org/repo/number split)", () => {
+    const inst = normalizeInstance(sweRaw, "swe-bench");
+    expect(inst.org).toBeUndefined();
+    expect(inst.repo_name).toBeUndefined();
+    expect(inst.pr_number).toBeUndefined();
+  });
 });
 
 describe("normalizeInstance: multi-swe-bench", () => {
@@ -112,6 +119,13 @@ describe("normalizeInstance: multi-swe-bench", () => {
     const inst = normalizeInstance(emptied, "multi-swe-bench");
     expect(inst.pass_to_pass).toEqual([]);
     expect(inst.fail_to_pass.length).toBeGreaterThan(0);
+  });
+
+  test("populates org/repo_name/pr_number from the raw record (for MultiSweBenchAdapter, not a re-parse of id)", () => {
+    const inst = normalizeInstance(msbRaw, "multi-swe-bench");
+    expect(inst.org).toBe(msbRaw.org);
+    expect(inst.repo_name).toBe(msbRaw.repo);
+    expect(inst.pr_number).toBe(msbRaw.number);
   });
 });
 

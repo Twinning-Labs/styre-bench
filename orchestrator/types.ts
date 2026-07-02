@@ -14,6 +14,15 @@ export interface Instance {
   merge_date?: string; // ISO; for cutoff split
   fix_patch: string; // FIREWALL: the accepted human fix — scorer/reviewer ONLY, NEVER seeded/mounted into styre's env
   test_patch: string; // FIREWALL: the held-out regression tests — scorer ONLY, NEVER seeded/mounted into styre's env
+  /** Multi-SWE-bench only: the raw record's `org`/`repo`/`number` fields, populated by
+   *  `orchestrator/corpus.ts`'s `normalizeMultiSweBench` (which already reads all three to
+   *  build the image tag) so `scorer/adapters/multiswebench.py`'s `MultiSweBenchAdapter`
+   *  can consume them directly instead of fragilely re-parsing `id.rsplit("-", 1)`.
+   *  Always `undefined` for SWE-bench (Python) instances — `normalizeSweBench` never sets
+   *  them. */
+  org?: string;
+  repo_name?: string;
+  pr_number?: number;
 }
 export interface TaskRecord {
   instance: string;

@@ -61,11 +61,17 @@ ASSUMPTION (verify at live pass, genuinely unconfirmed from static reading):
     by `orchestrator/corpus.ts`'s normalized `Instance.id` (e.g.
     `sindresorhus__is-odd-42` in the Task-2 fixture). `instance["id"]` as
     handed to this adapter from TS is therefore NOT directly usable as the
-    harness's instance id -- this adapter reconstructs `org/repo:pr-<number>`
-    from `instance["repo"]` (`"org/repo"`, per corpus.ts) and a `number` that
-    must be parsed out of the raw id or threaded through separately. Must be
-    confirmed/fixed against a real Multi-SWE-bench dataset sample before the
-    live pass trusts this mapping.
+    harness's instance id -- `_org_repo_number` now PREFERS the `org`/
+    `repo_name`/`pr_number` fields `normalizeMultiSweBench` populates directly
+    on the Instance (it already reads all three off the raw record to build
+    the image tag), and only falls back to parsing `instance["repo"]` +
+    `instance["id"].rsplit("-", 1)` when those fields are absent (e.g. an
+    older hand-built instance dict). The org/repo_name/pr_number values
+    themselves still trace back to the same raw-record fields as the
+    fallback parse, so this is a robustness fix (no more fragile id-parsing
+    in the common case), not yet a live-verified mapping -- still confirm
+    against a real Multi-SWE-bench dataset sample before the live pass
+    trusts it fully.
   - The harness's CLI (`python -m multi_swe_bench.harness.run_evaluation
     --mode evaluation ...`) expects a running `nix_swe` base container
     (`docker run --name nix_swe mswebench/nix_swe:v1.0`) as an implicit
@@ -158,10 +164,21 @@ class MultiSweBenchAdapter(OracleAdapter):
     """
 
     def _org_repo_number(self, instance: dict[str, Any]) -> tuple[str, str, int]:
-        # ASSUMPTION (see module docstring): instance["repo"] is "org/repo" per
-        # corpus.ts; the PR number is not carried by the normalized Instance at
-        # all today and must be threaded through (e.g. parsed from instance["id"]
-        # or added to Instance) before this can run for real.
+        # PREFERRED PATH: `orchestrator/corpus.ts`'s `normalizeMultiSweBench` now populates
+        # `org`/`repo_name`/`pr_number` directly on the normalized Instance (it already reads
+        # all three off the raw record to build the image tag) -- use them verbatim when
+        # present, no re-parsing needed.
+        org = instance.get("org")
+        repo = instance.get("repo_name")
+        number = instance.get("pr_number")
+        if isinstance(org, str) and org and isinstance(repo, str) and repo and isinstance(number, int):
+            return org, repo, number
+
+        # FALLBACK (KNOWN-BROKEN, see module docstring): older/hand-built instance dicts that
+        # predate the org/repo_name/pr_number fields (e.g. this repo's own test fixtures) --
+        # reconstruct from instance["repo"] ("org/repo" per corpus.ts) and a PR number parsed
+        # off the trailing id segment. ASSUMPTION about id format is unconfirmed against a live
+        # dataset; fix at live pass if it's wrong.
         org, _, repo = instance["repo"].partition("/")
         if not org or not repo:
             raise ValueError(f"multi-swe-bench: cannot split instance repo {instance['repo']!r} into org/repo")

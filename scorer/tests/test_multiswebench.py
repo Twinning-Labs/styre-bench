@@ -97,6 +97,46 @@ def test_parse_report_raises_on_non_dict_report():
         parse_report(["not", "a", "dict"], fail_to_pass_ids=[], pass_to_pass_ids=[])  # type: ignore[arg-type]
 
 
+# -- _org_repo_number: prefer corpus.ts's org/repo_name/pr_number, fall back to id-parse ------
+
+
+def test_org_repo_number_prefers_explicit_fields_over_id_parse():
+    """When `orchestrator/corpus.ts`'s normalizeMultiSweBench-populated org/repo_name/pr_number
+    are present, use them directly -- even if they'd disagree with what an id-parse would
+    produce (proves the explicit fields win, not just that they're consistent)."""
+    adapter = MultiSweBenchAdapter()
+    inst = {
+        "id": "some-other-instance-id-999",
+        "repo": "wrong-org/wrong-repo",
+        "org": "sindresorhus",
+        "repo_name": "is-odd",
+        "pr_number": 42,
+    }
+    assert adapter._org_repo_number(inst) == ("sindresorhus", "is-odd", 42)
+
+
+def test_org_repo_number_falls_back_to_id_parse_when_explicit_fields_absent():
+    """Older/hand-built instance dicts (e.g. this repo's own fixtures) that predate the
+    org/repo_name/pr_number fields must still work via the KNOWN-BROKEN-UNTIL-LIVE fallback."""
+    adapter = MultiSweBenchAdapter()
+    inst = _instance()
+    assert "org" not in inst and "repo_name" not in inst and "pr_number" not in inst
+    assert adapter._org_repo_number(inst) == ("sindresorhus", "is-odd", 42)
+
+
+def test_org_repo_number_falls_back_when_explicit_fields_are_partial():
+    """A partially-populated set (e.g. org present but pr_number missing/wrong-typed) must not
+    be trusted piecemeal -- fall back to the id-parse rather than raising or guessing."""
+    adapter = MultiSweBenchAdapter()
+    inst = {
+        "id": "sindresorhus__is-odd-42",
+        "repo": "sindresorhus/is-odd",
+        "org": "sindresorhus",
+        # repo_name/pr_number deliberately absent
+    }
+    assert adapter._org_repo_number(inst) == ("sindresorhus", "is-odd", 42)
+
+
 def test_run_harness_propagates_subprocess_timeout_not_swallowed():
     """A hung harness invocation must raise TimeoutExpired (fail-closed: the
     instance is dropped, never scored) -- not hang forever or be swallowed

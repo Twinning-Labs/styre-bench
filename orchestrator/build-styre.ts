@@ -35,7 +35,12 @@ function removeToolLiteral(text: string, tool: string): string {
  * untouched. This is the load-bearing web-off guarantee for the "web-off" cohort: with
  * these literals gone, `claude -p --allowed-tools` is never handed either tool for any
  * step, so the dispatched agent cannot fetch the real fix off the web via styre's own
- * allowlist (belt-and-suspenders atop the container's `--disallowedTools` — see Task 6).
+ * allowlist. This is LAYER 1 of two independent web-off layers. LAYER 2 lives in
+ * `run-task.ts`'s `buildEntrypoint` (the `claude` wrapper it installs inside the container):
+ * when the build's cohort is `"web-off"`, that wrapper appends `--disallowedTools WebSearch
+ * WebFetch` to every `claude` invocation it intercepts, denying the tools at the CLI's own
+ * flag regardless of what styre's compiled-in allowlist grants — so this patch alone is not
+ * the whole web-off guarantee; see that wrapper's doc for the second layer.
  *
  * THROWS if either literal is missing from `text` — a styre refactor that renames, relocates,
  * or restructures the allowlist (even partially, e.g. renaming just one of the two tools)

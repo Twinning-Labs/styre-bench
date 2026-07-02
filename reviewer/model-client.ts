@@ -34,7 +34,10 @@ export function getDefaultModelClient(): ModelClient {
         const client = new Anthropic();
         const response = await client.messages.create({
           model: REVIEW_MODEL,
-          max_tokens: 1024,
+          // 4096, not 1024: with adaptive thinking a thinking-heavy turn can otherwise
+          // truncate mid-response, which then parses as unparsed/invalid and degrades
+          // judgment metrics (overall-review Fix 4).
+          max_tokens: 4096,
           thinking: { type: "adaptive" },
           messages: [{ role: "user", content: prompt }],
         });

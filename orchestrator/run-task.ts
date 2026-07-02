@@ -6,7 +6,7 @@ import { seedGithub } from "./seed-github";
 import type { SeedGithubConfig, SeedGithubResult } from "./seed-github";
 import { seedLinear } from "./seed-linear";
 import type { SeedLinearConfig, SeedLinearResult } from "./seed-linear";
-import type { Instance } from "./types";
+import type { Cohort, Instance } from "./types";
 
 /**
  * Pinned Claude Code CLI version installed inside the benchmark container (Step 1 of the
@@ -67,6 +67,13 @@ export interface BuildEntrypointInput {
   repoDirInImage?: string;
   /** Overrides `CLAUDE_CLI_VERSION` (tests / a future re-pin without editing the constant). */
   claudeCliVersion?: string;
+  /** Which build cohort this entrypoint is for. Default `"web-on"` (the permissive default —
+   *  matches every pre-existing caller/test that predates this field and never mentions
+   *  web-off). `"web-off"` makes the installed `claude` wrapper (step 2 below) append
+   *  `--disallowedTools WebSearch WebFetch` to every `claude` invocation — the SECOND, wrapper-
+   *  level web-off layer, independent of `build-styre.ts`'s `applyWebOffPatch` (which strips
+   *  the tools from styre's own compiled-in allowlist, layer 1). See the step-2 doc below. */
+  cohort?: Cohort;
 }
 
 /**
@@ -99,6 +106,18 @@ export interface BuildEntrypointInput {
  *    are "verified against a real `claude` run in the Task 7 smoke" — re-verify this wrapper
  *    the same way before trusting it live). Exit code is passed through via `PIPESTATUS[0]`,
  *    not the tee/tail tail-of-pipe status.
+ *
+ *    WEB-OFF, LAYER 2: when `input.cohort === "web-off"`, the wrapper ALSO appends
+ *    `--disallowedTools WebSearch WebFetch` to every `claude` invocation, after the forced
+ *    `--output-format`/`--verbose` pair. This is a genuinely independent layer from
+ *    `build-styre.ts`'s `applyWebOffPatch` (layer 1, which strips the `"WebSearch"`/
+ *    `"WebFetch"` string literals from styre's COMPILED-IN tool allowlist before the binary
+ *    is built): layer 1 denies the tools because styre itself never asks for them; layer 2
+ *    denies them at the `claude` CLI's own flag, regardless of what styre's allowlist grants
+ *    — so a styre allowlist regression (a refactor that re-adds the tools, or a bug that
+ *    hands `--allowed-tools` a stale/unpatched list) is still blocked. `"web-on"` (the
+ *    default) never appends this flag, leaving the wrapper's arg handling unchanged from
+ *    before this layer existed.
  * 3. `git config --global user.email/user.name` — else styre's first implement commit dies in
  *    a bare image (no committer identity).
  * 4. Points the ALREADY-checked-out repo's `origin` at `seed.repoUrl` and resets the local
@@ -118,6 +137,7 @@ export interface BuildEntrypointInput {
 export function buildEntrypoint(input: BuildEntrypointInput): string {
   const repoDirInImage = input.repoDirInImage ?? DEFAULT_REPO_DIR_IN_IMAGE;
   const claudeCliVersion = input.claudeCliVersion ?? CLAUDE_CLI_VERSION;
+  const isWebOff = (input.cohort ?? "web-on") === "web-off";
   const { seed } = input;
 
   const lines: string[] = [
@@ -158,6 +178,7 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     '  args+=("$a")',
     "done",
     'args+=("--output-format" "stream-json" "--verbose")',
+    ...(isWebOff ? ['args+=("--disallowedTools" "WebSearch" "WebFetch")'] : []),
     "set +e",
     '"$REAL_CLAUDE" "${args[@]}" | tee -a "$TRANSCRIPT_PATH" | tail -n 1',
     'wrapper_exit="${PIPESTATUS[0]}"',
@@ -252,6 +273,8 @@ export interface RunStyreConfig {
    *  (`ANTHROPIC_API_KEY`/`LINEAR_API_KEY`/`GITHUB_TOKEN`). Missing after that => throws
    *  (mirrors seed-github.ts's/seed-linear.ts's fail-loud missing-cred pattern). */
   creds?: Partial<RunStyreCreds>;
+  /** Forwarded to `buildEntrypoint` — see `BuildEntrypointInput.cohort`. Default `"web-on"`. */
+  cohort?: Cohort;
 }
 
 /** Side-effecting steps, split out (same shape as build-styre.ts/seed-github.ts) so
@@ -333,6 +356,7 @@ export async function runStyre(
     seed,
     repoDirInImage: cfg.repoDirInImage,
     claudeCliVersion: cfg.claudeCliVersion,
+    cohort: cfg.cohort,
   });
   const entrypointHostPath = path.join(outDir, "entrypoint.sh");
   await deps.writeEntrypoint(entrypointHostPath, entrypoint);

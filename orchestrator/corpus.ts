@@ -257,6 +257,11 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
     merge_date,
     fix_patch,
     test_patch,
+    // Populated so scorer/adapters/multiswebench.py's MultiSweBenchAdapter can read these
+    // directly instead of re-parsing them (fragilely) off `id` — see Instance's doc.
+    org,
+    repo_name: repo,
+    pr_number: number,
   };
 }
 

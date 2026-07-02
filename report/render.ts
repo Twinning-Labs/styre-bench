@@ -327,11 +327,15 @@ function renderJudgmentQuality(records: TaskRecord[]): string {
 // Failure taxonomy histogram
 // ---------------------------------------------------------------------------------------
 
+// NOTE: no "suspected-leak" entry here — no code ever sets `taxonomy: "suspected-leak"` (leak
+// detection sets the separate `suspected_leak: boolean` / `leak_reasons: string[]` fields, not
+// `taxonomy`). Web-off suspected-leaks are surfaced via the validity panel's leak count
+// (`renderValidityPanel`'s `leak_count`), not this histogram — keep it correct rather than
+// carrying a dead bucket that would always render 0.
 const TAXONOMY_ORDER = [
   "resolved",
   "opened-but-unresolved",
   "loop-exhausted",
-  "suspected-leak",
   "probe",
   "parked",
   "infra",

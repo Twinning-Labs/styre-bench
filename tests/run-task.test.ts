@@ -138,6 +138,24 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).toContain('run_exit="${PIPESTATUS[0]}"');
   });
 
+  test("web-off cohort: the claude wrapper appends --disallowedTools WebSearch WebFetch (layer 2)", () => {
+    const script = buildEntrypoint({ seed: makeSeed(), cohort: "web-off" });
+    expect(script).toContain('args+=("--disallowedTools" "WebSearch" "WebFetch")');
+    // ordering: the disallowedTools append happens AFTER the forced --output-format/--verbose
+    // append, so both survive on the final invocation.
+    const iForced = script.indexOf('args+=("--output-format" "stream-json" "--verbose")');
+    const iDisallowed = script.indexOf('args+=("--disallowedTools" "WebSearch" "WebFetch")');
+    expect(iForced).toBeGreaterThan(-1);
+    expect(iDisallowed).toBeGreaterThan(iForced);
+  });
+
+  test("web-on cohort (and the default, cohort omitted): the wrapper never appends --disallowedTools", () => {
+    const scriptOn = buildEntrypoint({ seed: makeSeed(), cohort: "web-on" });
+    const scriptDefault = buildEntrypoint({ seed: makeSeed() });
+    expect(scriptOn).not.toContain("--disallowedTools");
+    expect(scriptDefault).not.toContain("--disallowedTools");
+  });
+
   test("FIREWALL: never contains held-out fix_patch/test_patch sentinel content or a .claude reference (structural: buildEntrypoint takes no such input)", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).not.toContain(SENTINEL_FIX_LINE);

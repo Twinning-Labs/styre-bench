@@ -291,8 +291,12 @@ async function defaultRunStage(
   inst: Instance,
   seed: RunSeed,
   binaryPath: string,
+  cfg: PipelineConfig,
 ): Promise<RunStyreResult> {
-  return runStyre(inst, seed, binaryPath, {});
+  // Thread cfg.cohort through so `run-task.ts`'s `claude` wrapper (LAYER 2 of the web-off
+  // guarantee) knows whether to append --disallowedTools — see build-styre.ts's
+  // applyWebOffPatch doc for the two-layer explanation.
+  return runStyre(inst, seed, binaryPath, { cohort: cfg.cohort });
 }
 
 /** Builds the production `PipelineDeps` — the only place `cfg.retainOnFailure`-equivalent
@@ -303,7 +307,7 @@ function buildDefaultDeps(retainOnFailure: boolean): PipelineDeps {
   return {
     runControls: callRunControls,
     seed: defaultSeedStage,
-    run: (inst, seed, binaryPath) => defaultRunStage(inst, seed, binaryPath),
+    run: (inst, seed, binaryPath, cfg) => defaultRunStage(inst, seed, binaryPath, cfg),
     collect: defaultCollectStage,
     score: callScore,
     runSelfTest: callRunSelfTest,
