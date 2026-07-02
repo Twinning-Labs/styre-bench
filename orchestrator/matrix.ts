@@ -1,0 +1,71 @@
+import type { Difficulty, Instance } from "./types";
+
+const LANGUAGES: Instance["language"][] = ["ts", "python"];
+const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
+
+/** Seeded PRNG (mulberry32) — deterministic given the same seed, no external deps. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Selects exactly one instance per (language x difficulty) cell for the pilot matrix:
+ * {ts, python} x {easy, medium, hard} = 6 instances. Deterministic for a given seed
+ * (fixed cell-iteration order + candidates sorted by id before drawing, so PRNG draws
+ * don't depend on pool/array ordering). Throws, naming the empty cell, if any of the 6
+ * required cells has zero candidates.
+ */
+export function selectPilot(pool: Instance[], seed: number): Instance[] {
+  const rng = mulberry32(seed);
+
+  const byCell = new Map<string, Instance[]>();
+  for (const inst of pool) {
+    const key = `${inst.language}:${inst.difficulty}`;
+    const existing = byCell.get(key);
+    if (existing) {
+      existing.push(inst);
+    } else {
+      byCell.set(key, [inst]);
+    }
+  }
+
+  const picked: Instance[] = [];
+  for (const language of LANGUAGES) {
+    for (const difficulty of DIFFICULTIES) {
+      const key = `${language}:${difficulty}`;
+      const candidates = byCell.get(key);
+      if (!candidates || candidates.length === 0) {
+        throw new Error(
+          `matrix: no candidates for cell "${key}" — the pilot requires exactly one instance per language x difficulty cell (ts|python x easy|medium|hard)`,
+        );
+      }
+      const sorted = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+      const idx = Math.min(Math.floor(rng() * sorted.length), sorted.length - 1);
+      const chosen = sorted[idx];
+      if (!chosen) {
+        throw new Error(`matrix: internal error selecting from cell "${key}"`);
+      }
+      picked.push(chosen);
+    }
+  }
+  return picked;
+}
+
+/**
+ * True iff the instance's merge_date is strictly after the model cutoff — used to tag
+ * `post_cutoff` on a TaskRecord. Null-safe: an instance with no known merge_date is
+ * treated as NOT post-cutoff (false), never throws.
+ */
+export function tagCutoff(i: { merge_date?: string | undefined }, cutoffISO: string): boolean {
+  if (!i.merge_date) return false;
+  const mergeTime = new Date(i.merge_date).getTime();
+  const cutoffTime = new Date(cutoffISO).getTime();
+  if (Number.isNaN(mergeTime) || Number.isNaN(cutoffTime)) return false;
+  return mergeTime > cutoffTime;
+}
