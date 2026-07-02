@@ -83,13 +83,13 @@ function parseJsonStringList(r: Record<string, unknown>, key: string, family: Fa
 }
 
 /**
- * ASSUMPTION (verify in Task 3 against a live Multi-SWE-bench dataset sample):
- * `f2p_tests`/`p2p_tests` are documented (HF dataset card) as "dict" fields without a
- * confirmed value shape. We assume they are keyed by fully-qualified test name (dict
- * keys = test ids) and take `Object.keys()` as the id list. If the real dataset instead
- * nests test names under a per-environment/per-run key, this will silently produce the
- * wrong strings (env names, not test ids) — must be checked against a live record before
- * Task 3's scorer trusts these lists for real scoring.
+ * CONFIRMED in Task 3 (scorer/adapters/multiswebench.py) against the installed
+ * `multi-swe-bench==1.1.2` PyPI package source (`multi_swe_bench/harness/report.py`'s
+ * `Report` dataclass): `f2p_tests`/`p2p_tests` ARE dicts keyed by fully-qualified test
+ * id — `Object.keys()` is the correct id list, exactly as assumed here. (The harness's
+ * own dict *values* are `{run,test,fix}` status triples, not the bare strings used in
+ * this repo's tests/fixtures/msb-raw.json fixture — but this function never reads the
+ * values, so that fixture simplification doesn't matter to normalizeMultiSweBench.)
  */
 function testNamesFromDict(r: Record<string, unknown>, key: string, family: Family): string[] {
   const v = requireKey<unknown>(r, key, family);
@@ -171,9 +171,10 @@ function normalizeSweBench(r: Record<string, unknown>): Instance {
 
 function readBaseCommit(r: Record<string, unknown>, family: Family): string {
   const base = r.base;
-  // ASSUMPTION (verify in Task 3): the base commit sha lives at `base.sha`, mirroring the
-  // shape of a GitHub PR API "base" ref. Falls back to a bare `base_commit` string field
-  // if `base.sha` isn't present — the real dataset's exact shape is unconfirmed.
+  // CONFIRMED in Task 3 against the installed `multi-swe-bench==1.1.2` package source
+  // (`multi_swe_bench.harness.pull_request.Base(label, ref, sha)`): the base commit sha
+  // does live at `base.sha`. Falls back to a bare `base_commit` string field for
+  // robustness against other raw shapes, but the primary lookup path is confirmed correct.
   if (typeof base === "object" && base !== null) {
     const sha = (base as Record<string, unknown>).sha;
     if (typeof sha === "string" && sha.length > 0) return sha;

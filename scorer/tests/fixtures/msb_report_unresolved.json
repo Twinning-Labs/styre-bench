@@ -1,0 +1,36 @@
+{
+  "org": "sindresorhus",
+  "repo": "is-odd",
+  "number": 42,
+  "valid": false,
+  "error_msg": "After applying the fix patch, no test cases transitioned from failed to passed.",
+  "fixed_tests": {},
+  "p2p_tests": {},
+  "f2p_tests": {},
+  "s2p_tests": {},
+  "n2p_tests": {},
+  "run_result": {
+    "passed_count": 2,
+    "failed_count": 1,
+    "skipped_count": 0,
+    "passed_tests": ["test.js::positive odd numbers", "test.js::even numbers"],
+    "failed_tests": ["test.js::negative odd numbers"],
+    "skipped_tests": []
+  },
+  "test_patch_result": {
+    "passed_count": 2,
+    "failed_count": 1,
+    "skipped_count": 0,
+    "passed_tests": ["test.js::positive odd numbers", "test.js::even numbers"],
+    "failed_tests": ["test.js::negative odd numbers"],
+    "skipped_tests": []
+  },
+  "fix_patch_result": {
+    "passed_count": 2,
+    "failed_count": 1,
+    "skipped_count": 0,
+    "passed_tests": ["test.js::positive odd numbers", "test.js::even numbers"],
+    "failed_tests": ["test.js::negative odd numbers"],
+    "skipped_tests": []
+  }
+}

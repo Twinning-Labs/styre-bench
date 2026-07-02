@@ -1,0 +1,45 @@
+{
+  "org": "sindresorhus",
+  "repo": "is-odd",
+  "number": 42,
+  "valid": true,
+  "error_msg": "",
+  "fixed_tests": {},
+  "p2p_tests": {
+    "test.js::positive odd numbers": { "run": "PASS", "test": "PASS", "fix": "PASS" },
+    "test.js::even numbers": { "run": "PASS", "test": "PASS", "fix": "PASS" }
+  },
+  "f2p_tests": {
+    "test.js::negative odd numbers": { "run": "FAIL", "test": "FAIL", "fix": "PASS" }
+  },
+  "s2p_tests": {},
+  "n2p_tests": {},
+  "run_result": {
+    "passed_count": 2,
+    "failed_count": 1,
+    "skipped_count": 0,
+    "passed_tests": ["test.js::positive odd numbers", "test.js::even numbers"],
+    "failed_tests": ["test.js::negative odd numbers"],
+    "skipped_tests": []
+  },
+  "test_patch_result": {
+    "passed_count": 2,
+    "failed_count": 1,
+    "skipped_count": 0,
+    "passed_tests": ["test.js::positive odd numbers", "test.js::even numbers"],
+    "failed_tests": ["test.js::negative odd numbers"],
+    "skipped_tests": []
+  },
+  "fix_patch_result": {
+    "passed_count": 3,
+    "failed_count": 0,
+    "skipped_count": 0,
+    "passed_tests": [
+      "test.js::positive odd numbers",
+      "test.js::even numbers",
+      "test.js::negative odd numbers"
+    ],
+    "failed_tests": [],
+    "skipped_tests": []
+  }
+}

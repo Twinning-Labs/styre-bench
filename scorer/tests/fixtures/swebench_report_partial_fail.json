@@ -1,0 +1,21 @@
+{
+  "pallets__flask-5063": {
+    "patch_is_None": false,
+    "patch_exists": true,
+    "patch_successfully_applied": true,
+    "resolved": false,
+    "tests_status": {
+      "FAIL_TO_PASS": {
+        "success": [],
+        "failure": ["tests/test_json.py::test_decimal_serialization"]
+      },
+      "PASS_TO_PASS": {
+        "success": [
+          "tests/test_json.py::test_basic_serialization",
+          "tests/test_json.py::test_datetime_serialization"
+        ],
+        "failure": []
+      }
+    }
+  }
+}
