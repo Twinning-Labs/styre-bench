@@ -2,6 +2,7 @@ import type { Difficulty, Instance } from "./types";
 
 const LANGUAGES: Instance["language"][] = ["ts", "python"];
 const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
+const DIFFICULTY_RANK: Record<Difficulty, number> = { easy: 0, medium: 1, hard: 2 };
 
 /** Seeded PRNG (mulberry32) — deterministic given the same seed, no external deps. */
 function mulberry32(seed: number): () => number {
@@ -56,6 +57,36 @@ export function selectPilot(pool: Instance[], seed: number): Instance[] {
       }
       picked.push(chosen);
     }
+  }
+  return picked;
+}
+
+/**
+ * SMOKE-mode selection: exactly one instance per language (one ts + one python), preferring
+ * the EASIEST available difficulty, for a first plumbing run that validates the live gate
+ * (Docker / claude install / oracle harness) without spending the full 6-cell pilot. Fully
+ * deterministic (sorts by difficulty then id; the `_seed` param exists only to mirror
+ * `selectPilot`'s signature so both slot into the same runner dep). Throws, naming the
+ * language, if either ts or python has zero candidates.
+ */
+export function selectSmoke(pool: Instance[], _seed: number): Instance[] {
+  const picked: Instance[] = [];
+  for (const language of LANGUAGES) {
+    const candidates = pool.filter((i) => i.language === language);
+    if (candidates.length === 0) {
+      throw new Error(
+        `matrix (smoke): no candidates for language "${language}" — SMOKE mode requires at least one ts and one python instance in the loaded corpus`,
+      );
+    }
+    const sorted = [...candidates].sort((a, b) => {
+      const byDifficulty = DIFFICULTY_RANK[a.difficulty] - DIFFICULTY_RANK[b.difficulty];
+      return byDifficulty !== 0 ? byDifficulty : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    const chosen = sorted[0];
+    if (!chosen) {
+      throw new Error(`matrix (smoke): internal error selecting language "${language}"`);
+    }
+    picked.push(chosen);
   }
   return picked;
 }

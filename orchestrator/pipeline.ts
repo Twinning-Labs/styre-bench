@@ -17,7 +17,7 @@ import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
 import { addedPaths } from "./firewall";
-import { selectPilot, tagCutoff } from "./matrix";
+import { selectPilot, selectSmoke, tagCutoff } from "./matrix";
 import { runStyre } from "./run-task";
 import type { RunSeed, RunStyreResult } from "./run-task";
 import { seedGithub } from "./seed-github";
@@ -731,6 +731,7 @@ export async function runPool(
 export interface RunPilotDeps {
   loadInstances: (family: Family, cfg: PipelineConfig) => Promise<Instance[]>;
   selectPilot: (pool: Instance[], seed: number) => Instance[];
+  selectSmoke: (pool: Instance[], seed: number) => Instance[];
   buildStyre: (cfg: BuildStyreConfig) => Promise<BuildStyreResult>;
   runPool: (
     instances: Instance[],
@@ -753,6 +754,7 @@ async function defaultWriteReport(result: RenderReportResult, outDir: string): P
 const defaultRunPilotDeps: RunPilotDeps = {
   loadInstances: (family, cfg) => loadInstances(family, cfg),
   selectPilot: (pool, seed) => selectPilot(pool, seed),
+  selectSmoke: (pool, seed) => selectSmoke(pool, seed),
   buildStyre: (cfg) => buildStyre(cfg),
   runPool: (instances, binaryPath, cfg, opts) => runPool(instances, binaryPath, cfg, opts),
   renderReport: (records, meta) => renderReport(records, meta),
@@ -762,6 +764,12 @@ const defaultRunPilotDeps: RunPilotDeps = {
 export interface RunPilotOpts {
   deps?: Partial<RunPilotDeps>;
   outDir?: string;
+  /**
+   * SMOKE mode: run exactly one ts + one python instance (easiest difficulty) instead of the
+   * full 6-cell pilot. For the FIRST live run — a plumbing test of the Docker/claude/oracle
+   * gate before trusting any pilot number. Driven by `SMOKE=1` at the `bin/run-pilot.ts` entry.
+   */
+  smoke?: boolean;
 }
 
 /**
@@ -783,7 +791,8 @@ export async function runPilot(
     deps.loadInstances("swe-bench", cfg),
     deps.loadInstances("multi-swe-bench", cfg),
   ]);
-  const instances = deps.selectPilot([...pythonPool, ...tsPool], cfg.seed);
+  const select = opts.smoke ? deps.selectSmoke : deps.selectPilot;
+  const instances = select([...pythonPool, ...tsPool], cfg.seed);
 
   const build = await deps.buildStyre({
     styreRepo: cfg.styreRepo,

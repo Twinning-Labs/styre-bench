@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { selectPilot, tagCutoff } from "../orchestrator/matrix";
+import { selectPilot, selectSmoke, tagCutoff } from "../orchestrator/matrix";
 import type { Difficulty, Instance } from "../orchestrator/types";
 
 function makeInstance(
@@ -71,6 +71,41 @@ describe("selectPilot", () => {
   test("throws naming the empty cell when a language x difficulty combination has no candidates", () => {
     const pool = buildFullPool().filter((i) => !(i.language === "ts" && i.difficulty === "hard"));
     expect(() => selectPilot(pool, 42)).toThrow(/ts:hard/);
+  });
+});
+
+describe("selectSmoke", () => {
+  test("returns exactly 2 — one ts + one python", () => {
+    const picked = selectSmoke(buildFullPool(), 42);
+    expect(picked.length).toBe(2);
+    expect(new Set(picked.map((i) => i.language))).toEqual(new Set(["ts", "python"]));
+  });
+
+  test("prefers the easiest difficulty for each language (fastest plumbing test)", () => {
+    const picked = selectSmoke(buildFullPool(), 42);
+    for (const inst of picked) {
+      expect(inst.difficulty).toBe("easy");
+    }
+  });
+
+  test("is deterministic (same pool -> same pick)", () => {
+    const pool = buildFullPool();
+    expect(selectSmoke(pool, 42).map((i) => i.id)).toEqual(selectSmoke(pool, 7).map((i) => i.id));
+  });
+
+  test("falls back to a harder difficulty when easy is absent for a language", () => {
+    // python has only medium/hard available; ts still has easy
+    const pool = buildFullPool().filter(
+      (i) => !(i.language === "python" && i.difficulty === "easy"),
+    );
+    const picked = selectSmoke(pool, 42);
+    const py = picked.find((i) => i.language === "python");
+    expect(py?.difficulty).toBe("medium");
+  });
+
+  test("throws naming the language when one language has zero candidates", () => {
+    const tsOnly = buildFullPool().filter((i) => i.language === "ts");
+    expect(() => selectSmoke(tsOnly, 42)).toThrow(/python/);
   });
 });
 

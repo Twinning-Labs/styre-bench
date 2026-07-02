@@ -11,7 +11,13 @@ import { BENCH_CONFIG } from "../config/bench.config";
 import { runPilot } from "../orchestrator/pipeline";
 
 async function main(): Promise<void> {
-  const result = await runPilot(BENCH_CONFIG);
+  // SMOKE=1 -> run one ts + one python instance (the first-run plumbing test) instead of the
+  // full 6-cell pilot. Everything else (build, oracle, report) is identical.
+  const smoke = process.env.SMOKE === "1";
+  if (smoke) {
+    console.error("[run-pilot] SMOKE=1 — running one ts + one python instance only");
+  }
+  const result = await runPilot(BENCH_CONFIG, { smoke });
   console.log(result.markdown);
 }
 

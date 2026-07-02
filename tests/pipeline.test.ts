@@ -721,6 +721,45 @@ describe("runPilot: threads runPool's skipped count into ReportMeta (Task-11 cap
   });
 });
 
+describe("runPilot: SMOKE mode routes selection through selectSmoke, not selectPilot", () => {
+  test("opts.smoke === true uses deps.selectSmoke; false uses deps.selectPilot", async () => {
+    const py = makeInstance({ id: "py-1", language: "python" });
+    const ts = makeInstance({ id: "ts-1", language: "ts" });
+    let smokeCalled = false;
+    let pilotCalled = false;
+    const baseDeps: Partial<RunPilotDeps> = {
+      loadInstances: async (family) => (family === "swe-bench" ? [py] : [ts]),
+      selectPilot: (pool) => {
+        pilotCalled = true;
+        return pool;
+      },
+      selectSmoke: (pool) => {
+        smokeCalled = true;
+        return pool;
+      },
+      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      runPool: async () => ({
+        records: [],
+        spentUsd: 0,
+        budgetExceeded: false,
+        skipped: [],
+      }),
+      renderReport: (records) => ({ markdown: "", json: records }),
+      writeReport: async () => {},
+    };
+
+    await runPilot(makeCfg(), { deps: baseDeps, smoke: true });
+    expect(smokeCalled).toBe(true);
+    expect(pilotCalled).toBe(false);
+
+    smokeCalled = false;
+    pilotCalled = false;
+    await runPilot(makeCfg(), { deps: baseDeps, smoke: false });
+    expect(pilotCalled).toBe(true);
+    expect(smokeCalled).toBe(false);
+  });
+});
+
 describe("RUN_LIVE=1-gated: ONE full-pipeline run PER corpus family (placeholder)", () => {
   // Per the Task-11 brief (Step 5) and the plan's Global Constraint ("per-corpus-family live
   // gate"): before ANY Phase-2 number is trusted, one full-pipeline live run must pass per
