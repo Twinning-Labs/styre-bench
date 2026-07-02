@@ -112,6 +112,85 @@ Three orthogonal verdicts recorded — **oracle** (mechanical), **blind-quality*
 
 **Rolled up by language × difficulty:** resolve-rate grid; **self-report gap** (% PR-opened-but-unresolved); **oracle-pass conditioned on styre's self-authored test**; loop economics (median/p90 ticks+loopbacks, resolved vs not); failure-taxonomy histogram (§9a); **review↔oracle agreement**; **A/B preference rate** (with calibration caveat); **resolve-rate split web-on/off and pre/post-cutoff** (§3.1). Markdown + JSON, keyed by styre commit for cross-build trends.
 
+## 8a. Report mockup (illustrative — sample *shape*, numbers are fabricated)
+
+The per-run markdown report renders roughly as below (a Phase-2 full-breadth run). Numbers are placeholders to show layout, not results.
+
+```markdown
+# Styre-Bench Report — Phase 2 (full breadth)
+
+styre: feat/polyglot-setup @ a2406a4 · dataset: Multi-SWE-bench v1 + SWE-bench Verified · seed: 42
+run: 2026-07-15 · instances: 36 (6 langs × 3 difficulty × 2) · cohort: web-OFF (headline) · budget: $180 / $250
+
+## Headline
+| metric                              | web-off (headline) | web-on (Δ)   | post-cutoff only |
+|-------------------------------------|--------------------|--------------|------------------|
+| Resolve rate (oracle)               | 47% (17/36)        | 61% (+14pp)  | 39% (7/18)       |
+| Self-report gap (opened-unresolved) | 33% (12/36)        | 21%          | 39%              |
+| PR-opened rate                      | 89% (32/36)        | 92%          | 83%              |
+
+> web-on +14pp is a CONTAMINATION signal, not capability (4 web-on runs flagged suspected-leak).
+> post-cutoff 39% is the memorization-bounded floor — the most honest number.
+
+## Resolve rate — language × difficulty (web-off)
+| lang   | Easy | Medium | Hard | cell |
+|--------|------|--------|------|------|
+| TS     | 3/3  | 2/3    | 0/3  | 56%  |
+| JS     | 2/3  | 1/3    | 0/3  | 33%  |
+| Go     | 3/3  | 2/3    | 1/3  | 67%  |
+| Java   | 2/3  | 1/3    | 0/3  | 33%  |
+| Rust   | 2/3  | 1/3    | 1/3  | 44%  |
+| Python | 1/3  | 0/3    | 0/3  | 11% ⚠ |
+| by-diff| 72%  | 39%    | 17%  |      |
+
+⚠ Python 11%: 5/9 got a non-runnable test command from `styre setup` (root-only pytest bias)
+  → spurious loopbacks. Read as DETECTOR-COVERAGE, not loop performance.
+
+## Loop economics (web-off)
+| metric                | resolved | unresolved |
+|-----------------------|----------|------------|
+| ticks (median / p90)  | 6 / 11   | 14 / 22    |
+| loopbacks (median)    | 1        | 4          |
+| escalations / run     | 0.2      | 1.3        |
+| cost / instance (med) | $3.10    | $6.40      |
+top escalation reasons: verify-red-exhausted (9), scope-diff (3), no-progress (2)
+
+## Judgment quality
+- Review↔oracle agreement: 0.78 (blind reviewer predicts ground truth 78% — styre's own review stage is a decent-but-imperfect gate)
+- A/B gold preference (blind, calibrated κ=0.61 vs human labels): human 64% · styre 22% · tie 14%
+- Gold-divergence: 6/17 oracle-resolved (35%) still prefer the human fix → resolved-but-suboptimal (fine-tuning triage set)
+
+## Failure taxonomy (36)
+resolved 17 · opened-but-unresolved 12 · loop-exhausted 3 · probe 2 (Python) · parked 1 · infra 1 · suspected-leak 0 (web-off)
+
+## Validity panel
+- web-on suspected-leak: 4/36 (diff≈fix.patch, or a PR URL in the transcript)
+- pre-cutoff 55% vs post-cutoff 39% resolve → ~16pp memorization lift, isolated
+- flaky instances dropped by oracle controls before scoring: 2 (Rust log-parser nondeterminism)
+```
+
+Each task also emits one machine-readable record (the JSON the markdown rolls up):
+
+```json
+{
+  "instance": "microsoft__TypeScript-53421",
+  "language": "ts", "difficulty": "medium",
+  "styre_commit": "a2406a4", "cohort": "web-off",
+  "merge_date": "2024-11-02", "post_cutoff": true,
+  "resolved": false, "pr_opened": true,
+  "self_authored_test": true, "self_test_passed": true,
+  "ticks": 13, "cycle_count": 4,
+  "escalation_count": 1, "escalation_reasons": ["verify-red-exhausted"],
+  "outcome": "pr-ready", "status": "ok", "exit_code": 0, "parked": false,
+  "cost_usd": 5.80, "tokens_in": 210400, "tokens_out": 38200,
+  "blind_quality": "addresses-issue-partial",
+  "ab_preference": "B(human)",
+  "ab_notes": "styre narrows the type guard but misses the union case the accepted fix handles",
+  "suspected_leak": false,
+  "taxonomy": "opened-but-unresolved"
+}
+```
+
 ## 9. Safety & hygiene (hard rules)
 
 No upstream contact (throwaway repos only). Dedicated throwaway Linear project + auto-cleanup. The firewall (§3) **and** the web-off/leak-detect contamination controls (§3.1). Budget cap + kill-switch (per-task `cost_usd` ceiling incl. the setup Opus call; overall run budget; bounded concurrency ~3). Secrets injected at runtime, never baked/committed. Reproducibility: dataset version, sampling seed, **styre commit**, web-on/off recorded per report.
