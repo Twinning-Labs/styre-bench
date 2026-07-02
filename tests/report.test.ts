@@ -226,6 +226,19 @@ describe("renderReport", () => {
     expect(markdown).toContain("5/6");
   });
 
+  test("skippedCount:0/undefined renders no budget-truncation notice (Task-11 capstone Fix 4)", () => {
+    const { markdown: withZero } = renderReport(records, { ...META, skippedCount: 0 });
+    const { markdown: withUndefined } = renderReport(records, META);
+    expect(withZero).not.toContain("skipped");
+    expect(withUndefined).not.toContain("skipped");
+  });
+
+  test("skippedCount > 0 surfaces a budget-truncated notice in the header (Task-11 capstone Fix 4)", () => {
+    const { markdown } = renderReport(records, { ...META, skippedCount: 3 });
+    expect(markdown).toContain("3 instance(s) skipped");
+    expect(markdown).toContain("budget-truncated");
+  });
+
   test("resolve grid has a row per language present in the web-off cohort", () => {
     const { markdown } = renderReport(records, META);
     expect(markdown).toContain("ts");

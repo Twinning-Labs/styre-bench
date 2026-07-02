@@ -12,6 +12,11 @@ export interface ReportMeta {
   runDate: string;
   budgetUsd: number;
   spentUsd?: number;
+  /** Count of instances the `runBudgetUsd` kill-switch (`runPool`'s `skipped`) prevented from
+   *  ever starting — i.e. this run is budget-truncated, not a complete run over the selected
+   *  pilot set. `undefined`/`0` renders nothing (Task-11 capstone Fix 4: a truncated run must
+   *  never render as if it were a smaller-but-complete one). */
+  skippedCount?: number;
   /** Defaults to "Styre-Bench Report". */
   title?: string;
 }
@@ -141,6 +146,11 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   lines.push(
     `run: ${meta.runDate} · instances: ${records.length} · cohort: ${cohortLabel} · budget: ${budgetStr}`,
   );
+  if (meta.skippedCount !== undefined && meta.skippedCount > 0) {
+    lines.push(
+      `**⚠ ${meta.skippedCount} instance(s) skipped — run budget-truncated (runBudgetUsd kill-switch tripped before every selected instance started).**`,
+    );
+  }
   lines.push("");
   lines.push("## Headline");
   lines.push("| metric | web-off (headline) | web-on (Δ) | post-cutoff only |");

@@ -5,9 +5,11 @@ import {
   type PipelineConfig,
   type PipelineDeps,
   type RunControlsResult,
+  type RunPilotDeps,
   type ScoreResult,
   type SelfTestResult,
   runInstance,
+  runPilot,
   runPool,
 } from "../orchestrator/pipeline";
 import type { RunSeed, RunStyreResult } from "../orchestrator/run-task";
@@ -562,6 +564,160 @@ describe("runPool: runBudgetUsd kill-switch", () => {
     expect(result.records).toHaveLength(2);
     expect(result.skipped).toHaveLength(0);
     expect(result.budgetExceeded).toBe(false);
+  });
+});
+
+describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (Task-11 capstone Fix 1)", () => {
+  test("detectLeak throws AFTER score succeeds -> resolved verdict PRESERVED, only suspected_leak/leak_reasons degrade", async () => {
+    const { deps, calls } = trackedDeps({
+      score: async () => SCORE_RESOLVED,
+      detectLeak: async () => {
+        throw new Error("leak_detect.py: subprocess exit 1");
+      },
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+
+    expect(rec.resolved).toBe(true);
+    expect(rec.taxonomy).toBe("resolved");
+    expect(rec.suspected_leak).toBe(false);
+    expect(rec.leak_reasons).toEqual(["transcript-unavailable"]);
+    // the OTHER judgment signals still ran and are untouched by detectLeak's crash.
+    expect(rec.blind_quality).toBe("addresses-issue");
+    expect(rec.ab_preference).toBe("A(styre)");
+    expect(calls.blindQuality).toBe(1);
+    expect(calls.abReview).toBe(1);
+  });
+
+  test("blindQuality throws AFTER score succeeds -> resolved verdict PRESERVED, blind_quality:null only", async () => {
+    const { deps } = trackedDeps({
+      score: async () => SCORE_RESOLVED,
+      blindQuality: async () => {
+        throw new Error("blind-quality reviewer: rate limited");
+      },
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+
+    expect(rec.resolved).toBe(true);
+    expect(rec.taxonomy).toBe("resolved");
+    expect(rec.blind_quality).toBeNull();
+    expect(rec.suspected_leak).toBe(false); // detectLeak still ran normally
+    expect(rec.ab_preference).toBe("A(styre)"); // abReview still ran normally
+  });
+
+  test("abReview throws AFTER score succeeds -> resolved verdict PRESERVED, ab_preference:null only", async () => {
+    const { deps } = trackedDeps({
+      score: async () => SCORE_UNRESOLVED,
+      abReview: async () => {
+        throw new Error("ab-review: malformed judge output");
+      },
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+
+    expect(rec.resolved).toBe(false);
+    expect(rec.taxonomy).toBe("opened-but-unresolved");
+    expect(rec.ab_preference).toBeNull();
+    expect(rec.ab_notes).toBeNull();
+    expect(rec.blind_quality).toBe("addresses-issue"); // blindQuality still ran normally
+  });
+
+  test("score() itself throws -> taxonomy:infra (retryable), NOT a discarded verdict", async () => {
+    const { deps, calls } = trackedDeps({
+      score: async () => {
+        throw new Error("scorer/score.py: docker daemon unreachable");
+      },
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+      deps,
+      maxInfraRetries: 1,
+    });
+
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.resolved).toBe(false);
+    // score() crashing is retried against the SAME infra-retry budget as seed/run/collect.
+    expect(calls.score).toBe(2); // 1 initial + 1 retry
+    expect(rec.infra_retries).toBe(1);
+    // score having crashed on every attempt means no judgment stage ever ran.
+    expect(calls.detectLeak).toBe(0);
+    expect(calls.blindQuality).toBe(0);
+    expect(calls.abReview).toBe(0);
+  });
+
+  test("crux regression: a runInstance that rejects at the pool layer -> pool record is taxonomy:infra && resolved:false", async () => {
+    const instances = [makeInstance({ id: "rejects-1" })];
+    const runInstanceStub = async (): Promise<TaskRecord> => {
+      throw new Error("unhandled: some judgment stage crashed and rejected the whole call");
+    };
+
+    const result = await runPool(instances, "/bin/styre", makeCfg({ concurrency: 1 }), {
+      runInstance: runInstanceStub,
+    });
+
+    expect(result.records).toHaveLength(1);
+    const [record] = result.records;
+    expect(record?.taxonomy).toBe("infra");
+    expect(record?.resolved).toBe(false);
+  });
+});
+
+describe("runInstance: cumulative cost_usd across infra retries (Task-11 capstone Fix 2)", () => {
+  test("an instance that consumed one infra-retry reports cost = sum of both attempts (+ setup), not just the last", async () => {
+    let attempt = 0;
+    const { deps } = trackedDeps({
+      collect: async () => {
+        attempt++;
+        return attempt === 1
+          ? { ...infraStage(), record: { taxonomy: "infra", cost_usd: 2 } }
+          : { ...pendingStage(), record: { ...pendingStage().record, cost_usd: 1.5 } };
+      },
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+
+    expect(rec.taxonomy).not.toBe("infra");
+    expect(rec.infra_retries).toBe(1);
+    // attempt 1: 2 (run cost) + 0.5 (setup estimate) = 2.5
+    // attempt 2: 1.5 (run cost) + 0.5 (setup estimate) = 2.0
+    // total: 4.5 -- NOT just the last attempt's raw 1.5 cost_usd.
+    expect(rec.cost_usd).toBeCloseTo(4.5, 5);
+  });
+
+  test("a single-attempt (no retry) instance still adds the fixed setup estimate on top of its own cost_usd", async () => {
+    const { deps } = trackedDeps({
+      collect: async () => ({
+        ...pendingStage(),
+        record: { ...pendingStage().record, cost_usd: 3 },
+      }),
+    });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+
+    expect(rec.cost_usd).toBeCloseTo(3.5, 5);
+  });
+});
+
+describe("runPilot: threads runPool's skipped count into ReportMeta (Task-11 capstone Fix 4)", () => {
+  test("meta.skippedCount === poolResult.skipped.length, passed through to renderReport", async () => {
+    const inst = makeInstance({ id: "skipped-inst" });
+    let capturedMeta: unknown;
+
+    const deps: Partial<RunPilotDeps> = {
+      loadInstances: async () => [inst],
+      selectPilot: (pool) => pool,
+      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      runPool: async () => ({
+        records: [],
+        spentUsd: 150,
+        budgetExceeded: true,
+        skipped: [inst],
+      }),
+      renderReport: (records, meta) => {
+        capturedMeta = meta;
+        return { markdown: "", json: records };
+      },
+      writeReport: async () => {},
+    };
+
+    await runPilot(makeCfg(), { deps });
+
+    expect((capturedMeta as { skippedCount?: number }).skippedCount).toBe(1);
   });
 });
 

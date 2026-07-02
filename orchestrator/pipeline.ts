@@ -139,7 +139,7 @@ export interface CollectStageResult {
   /** The bare-tree PR diff (`docs/plans/` already stripped via `extractStrippedDiff`) —
    *  fed to `score`/`run_self_test`/`detect_leak`/`blindQuality`/`abReview`. NEVER a source
    *  that carries commit messages/`Co-Authored-By`/`Claude-Session` trailers (Global
-   *  Constraint, Task-9 crux): a `git diff <base>...<head>` (or an equivalent PR "files
+   *  Constraint, Task-9 crux): a `git diff <base>..<head>` (or an equivalent PR "files
    *  changed" diff) structurally cannot contain that — it lists file hunks only, never log
    *  history — unlike `git log`/a squash-merge commit body, which does. */
   diff: string;
@@ -167,7 +167,7 @@ function parseOwnerRepoFromUrl(repoUrl: string): { owner: string; repo: string }
 /**
  * Finds the (by convention, at most one) PR styre opened against `seed.defaultBranch` on the
  * seeded throwaway repo, and computes the BARE TREE DIFF between `inst.base_commit` and the
- * PR's head sha via `git diff <base>...<head>` — never `git log`/a formatted-patch source, so
+ * PR's head sha via `git diff <base>..<head>` — never `git log`/a formatted-patch source, so
  * the result structurally cannot carry a commit message or a `Co-Authored-By`/
  * `Claude-Session` trailer (Global Constraint, Task-9 crux).
  *
@@ -209,7 +209,12 @@ async function fetchPrDiff(
     await $`git -C ${scratch} fetch --quiet origin ${inst.base_commit} ${headSha}`
       .quiet()
       .nothrow();
-    const diff = await $`git -C ${scratch} diff ${inst.base_commit}...${headSha}`.quiet().text();
+    // Two-dot (`base..head`), per the Global Constraint (docs/plans/2026-07-02-styre-bench-pilot-rig.md
+    // Task-9 crux) — the unambiguous "changes styre made" diff. Three-dot (`base...head`, the
+    // merge-base diff) happens to equal this ONLY because `base` is an ancestor of `head` here;
+    // that's fragile (rebases/force-pushes on the throwaway branch could break the equivalence),
+    // so use the literal two-dot form rather than relying on the coincidence.
+    const diff = await $`git -C ${scratch} diff ${inst.base_commit}..${headSha}`.quiet().text();
     return { diff, pr_opened: true };
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -444,6 +449,23 @@ export interface RunInstanceOpts {
  *    `taxonomy` resolves to `resolved`/`opened-but-unresolved` from the oracle score UNLESS
  *    `collect` already assigned a terminal taxonomy (`parked`/`loop-exhausted`), which is
  *    preserved as-is.
+ *
+ * JUDGMENT-STAGE-CRASH CONTRACT (Task-11 capstone reviews, Fix 1): `score()` is the ONLY
+ * stage whose failure means "no trustworthy verdict exists" — it is called INSIDE the
+ * infra-retry loop below, so a crash there is treated exactly like a seed/run/collect
+ * failure (`taxonomy: "infra"`, retried against the same `maxInfraRetries`/
+ * `perTaskCostCapUsd` budget). `run_self_test`/`detect_leak`/`blindQuality`/`abReview` run
+ * strictly AFTER `score()` has already produced a `resolved` verdict for this attempt — each
+ * is wrapped in its OWN try/catch, so a crash in any one of them degrades ONLY that signal
+ * (`self_test_passed: null` / `suspected_leak: false` + `leak_reasons: ["transcript-
+ * unavailable"]` / `blind_quality: null` / `ab_preference: null`) and NEVER discards the
+ * `resolved` verdict, the diff, or the rest of the record.
+ *
+ * COST CONTRACT (Task-11 capstone reviews, Fix 2): the returned `cost_usd` is
+ * `taskSpentUsd` — the SUM of every attempt's own `cost_usd` plus one
+ * `SETUP_COST_ESTIMATE_USD` per attempt (including retried-and-discarded attempts), never
+ * just the last attempt's cost alone. This is what `runPool`'s `runBudgetUsd` kill-switch
+ * and the report's cost stats sum over, so it must reflect true cumulative spend.
  */
 export async function runInstance(
   inst: Instance,
@@ -466,11 +488,39 @@ export async function runInstance(
     new Error("runInstance: internal error — the attempt loop never ran"),
     "internal",
   );
+  // Set inside the loop, in the SAME iteration that leaves `stage.record.taxonomy` neither
+  // "infra" nor "probe" — i.e. iff `deps.score` returned successfully for the attempt the
+  // loop broke on. See the defensive check below for what happens if that invariant is ever
+  // violated by a future edit.
+  let scoreResult: ScoreResult | undefined;
 
   for (;;) {
     const attempt = await attemptOnce(inst, binaryPath, cfg, deps);
     stage = attempt.stage;
     taskSpentUsd += (stage.record.cost_usd ?? 0) + SETUP_COST_ESTIMATE_USD;
+    scoreResult = undefined;
+
+    if (stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
+      try {
+        scoreResult = await deps.score(inst, stage.diff);
+      } catch (err) {
+        // score() crash contract (Fix 1): the oracle is ground truth — a crash here means
+        // NO trustworthy verdict was produced, so this is a real oracle/infra failure, not
+        // a judgment-stage gap. Reclassifying as taxonomy:"infra" routes it through the
+        // SAME infra-retry budget as a seed/run/collect failure (`canRetry` below), rather
+        // than rejecting `runInstance` and silently discarding the attempt's telemetry (the
+        // `runPool` catch's fresh-blank-record failure mode this fix closes).
+        const message = err instanceof Error ? err.message : String(err);
+        stage = {
+          ...stage,
+          record: {
+            ...stage.record,
+            taxonomy: "infra",
+            status: `pipeline-error(score): ${message}`,
+          },
+        };
+      }
+    }
 
     const canRetry =
       stage.record.taxonomy === "infra" &&
@@ -490,6 +540,7 @@ export async function runInstance(
       taxonomy: "infra",
       pr_opened: stage.pr_opened,
       infra_retries: infraRetries,
+      cost_usd: taskSpentUsd,
     };
   }
 
@@ -499,13 +550,27 @@ export async function runInstance(
     pr_opened: stage.pr_opened,
     infra_retries: infraRetries,
     taxonomy: stage.record.taxonomy ?? base.taxonomy,
+    cost_usd: taskSpentUsd,
   };
 
   if (stage.record.taxonomy === "probe") {
     return withCollect;
   }
 
-  const scoreResult = await deps.score(inst, stage.diff);
+  if (!scoreResult) {
+    // Defensive only — unreachable given the loop invariant above (taxonomy is neither
+    // "infra" nor "probe" here, which the loop only allows once `deps.score` has already
+    // returned successfully in that same iteration). Degrades to an infra record rather
+    // than throwing, matching `runInstance`'s "never reject" contract (see `runPool`'s
+    // catch, which exists purely as defense-in-depth against this function rejecting).
+    return {
+      ...withCollect,
+      taxonomy: "infra",
+      status:
+        "pipeline-error(score): internal error — scoreResult missing for a non-infra/probe taxonomy",
+    };
+  }
+
   const resolved = scoreResult.resolved;
   const taxonomy = stage.record.taxonomy ?? (resolved ? "resolved" : "opened-but-unresolved");
 
@@ -522,21 +587,57 @@ export async function runInstance(
     }
   }
 
-  const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript);
   const issue = inst.problem_statement;
-  const blind = await deps.blindQuality(issue, stage.diff);
-  const ab = await deps.abReview(issue, stage.diff, inst.fix_patch, inst.id, cfg.seed);
+
+  // JUDGMENT-STAGE-CRASH CONTRACT (Fix 1): `resolved`/`taxonomy` above are already final —
+  // each judgment call below is independently try/catch'd so a crash in ONE never loses the
+  // oracle verdict, the diff, or the OTHER judges' signals.
+  let suspectedLeak = false;
+  let leakReasons: string[] = [];
+  try {
+    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript);
+    suspectedLeak = leak.suspected;
+    leakReasons = leak.reasons;
+  } catch {
+    // Reuses the canonical "transcript-unavailable" `leak_reasons` value (see
+    // `orchestrator/types.ts`'s `TaskRecord.leak_reasons` contract) rather than inventing a
+    // new taxonomy value — the validity panel (`report/render.ts`) already renders this
+    // exact reason as "URL-scan did NOT run ... leak status UNKNOWN, not assumed clean",
+    // which is precisely correct here: a crashed detector means the scan did not complete.
+    suspectedLeak = false;
+    leakReasons = ["transcript-unavailable"];
+  }
+
+  let blindVerdict: string | null = null;
+  try {
+    const blind = await deps.blindQuality(issue, stage.diff);
+    blindVerdict = blind.verdict;
+  } catch {
+    blindVerdict = null;
+  }
+
+  let abPreference: TaskRecord["ab_preference"] = null;
+  let abNotes: string | null = null;
+  try {
+    const ab = await deps.abReview(issue, stage.diff, inst.fix_patch, inst.id, cfg.seed);
+    abPreference = ab.preference;
+    abNotes = ab.notes;
+  } catch {
+    // render.ts's `AB_EXCLUDED` already excludes `null` from every A/B denominator.
+    abPreference = null;
+    abNotes = null;
+  }
 
   return {
     ...withCollect,
     resolved,
     taxonomy,
     self_test_passed: selfTestPassed,
-    suspected_leak: leak.suspected,
-    leak_reasons: leak.reasons,
-    blind_quality: blind.verdict,
-    ab_preference: ab.preference,
-    ab_notes: ab.notes,
+    suspected_leak: suspectedLeak,
+    leak_reasons: leakReasons,
+    blind_quality: blindVerdict,
+    ab_preference: abPreference,
+    ab_notes: abNotes,
   };
 }
 
@@ -695,6 +796,7 @@ export async function runPilot(
     runDate: new Date().toISOString().slice(0, 10),
     budgetUsd: cfg.runBudgetUsd,
     spentUsd: poolResult.spentUsd,
+    skippedCount: poolResult.skipped.length,
   };
   const report = deps.renderReport(poolResult.records, meta);
   await deps.writeReport(report, outDir);
