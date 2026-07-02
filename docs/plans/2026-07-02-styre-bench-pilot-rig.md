@@ -10,11 +10,15 @@
 
 **Design:** `docs/design/2026-07-02-styre-bench-strategy.md` (v3). Read §3/§3.1 (firewall + contamination), §6 (pipeline), §8/§8a (metrics + report mockup), §9a (taxonomy).
 
+**Review status (v2):** independently reviewed (feasibility / adversarial / scope, all SHIP-WITH-FIXES) — styre-side claims verified accurate (CLI, telemetry field names, web-off patch target). Folded: two harness adapters (SWE-bench + Multi-SWE-bench, reuse-the-harness reset — Task 3); behavioral web-off probe + `--disallowedTools` + strip seeded `.claude/` (Tasks 4/5/6); `claude` CLI install + transcript wrapper + `--out` profile (Task 6); `probe` bucket + per-language `self_authored_test` + `self_test_passed` derivation (Task 7); leak-detector transcript source (Task 8); `gold-divergence` provisional (Task 10); per-corpus-family live gate + setup-cost note (Task 11); pinned Python corpus = SWE-bench Verified (config). Firewall confirmed closed by styre's capability isolation (no runtime network policy needed).
+
 ## Global Constraints
 
 - **Firewall (design §3):** `test.patch` and `fix.patch` NEVER enter the ticket, the seeded repo, or the container styre runs in. Only the scorer/reviewer see them, post-hoc. Any task that seeds or runs styre must assert this.
 - **Contamination (design §3.1):** the styre build used for the **headline** cohort has `WebSearch`/`WebFetch` removed from its agent allowlist; the patch is applied in the bench build only and is NEVER pushed to the styre repo.
-- **Reuse the oracle:** the scorer invokes the SWE-bench/Multi-SWE-bench harness; do NOT reimplement `FAIL_TO_PASS`/`PASS_TO_PASS` scoring.
+- **Reuse the oracle — via TWO adapters:** SWE-bench (Python) and Multi-SWE-bench (TS) are DIFFERENT harnesses (different runners, report shapes, per-language log parsers). The scorer hands each candidate diff to the corpus-family harness **as a prediction and lets the harness do its own test-file reset + scoring** — do NOT reimplement `FAIL_TO_PASS`/`PASS_TO_PASS` and do NOT hand-roll a `git checkout` reset (that reintroduces the log-parser fragility + a weakened-`PASS_TO_PASS` hole). Both families must be exercised (one fixture each).
+- **Web-off is a BEHAVIORAL guarantee, not a source grep:** a live agent must be *proven* unable to `WebFetch` (Task 4/11), because a seeded real repo can carry its own `.claude/settings.json` that re-enables tools. Pass `--disallowedTools` too, and strip `.claude/` from the seeded tree.
+- **Per-corpus-family live gate:** before ANY Phase-2 number is trusted, ONE full-pipeline live run must pass **per corpus family** (≥1 Python + ≥1 TS) — a green unit suite (all external stages stubbed) is not sufficient, and the TS oracle path's first real execution must not be Phase 2.
 - **Black-box styre:** the rig consumes styre's CLI (`styre setup <repo>`, `styre run <ticket> --profile <p>`) + its NDJSON stdout; it never imports or edits styre source (except the isolated web-off allowlist patch in Task 4).
 - **No upstream contact:** throwaway repos under the bench org only; a dedicated throwaway Linear project; auto-cleanup.
 - **Reproducibility:** every report records dataset version, sampling seed, **styre commit**, and cohort (web-off/on).
@@ -91,6 +95,8 @@ export const BenchConfig = z.object({
   styreRepo: z.string().default("https://github.com/Twinning-Labs/styre.git"),
   styreCommit: z.string().default("a2406a4"),           // feat/polyglot-setup HEAD (pin explicitly)
   cohort: z.enum(["web-off", "web-on"]).default("web-off"),
+  pythonCorpus: z.enum(["swe-bench-verified", "swe-bench"]).default("swe-bench-verified"), // §11 pinned: Verified (human-validated)
+  tsCorpus: z.literal("multi-swe-bench").default("multi-swe-bench"),
   modelCutoff: z.string().default("2025-01-01"),        // instances merged after -> post_cutoff
   seed: z.number().default(42),
   perTaskCostCapUsd: z.number().default(15),
@@ -123,21 +129,21 @@ export const BENCH_CONFIG = BenchConfig.parse({});
 
 ---
 
-### Task 3: `scorer` — oracle controls + scoring (the ground truth)
+### Task 3: `scorer` — two harness adapters + oracle controls (the ground truth)
 
-Build the oracle FIRST and validate it before anything drives styre. Reuse the SWE-bench harness; do not reimplement scoring.
+Build the oracle FIRST and validate it before anything drives styre. **Reuse each corpus family's harness — do not reimplement scoring or the reset.** (Review: one `score()` for both families silently mis-scores TS; a hand-rolled `git checkout` reset both reimplements the eval loop AND misses a `PASS_TO_PASS` test living in a file `test.patch` never touches.)
 
-**Files:** Create `scorer/controls.py`, `scorer/score.py`, `scorer/tests/test_score.py`, `scorer/conftest.py`.
+**Files:** Create `scorer/adapters/base.py`, `scorer/adapters/swebench.py`, `scorer/adapters/multiswebench.py`, `scorer/controls.py`, `scorer/score.py`, `scorer/tests/test_swebench.py`, `scorer/tests/test_multiswebench.py`, `scorer/conftest.py`. Add **`swebench` AND the Multi-SWE-bench package** to `scorer/requirements.txt`.
 
-**Interfaces (Python, invoked from TS via subprocess with JSON stdio):**
-- `run_controls(instance: dict, n: int = 3) -> dict` → `{"gold_resolved": bool, "base_fails": bool, "deterministic": bool}`. Positive control: apply `fix.patch` on base → `FAIL_TO_PASS` must pass + `PASS_TO_PASS` green. Negative: base alone → `FAIL_TO_PASS` must fail. Run `n` times; `deterministic` iff identical each time. This validates the per-language log parser AND flags flaky instances.
-- `score(instance: dict, candidate_diff: str) -> dict` → `{"resolved": bool, "fail_to_pass": {...}, "pass_to_pass": {...}}`. **Reset all test files to `(base + test.patch)` — discard any test-file hunks in `candidate_diff`** — then apply `test.patch`, run the id lists via the harness.
+**Interfaces (Python; invoked from TS via subprocess w/ JSON stdio):**
+- `class OracleAdapter` (in `adapters/base.py`): `run_controls(instance) -> {"gold_resolved","base_fails","deterministic"}`; `score(instance, candidate_diff) -> {"resolved": bool, "fail_to_pass": {...}, "pass_to_pass": {...}}` — **hands `candidate_diff` to the family harness as the prediction; the harness applies `test.patch` and does its own test-file reset**; `run_self_test(instance, candidate_diff, added_test_paths) -> {"passed": bool|None}` — runs ONLY styre's newly-added test file(s) on `base + candidate_diff` (the rigorous producer for the §1 headline; returns `None` if no added test).
+- `get_adapter(instance) -> OracleAdapter` in `score.py` dispatches on `instance.language` (`python`→`SweBenchAdapter`, else→`MultiSweBenchAdapter`). `run_controls`/`score`/`run_self_test` in `score.py` are thin dispatchers.
 
-- [ ] **Step 1: Write failing tests.** `test_score.py` (uses one real, small pinned instance recorded as a fixture id): `run_controls(inst)` → `gold_resolved and base_fails and deterministic`. `score(inst, inst["fix.patch"])` → `resolved is True`; `score(inst, "")` (empty diff) → `resolved is False`. A `candidate_diff` that edits a `pass_to_pass` test file → the test-file reset discards it → `pass_to_pass` still scored against the pristine test (resolved reflects source, not the weakened test).
+- [ ] **Step 1: Write failing tests.** **One fixture PER family** (≥1 pinned Python instance + ≥1 pinned TS instance — both log-parser paths must be exercised, else TS goes green untested). For each: `run_controls(inst)` → `gold_resolved and base_fails and deterministic`; `score(inst, inst["fix_patch"])` → `resolved is True`; `score(inst, "")` → `resolved is False`. `run_self_test` with a passing added test → `{"passed": True}`; no added test → `{"passed": None}`.
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement.** Shell out to the `swebench` harness (or Multi-SWE-bench's runner for TS) inside the instance image; parse its report JSON; implement the test-file reset via `git checkout -- <test paths from test.patch>` before applying `test.patch`. Keep image invocation behind one `_run_in_image(image, script)` helper.
-- [ ] **Step 4: PASS** (`pytest scorer/tests -q` — needs Docker + the fixture image).
-- [ ] **Step 5: Commit** — `feat(scorer): oracle controls + scoring with test-file reset`
+- [ ] **Step 3: Implement.** `SweBenchAdapter` wraps the `swebench` harness; `MultiSweBenchAdapter` wraps the Multi-SWE-bench runner (its own image convention + report parse). Each parses its harness's report JSON for the id-list verdicts. No manual reset in `score` (the harness owns it). `run_self_test` builds a one-file test invocation from the family's runner (`pytest <path>` / `jest <path>`).
+- [ ] **Step 4: PASS** (`pytest scorer/tests -q` — needs Docker + both fixture images).
+- [ ] **Step 5: Commit** — `feat(scorer): swe-bench + multi-swe-bench oracle adapters (controls + score + self-test)`
 
 ---
 
@@ -147,11 +153,12 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Interfaces:** `buildStyre(cfg): Promise<{ binaryPath: string; commit: string; webTools: "off" | "on" }>` — clones `styreRepo` at `styreCommit` into a cache dir; if `cohort === "web-off"`, applies a patch removing `"WebSearch"` and `"WebFetch"` from `src/dispatch/tool-allowlists.ts`; runs `scripts/build.sh` (bun `--compile` + macOS ad-hoc re-sign); returns the binary path. **The patch is applied to the local checkout only — never committed/pushed to styre.**
 
-- [ ] **Step 1: Write failing tests.** `build-styre.test.ts`: after a web-off build, read the patched `tool-allowlists.ts` in the checkout and assert it contains neither `"WebSearch"` nor `"WebFetch"`; assert the returned `binaryPath` exists and `--version` runs; a `web-on` build leaves the allowlist unchanged. (Gate on a `RUN_BUILD=1` env so CI can skip the heavy build; the patch-application assertion runs without the full compile.)
+- [ ] **Step 1: Write failing tests.** `build-styre.test.ts`: after a web-off build, the patched `tool-allowlists.ts` contains neither `"WebSearch"` nor `"WebFetch"`; the returned `binaryPath` exists and `--version` runs; a `web-on` build leaves it unchanged. (Gate the heavy compile on `RUN_BUILD=1`; the patch-application assertion runs without it.) The **behavioral** web-off proof is a separate gated check (below + Task 11), not this source-grep.
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement.** Checkout via `git clone --no-checkout` + `git checkout <commit>`; apply the allowlist edit with a precise string replace (fail loudly if the anchor lines aren't found — a styre refactor must not silently no-op the web-off guarantee); build.
+- [ ] **Step 3: Implement.** `git clone --no-checkout` + `git checkout <commit>`; **`bun install --frozen-lockfile`** (else `bun build --compile` has no `node_modules` and fails); apply the allowlist edit with a precise string replace that **throws loudly if the anchor lines aren't found** (a styre refactor must not silently no-op the web-off guarantee); run `scripts/build.sh`.
 - [ ] **Step 4: PASS** + lint + typecheck.
-- [ ] **Step 5: Commit** — `feat(build): build styre at pinned commit with web-off allowlist patch`
+- [ ] **Step 5 (gated `RUN_BUILD=1`): behavioral web-off probe.** Run the built binary on a throwaway ticket whose statement is "fetch https://example.com and report its `<title>`"; assert the agent could NOT fetch (no title in the diff/transcript). Belt-and-suspenders: the container also passes `--disallowedTools WebSearch WebFetch` to `claude` and strips seeded `.claude/settings.json` (Task 5/6). A source-grep alone does NOT prove web-off.
+- [ ] **Step 6: Commit** — `feat(build): build styre at pinned commit (bun install) with web-off allowlist patch + behavioral probe`
 
 ---
 
@@ -160,7 +167,7 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 **Files:** Create `orchestrator/seed-github.ts`, `orchestrator/seed-linear.ts`, `tests/seed.test.ts`.
 
 **Interfaces:**
-- `seedGithub(inst, cfg): Promise<{ repoUrl: string; defaultBranch: string }>` — create a throwaway repo under `benchGithubOrg`, push `base_commit` as the default branch. **Assert no path from `test.patch`/`fix.patch` is present in the pushed tree.**
+- `seedGithub(inst, cfg): Promise<{ repoUrl: string; defaultBranch: string }>` — create a throwaway repo under `benchGithubOrg`, push `base_commit` as the default branch. **Assert no path from `test.patch`/`fix.patch` is present in the pushed tree.** **Strip any `.claude/` (esp. `.claude/settings.json`) from the snapshot before pushing** — a real repo's own Claude config could re-enable `WebFetch` and silently break the web-off cohort. The `GITHUB_TOKEN` used here must be a PAT scoped to `benchGithubOrg` only (blast-radius, not contamination).
 - `seedLinear(inst, cfg): Promise<{ ident: string }>` — create an issue in `linearProjectId` from `problem_statement`(+`hints`) as What/Why/Scope/AC/Refs; label `Bug`. **The description contains ONLY issue text — never `test.patch`/`fix.patch` content.**
 
 - [ ] **Step 1: Write failing tests.** `seed.test.ts` (mock Octokit + Linear SDK): `seedGithub` calls create-repo + push with the tree from `base_commit` and NO held-out test paths (assert the firewall by feeding an instance whose `test.patch` touches `tests/x_regression.py` and asserting that path is absent from the pushed set); `seedLinear` builds a description that does not contain any line from `inst.fix_patch`/`inst.test_patch` (assert with a sentinel string planted in those fields).
@@ -175,13 +182,13 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Files:** Create `orchestrator/run-task.ts`, `tests/run-task.test.ts`.
 
-**Interfaces:** `runStyre(inst, seed: {repoUrl,ident,defaultBranch}, binaryPath, cfg): Promise<{ ndjsonPath: string; exitCode: number }>` — `docker run` the instance `image` with: the styre binary mounted, creds as env (`ANTHROPIC/LINEAR/GITHUB`), **`git config --global user.email/user.name` set**, the checked-out repo's **`origin` set to `seed.repoUrl`** on `defaultBranch`; run `styre setup <repo>` then `styre run <ident> --profile <p>`; tee NDJSON to `ndjsonPath`.
+**Interfaces:** `runStyre(inst, seed, binaryPath, cfg): Promise<{ ndjsonPath: string; transcriptPath: string; profilePath: string; exitCode: number }>` — `docker run` the instance `image`, entrypoint script does: (1) ensure the **`claude` CLI is installed + on PATH** (styre shells out to `claude -p` for every agent step incl. `styre setup` — SWE-bench images don't ship it; install a pinned version or bake a derived image layer); (2) install a **`claude` wrapper** first on PATH that `exec`s the real CLI with `--output-format stream-json` and tees the stream to `transcriptPath` (the leak-detector's URL-scan source — styre's NDJSON carries no tool-call transcript); (3) `git config --global user.email/user.name`; (4) set the repo's **`origin` → `seed.repoUrl`** on `defaultBranch`; (5) `styre setup <repo> --out <profilePath>` (deterministic path — setup otherwise writes to `$XDG_CONFIG_HOME/styre/<slug>/profile.json`); (6) `styre run <ident> --profile <profilePath>`; tee NDJSON to `ndjsonPath`.
 
-- [ ] **Step 1: Write failing tests.** `run-task.test.ts`: unit-test the **docker command assembly** (a pure `buildDockerArgs(...)` helper) — asserts the args include the git-identity env, the `origin` setup, the binary mount, and the creds env; and that `test.patch`/`fix.patch` are NOT mounted (firewall). (The live container run is exercised in Task 11's integration pass, gated on `RUN_LIVE=1`.)
+- [ ] **Step 1: Write failing tests.** `run-task.test.ts`: unit-test the pure `buildDockerArgs(...)`/`buildEntrypoint(...)` — assert the entrypoint installs+PATHs `claude` (+ the tee wrapper), sets git identity + `origin`, passes `styre setup --out <path>` then `styre run --profile <path>`, mounts the binary + creds; and that `test.patch`/`fix.patch`/`.claude` are NOT mounted (firewall). (The live container run is Task 11's gated pass.)
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement.** Split `buildDockerArgs` (pure, tested) from `runStyre` (side-effecting). Inside the container entrypoint script: set git identity, set `origin`, `styre setup`, `styre run`, tee stdout.
+- [ ] **Step 3: Implement.** Split `buildDockerArgs`/`buildEntrypoint` (pure, tested) from `runStyre` (side-effecting).
 - [ ] **Step 4: PASS** + lint + typecheck.
-- [ ] **Step 5: Commit** — `feat(run): containerized styre setup+run with git-identity/origin injection`
+- [ ] **Step 5: Commit** — `feat(run): containerized setup+run with claude CLI + transcript wrapper + git-identity/origin/--out`
 
 ---
 
@@ -189,13 +196,13 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Files:** Create `orchestrator/collect.ts`, `tests/collect.test.ts`, `tests/fixtures/summary.ndjson`, `tests/fixtures/pr.diff`.
 
-**Interfaces:** `collect(ndjson: string, prDiff: string, ctx): Partial<TaskRecord>` — parse the last `summary` event → `ticks/cycle_count/escalation_count/escalation_reasons/outcome/status/cost_usd/tokens_*/parked`; derive `taxonomy` (design §9a) **from `outcome`** (`parked` if exit 75; `loop-exhausted` if outcome∈{blocked,no-progress}; else pending downstream); strip `docs/plans/` hunks from `prDiff`; detect `self_authored_test` (a test-file hunk present in the stripped diff).
+**Interfaces:** `collect(ndjson, prDiff, profile, ctx): Partial<TaskRecord>` — parse the last `summary` → `ticks/cycle_count/escalation_count/escalation_reasons/outcome/status/cost_usd/tokens_*/parked`; derive `taxonomy` **from `outcome`** (`parked` if exit 75; `loop-exhausted` if outcome∈{blocked,no-progress}; **`probe` if the setup `profile`'s test command is absent/`{unavailable}`** — an unrunnable detector, the §4-anticipated Python case; else pending downstream); strip `docs/plans/` hunks from `prDiff`; `self_authored_test` = a **test-file hunk** in the stripped diff matched by a **per-language** matcher (`isTestPath(path, lang)`: py `test_*.py`|`**/tests/**`, ts/js `*.{test,spec}.{ts,tsx,js}`|`**/__tests__/**`, go `*_test.go`, java `**/src/test/java/**`, rust `**/tests/**`|`#[cfg(test)]`-bearing); **`self_test_passed` = `self_authored_test && pr_opened`** (styre only opens a PR when its own verify — which runs the new test — is green; documented approximation, "passed under styre's own verify"; the rigorous per-test check is `scorer.run_self_test`, wired in the pipeline when present).
 
-- [ ] **Step 1: Write failing tests.** `collect.test.ts` with the fixtures: a summary with `outcome:"pr-ready"` → record fields populated, `taxonomy` not yet terminal; a summary with `outcome:"no-progress"` → `taxonomy:"loop-exhausted"` even if exit_code is 1; a PR diff containing `docs/plans/1.md` + `src/x.ts` + `tests/x.test.ts` → stripped diff excludes `docs/plans/`, `self_authored_test===true`.
+- [ ] **Step 1: Write failing tests.** `collect.test.ts`: `outcome:"pr-ready"` → fields populated, taxonomy pending; `outcome:"no-progress"` (exit 1) → `taxonomy:"loop-exhausted"`; a profile whose only component has `commands.test` `{unavailable}` → `taxonomy:"probe"`; a diff with `docs/plans/1.md`+`src/x.ts`+`tests/x_test.go` (lang go) → `docs/plans/` stripped, `self_authored_test===true`; same diff but lang python (no py test path) → `self_authored_test===false` (per-language matcher); `self_authored_test && pr_opened` → `self_test_passed===true`.
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement.** Pure functions; JSON-parse each NDJSON line, take the last `type==="summary"`.
+- [ ] **Step 3: Implement.** Pure functions; last `type==="summary"`; the per-language `isTestPath` matcher.
 - [ ] **Step 4: PASS** + lint + typecheck.
-- [ ] **Step 5: Commit** — `feat(collect): summary parse + taxonomy(outcome) + docs/plans strip`
+- [ ] **Step 5: Commit** — `feat(collect): summary parse + taxonomy(outcome/probe) + per-language self-test detection`
 
 ---
 
@@ -203,7 +210,7 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Files:** Create `scorer/leak_detect.py`, `scorer/tests/test_leak_detect.py`.
 
-**Interfaces:** `detect_leak(candidate_diff: str, fix_patch: str, transcript: str) -> dict` → `{"suspected": bool, "reasons": [...]}`. Flags: (a) normalized similarity(candidate, fix) ≥ threshold (default 0.9 on a diff-hunk shingling); (b) any URL / `#<pr-number>` / `github.com/.../pull/` reference in `transcript`.
+**Interfaces:** `detect_leak(candidate_diff: str, fix_patch: str, transcript: str) -> dict` → `{"suspected": bool, "reasons": [...]}`. Flags: (a) normalized similarity(candidate, fix) ≥ threshold (default 0.9 on diff-hunk shingling); (b) any URL / `#<pr-number>` / `github.com/.../pull/` reference in `transcript`. **`transcript` is the `transcriptPath` teed by the run-task `claude` wrapper (Task 6)** — styre's NDJSON has no tool-call transcript, so without that wrapper the URL-scan has no data. If the wrapper is unavailable for a run, `detect_leak` records `reasons:["transcript-unavailable"]` and the report's validity panel must state the URL-scan didn't run (never imply a scan that didn't happen).
 
 - [ ] **Step 1: Write failing tests.** planted-leak diff (≈ `fix_patch`) → `suspected True`, reason `high-similarity`; a transcript containing `https://github.com/org/repo/pull/123` → `suspected True`, reason `pr-url-in-transcript`; an independent diff + clean transcript → `suspected False`.
 - [ ] **Step 2: Run — FAIL.**
@@ -233,7 +240,7 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Files:** Create `report/render.ts`, `tests/report.test.ts`.
 
-**Interfaces:** `renderReport(records: TaskRecord[], meta): { markdown: string; json: TaskRecord[] }` — produces the §8a layout: headline table (resolve rate + self-report gap, split web-off/web-on/post-cutoff), the language×difficulty resolve grid, loop economics, judgment quality (review↔oracle agreement, A/B preference, gold-divergence), the taxonomy histogram, the validity panel.
+**Interfaces:** `renderReport(records: TaskRecord[], meta): { markdown: string; json: TaskRecord[] }` — produces the §8a layout: headline table (resolve rate + self-report gap, split web-off/web-on/post-cutoff), the language×difficulty resolve grid, loop economics, judgment quality (review↔oracle agreement, A/B preference), the taxonomy histogram, the validity panel. **`gold-divergence` is rendered ONLY as `provisional (uncalibrated)`** until the A/B reviewer is calibrated against human labels (design §7 guard; calibration harness deferred) — never as a bare scalar. The validity panel states whether the URL-scan ran (Task 8).
 
 - [ ] **Step 1: Write failing tests.** `report.test.ts` with a hand-built `records` array (mix of resolved/opened-but-unresolved/suspected-leak, web-off/on, pre/post-cutoff): assert the markdown contains the resolve-rate as `N/6`, the self-report gap % = opened-but-unresolved/total, a grid row per language, and a taxonomy line whose counts sum to `records.length`. Assert the JSON round-trips `records`.
 - [ ] **Step 2: Run — FAIL.**
@@ -247,13 +254,13 @@ Build the oracle FIRST and validate it before anything drives styre. Reuse the S
 
 **Files:** Create `orchestrator/pipeline.ts`, `orchestrator/cleanup.ts`, `tests/pipeline.test.ts`, a `bin/run-pilot.ts` entrypoint.
 
-**Interfaces:** `runInstance(inst, binaryPath, cfg): Promise<TaskRecord>` — wires the per-task pipeline (design §6): controls → (drop if flaky) → seed → run → collect → score → leak-detect → review → record; whole-instance **infra-retry** (capped, only on `taxonomy==="infra"`); enforces `perTaskCostCapUsd`. `runPilot(cfg)` — `selectPilot` → `buildStyre` → map `runInstance` at `concurrency` → `renderReport` → write to `report/out/`; respects `runBudgetUsd` (kill-switch). `cleanup(handles)` always runs (retain-on-failure configurable).
+**Interfaces:** `runInstance(inst, binaryPath, cfg): Promise<TaskRecord>` — wires the per-task pipeline (design §6): controls → (drop if flaky) → seed → run → collect → **(probe short-circuit: if `taxonomy==="probe"`, skip score/review)** → score → **`run_self_test`** (populates `self_test_passed` rigorously when an added test exists; else the `collect` approximation) → leak-detect → review → record; whole-instance **infra-retry** (capped, only on `taxonomy==="infra"`); enforces `perTaskCostCapUsd`. **Note:** the cap covers the `styre run` cost (`summary.cost_usd`); the mandatory `styre setup` Opus call emits no summary — budget it as a separate fixed per-instance estimate, don't claim the cap covers it. `runPilot(cfg)` — `selectPilot` → `buildStyre` → map `runInstance` at `concurrency` → `renderReport`; respects `runBudgetUsd` (kill-switch). `cleanup` always runs.
 
 - [ ] **Step 1: Write failing tests.** `pipeline.test.ts` (all external stages stubbed): a stubbed instance that returns `taxonomy:"infra"` once then succeeds → retried once, final record non-infra; a flaky control (`deterministic:false`) → instance dropped with `taxonomy:"infra"`/`dropped-flaky`, styre never invoked; a run exceeding `runBudgetUsd` mid-way → kill-switch stops scheduling further instances; `cleanup` is called for every started instance even when one throws.
 - [ ] **Step 2: Run — FAIL.**
 - [ ] **Step 3: Implement.** Compose the tested units; a small concurrency pool; try/finally cleanup; budget accounting from each record's `cost_usd`.
 - [ ] **Step 4: PASS** + lint + typecheck + full `bun test` + `pytest`.
-- [ ] **Step 5: Live pilot (gated `RUN_LIVE=1`, manual):** run `bin/run-pilot.ts` on the 6 pinned instances; confirm a report is produced, the firewall held (no held-out paths in any seeded repo), and web-off was used. Record the styre commit + results.
+- [ ] **Step 5: Live gate (gated `RUN_LIVE=1`) — ONE full-pipeline run PER corpus family before Phase 2 is trusted.** Run ≥1 Python (SWE-bench Verified) AND ≥1 TS (Multi-SWE-bench) instance through controls→seed→run→score→self-test→leak-detect→review→report. For EACH: the oracle controls pass (`gold_resolved && base_fails && deterministic`), the **behavioral web-off probe passes** (Task 4 Step 5), the firewall held (no held-out paths / no `.claude/` in the seeded repo), and a report row rendered. A green *unit* suite is NOT this gate — the TS oracle path's first real run must not be Phase 2. Record the styre commit + both results.
 - [ ] **Step 6: Commit** — `feat(pipeline): end-to-end pilot orchestration + retry + budget + cleanup`
 
 ---
