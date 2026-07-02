@@ -38,7 +38,7 @@ export interface TaskRecord {
   tokens_in: number;
   tokens_out: number;
   blind_quality: string | null;
-  ab_preference: "A(styre)" | "B(human)" | "tie" | null;
+  ab_preference: "A(styre)" | "B(human)" | "tie" | "invalid" | null;
   ab_notes: string | null;
   suspected_leak: boolean;
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran

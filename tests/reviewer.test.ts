@@ -74,38 +74,72 @@ describe("blindQuality (wiring — mock model client)", () => {
   });
 });
 
-describe("chooseOrder (pure — seed -> candidate ordering)", () => {
-  test("seed=1 puts styre first (candidate A)", () => {
-    expect(chooseOrder(1)).toEqual({ first: "styre", second: "human" });
+// Two instance ids that, at runSeed=1, land on opposite sides of chooseOrder's parity split
+// (verified directly against the djb2-hash implementation) -- used below wherever a test
+// needs one concrete styre-first case and one concrete human-first case.
+const INSTANCE_STYRE_FIRST = "instance-A"; // chooseOrder(_, 1) -> { first: "styre", second: "human" }
+const INSTANCE_HUMAN_FIRST = "instance-B"; // chooseOrder(_, 1) -> { first: "human", second: "styre" }
+const RUN_SEED = 1;
+
+describe("chooseOrder (pure — (instanceId, runSeed) -> candidate ordering)", () => {
+  test("determinism: same instanceId + runSeed always produces the same order", () => {
+    expect(chooseOrder("instance-42", 7)).toEqual(chooseOrder("instance-42", 7));
+    expect(chooseOrder("instance-42", 7)).toEqual({ first: "human", second: "styre" });
   });
 
-  test("seed=2 swaps styre to second (candidate B)", () => {
-    expect(chooseOrder(2)).toEqual({ first: "human", second: "styre" });
+  test("the exact bug scenario: over many distinct instance ids at ONE fixed runSeed " +
+    "(the run-global cfg.seed, e.g. the documented default 42), BOTH positions occur " +
+    "-- a fixed seed must never pin styre to one side for every instance", () => {
+    const runSeed = 42;
+    const orders = Array.from({ length: 50 }, (_, i) => chooseOrder(`instance-${i}`, runSeed));
+    const styreFirstCount = orders.filter((o) => o.first === "styre").length;
+    expect(styreFirstCount).toBeGreaterThan(0);
+    expect(styreFirstCount).toBeLessThan(orders.length);
+  });
+
+  test("distinct instance ids at the same runSeed can land on opposite sides", () => {
+    expect(chooseOrder(INSTANCE_STYRE_FIRST, RUN_SEED)).toEqual({
+      first: "styre",
+      second: "human",
+    });
+    expect(chooseOrder(INSTANCE_HUMAN_FIRST, RUN_SEED)).toEqual({
+      first: "human",
+      second: "styre",
+    });
   });
 });
 
-describe("mapChoiceToPreference (pure — A/B choice -> styre/human, independent of position)", () => {
-  test("seed=1 order: choosing A means styre; choosing B means human", () => {
-    const order = chooseOrder(1);
+describe("mapChoiceToPreference (pure — A/B/tie/invalid choice -> styre/human, independent of position)", () => {
+  test("styre-first order: choosing A means styre; choosing B means human", () => {
+    const order = chooseOrder(INSTANCE_STYRE_FIRST, RUN_SEED);
     expect(mapChoiceToPreference("A", order)).toBe("A(styre)");
     expect(mapChoiceToPreference("B", order)).toBe("B(human)");
   });
 
-  test("seed=2 order: choosing A means human; choosing B means styre — same literal choice maps to the OPPOSITE identity", () => {
-    const order = chooseOrder(2);
+  test("human-first order: choosing A means human; choosing B means styre — same literal choice maps to the OPPOSITE identity", () => {
+    const order = chooseOrder(INSTANCE_HUMAN_FIRST, RUN_SEED);
     expect(mapChoiceToPreference("A", order)).toBe("B(human)");
     expect(mapChoiceToPreference("B", order)).toBe("A(styre)");
   });
 
   test("tie maps to tie regardless of order", () => {
-    expect(mapChoiceToPreference("tie", chooseOrder(1))).toBe("tie");
-    expect(mapChoiceToPreference("tie", chooseOrder(2))).toBe("tie");
+    expect(mapChoiceToPreference("tie", chooseOrder(INSTANCE_STYRE_FIRST, RUN_SEED))).toBe("tie");
+    expect(mapChoiceToPreference("tie", chooseOrder(INSTANCE_HUMAN_FIRST, RUN_SEED))).toBe("tie");
+  });
+
+  test("invalid passes through unchanged regardless of order (no position to resolve it against)", () => {
+    expect(mapChoiceToPreference("invalid", chooseOrder(INSTANCE_STYRE_FIRST, RUN_SEED))).toBe(
+      "invalid",
+    );
+    expect(mapChoiceToPreference("invalid", chooseOrder(INSTANCE_HUMAN_FIRST, RUN_SEED))).toBe(
+      "invalid",
+    );
   });
 });
 
-describe("buildAbPrompt (pure — seed-ordered, label-neutral)", () => {
-  test("seed=1: candidate A section carries styre's marker, candidate B carries the other diff's marker, in that order", () => {
-    const prompt = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, 1);
+describe("buildAbPrompt (pure — (instanceId, runSeed)-ordered, label-neutral)", () => {
+  test("styre-first instance: candidate A section carries styre's marker, candidate B carries the other diff's marker, in that order", () => {
+    const prompt = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_STYRE_FIRST, RUN_SEED);
     const idxA = prompt.indexOf("Candidate A");
     const idxStyreMarker = prompt.indexOf("CANDIDATE_ONE_MARKER");
     const idxB = prompt.indexOf("Candidate B");
@@ -117,8 +151,8 @@ describe("buildAbPrompt (pure — seed-ordered, label-neutral)", () => {
     expect(idxOtherMarker).toBeGreaterThan(idxB);
   });
 
-  test("seed=2: the ordering FLIPS — candidate A now carries the other diff's marker, candidate B carries styre's", () => {
-    const prompt = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, 2);
+  test("human-first instance (same runSeed): the ordering FLIPS — candidate A now carries the other diff's marker, candidate B carries styre's", () => {
+    const prompt = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_HUMAN_FIRST, RUN_SEED);
     const idxA = prompt.indexOf("Candidate A");
     const idxOtherMarker = prompt.indexOf("CANDIDATE_TWO_MARKER");
     const idxB = prompt.indexOf("Candidate B");
@@ -131,7 +165,13 @@ describe("buildAbPrompt (pure — seed-ordered, label-neutral)", () => {
   });
 
   test("strips docs/plans/ content out of styre's diff before assembly", () => {
-    const prompt = buildAbPrompt(ISSUE, STYRE_DIFF_WITH_PLAN, FIX_PATCH, 1);
+    const prompt = buildAbPrompt(
+      ISSUE,
+      STYRE_DIFF_WITH_PLAN,
+      FIX_PATCH,
+      INSTANCE_STYRE_FIRST,
+      RUN_SEED,
+    );
     expect(prompt).not.toContain("PLAN_DOC_MARKER");
     expect(prompt).not.toContain("docs/plans/");
     // the real fix content must still be present
@@ -139,42 +179,92 @@ describe("buildAbPrompt (pure — seed-ordered, label-neutral)", () => {
   });
 
   test("label-neutrality: the assembled prompt reveals no provenance", () => {
-    const seed1 = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, 1).toLowerCase();
-    const seed2 = buildAbPrompt(ISSUE, STYRE_DIFF, FIX_PATCH, 2).toLowerCase();
+    const styreFirst = buildAbPrompt(
+      ISSUE,
+      STYRE_DIFF,
+      FIX_PATCH,
+      INSTANCE_STYRE_FIRST,
+      RUN_SEED,
+    ).toLowerCase();
+    const humanFirst = buildAbPrompt(
+      ISSUE,
+      STYRE_DIFF,
+      FIX_PATCH,
+      INSTANCE_HUMAN_FIRST,
+      RUN_SEED,
+    ).toLowerCase();
     for (const forbidden of ["accepted", "human", "gold", "reference", "styre"]) {
-      expect(seed1).not.toContain(forbidden);
-      expect(seed2).not.toContain(forbidden);
+      expect(styreFirst).not.toContain(forbidden);
+      expect(humanFirst).not.toContain(forbidden);
     }
   });
 });
 
-describe("abReview (wiring — mock model client, both seed orderings)", () => {
-  test("seed=1: a fixed 'I prefer candidate A' response resolves to A(styre)", async () => {
+describe("abReview (wiring — mock model client, both position orderings)", () => {
+  test("styre-first instance: a fixed 'I prefer candidate A' response resolves to A(styre)", async () => {
     const { client, lastPrompt } = makeMockClient("I prefer candidate A because it's cleaner.");
-    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, 1, { client });
+    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_STYRE_FIRST, RUN_SEED, {
+      client,
+    });
     expect(result.preference).toBe("A(styre)");
     expect(lastPrompt()).toContain(ISSUE);
   });
 
-  test("seed=2: the SAME fixed 'I prefer candidate A' response now resolves to B(human) — position flipped, mapping tracks it", async () => {
+  test("human-first instance (same runSeed): the SAME fixed 'I prefer candidate A' response now resolves to B(human) — position flipped, mapping tracks it", async () => {
     const { client } = makeMockClient("I prefer candidate A because it's cleaner.");
-    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, 2, { client });
+    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_HUMAN_FIRST, RUN_SEED, {
+      client,
+    });
     expect(result.preference).toBe("B(human)");
   });
 
-  test("a tie response maps to tie for either seed", async () => {
-    const { client: clientA } = makeMockClient("Honestly it's a tie between the two.");
-    const resultSeed1 = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, 1, { client: clientA });
-    expect(resultSeed1.preference).toBe("tie");
+  test("a genuine tie JSON response maps to tie for either position ordering", async () => {
+    const { client: clientA } = makeMockClient('{"choice": "tie", "notes": "evenly matched"}');
+    const resultStyreFirst = await abReview(
+      ISSUE,
+      STYRE_DIFF,
+      FIX_PATCH,
+      INSTANCE_STYRE_FIRST,
+      RUN_SEED,
+      { client: clientA },
+    );
+    expect(resultStyreFirst.preference).toBe("tie");
 
     const { client: clientB } = makeMockClient("Honestly it's a tie between the two.");
-    const resultSeed2 = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, 2, { client: clientB });
-    expect(resultSeed2.preference).toBe("tie");
+    const resultHumanFirst = await abReview(
+      ISSUE,
+      STYRE_DIFF,
+      FIX_PATCH,
+      INSTANCE_HUMAN_FIRST,
+      RUN_SEED,
+      { client: clientB },
+    );
+    expect(resultHumanFirst.preference).toBe("tie");
+  });
+
+  test("an empty response resolves to 'invalid', NOT 'tie' — no signal is not the same as a genuine tie", async () => {
+    const { client } = makeMockClient("");
+    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_STYRE_FIRST, RUN_SEED, {
+      client,
+    });
+    expect(result.preference).toBe("invalid");
+  });
+
+  test("ambiguous free text mentioning BOTH candidates resolves to 'invalid', not a guessed earliest-mention winner", async () => {
+    // Regression for the fallback inversion: "Candidate A is worse than Candidate B" mentions
+    // "candidate a" first but is clearly not a preference for A -- must not silently resolve to A.
+    const { client } = makeMockClient(
+      "Candidate A is worse than Candidate B on every dimension I checked.",
+    );
+    const result = await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_STYRE_FIRST, RUN_SEED, {
+      client,
+    });
+    expect(result.preference).toBe("invalid");
   });
 
   test("the prompt sent to the model never reveals provenance (label-neutral end to end)", async () => {
     const { client, lastPrompt } = makeMockClient('{"choice": "A", "notes": "fine"}');
-    await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, 1, { client });
+    await abReview(ISSUE, STYRE_DIFF, FIX_PATCH, INSTANCE_STYRE_FIRST, RUN_SEED, { client });
     const prompt = lastPrompt().toLowerCase();
     for (const forbidden of ["accepted", "human", "gold", "reference", "styre"]) {
       expect(prompt).not.toContain(forbidden);
