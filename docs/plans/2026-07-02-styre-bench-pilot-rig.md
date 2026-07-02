@@ -113,19 +113,20 @@ export const BENCH_CONFIG = BenchConfig.parse({});
 
 ---
 
-### Task 2: `matrix.ts` — seeded stratified sampling + cutoff tagging
+### Task 2: `corpus.ts` (loader/normalizer) + `matrix.ts` (seeded sampling + cutoff)
 
-**Files:** Create `orchestrator/matrix.ts`, `tests/matrix.test.ts`.
+**Files:** Create `orchestrator/corpus.ts`, `orchestrator/matrix.ts`, `tests/corpus.test.ts`, `tests/matrix.test.ts`, `tests/fixtures/swebench-raw.json`, `tests/fixtures/msb-raw.json`.
 
 **Interfaces:**
 - Consumes: `Instance`, `BENCH_CONFIG` (Task 1).
-- Produces: `selectPilot(pool: Instance[], seed: number): Instance[]` (one per language×difficulty for TS+Python → 6, deterministic); `tagCutoff(i: Instance, cutoffISO: string): boolean` (true iff `merge_date` > cutoff; `null`-safe → tagged `post_cutoff:null` upstream when absent).
+- Produces: `normalizeInstance(raw: unknown, family: "swe-bench" | "multi-swe-bench"): Instance` — maps each dataset's **raw** keys to the normalized `Instance` shape (**the crux-flagged gap: no task owned this**). SWE-bench(-Verified): `instance_id→id`, **`patch→fix_patch`** (the gold fix is named `patch`, NOT `fix_patch`), `test_patch→test_patch`, **UPPERCASE `FAIL_TO_PASS`/`PASS_TO_PASS`** (JSON-encoded string lists) `→ fail_to_pass/pass_to_pass`, `hints_text→hints`, `created_at→merge_date`, `image` derived by the SWE-bench convention `sweb.eval.x86_64.<instance_id>`, `language:"python"`. Multi-SWE-bench: already uses `fix_patch`/`test_patch`; map its `id`/`org+repo`/lists/image + `language` from its schema. `loadInstances(family, cfg): Instance[]` reads the pinned dataset (`pythonCorpus`/`tsCorpus`) and returns normalized instances (difficulty from the dataset label, or derived from patch size if absent).
+- `selectPilot(pool: Instance[], seed: number): Instance[]` (one per language×difficulty for TS+Python → 6, deterministic); `tagCutoff(i: Instance, cutoffISO: string): boolean`.
 
-- [ ] **Step 1: Write failing tests.** `matrix.test.ts`: given a pool with ≥2 candidates in each of the 6 (lang×difficulty) cells, `selectPilot(pool, 42)` returns exactly 6 with one per cell; the SAME seed returns the SAME 6 (determinism); a DIFFERENT seed may differ. `tagCutoff({merge_date:"2025-06-01"}, "2025-01-01") === true`; `"2024-06-01" → false`.
+- [ ] **Step 1: Write failing tests.** `corpus.test.ts` with the two raw fixtures (one real SWE-bench-Verified record shape + one real Multi-SWE-bench record shape): `normalizeInstance(sweRaw, "swe-bench")` maps `patch→fix_patch`, `FAIL_TO_PASS`(string)→`fail_to_pass`(string[]), `hints_text→hints`, `created_at→merge_date`, derives `image`; `normalizeInstance(msbRaw, "multi-swe-bench")` maps its shape → the SAME `Instance` fields (proving one normalized shape from two families). A missing/UPPERCASE key must NOT silently yield `fail_to_pass: []` — assert it's populated. `matrix.test.ts`: given a pool with ≥2 candidates per (lang×difficulty) cell, `selectPilot(pool, 42)` returns exactly 6, one per cell, deterministic per seed; empty cell → loud throw. `tagCutoff({merge_date:"2025-06-01"}, "2025-01-01")===true`; `"2024-06-01"→false`.
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement.** A seeded PRNG (mulberry32 on `seed`), group `pool` by `${language}:${difficulty}`, pick the seed-th element per the 6 target cells (`ts|python` × `easy|medium|hard`); throw a clear error naming any empty cell (so a missing corpus cell is loud, not silently short).
+- [ ] **Step 3: Implement.** `corpus.ts`: per-family key maps + `JSON.parse` for SWE-bench's stringified id-lists; throw loudly on a missing required key (never default to `[]`). `matrix.ts`: seeded PRNG (mulberry32), group by `${language}:${difficulty}`, pick per the 6 target cells; throw naming any empty cell.
 - [ ] **Step 4: PASS** + lint + typecheck.
-- [ ] **Step 5: Commit** — `feat(matrix): seeded stratified pilot sampling + cutoff tagging`
+- [ ] **Step 5: Commit** — `feat(corpus+matrix): raw dataset normalizer (both families) + seeded pilot sampling`
 
 ---
 
