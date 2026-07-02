@@ -45,7 +45,10 @@ export function selectPilot(pool: Instance[], seed: number): Instance[] {
           `matrix: no candidates for cell "${key}" — the pilot requires exactly one instance per language x difficulty cell (ts|python x easy|medium|hard)`,
         );
       }
-      const sorted = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+      // Byte-wise compare, not localeCompare: localeCompare's default-locale dependence is
+      // a cross-machine reproducibility risk for this reproducibility-critical sort. IDs are
+      // ASCII so behavior is unchanged in practice; this just removes the ambiguity.
+      const sorted = [...candidates].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const idx = Math.min(Math.floor(rng() * sorted.length), sorted.length - 1);
       const chosen = sorted[idx];
       if (!chosen) {

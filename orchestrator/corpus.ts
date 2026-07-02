@@ -101,6 +101,22 @@ function testNamesFromDict(r: Record<string, unknown>, key: string, family: Fami
   return Object.keys(v as Record<string, unknown>);
 }
 
+/**
+ * FAIL_TO_PASS / f2p_tests is the task definition itself — it is NEVER legitimately empty.
+ * A present-but-empty list (raw `"FAIL_TO_PASS": "[]"` or `f2p_tests: {}`) makes the
+ * downstream scorer's "resolved = every fail_to_pass test now passes" check vacuously
+ * true over zero tests, silently inflating the pass rate. Throw loudly instead. Do NOT
+ * use this for pass_to_pass — an empty regression-guard list is legal.
+ */
+function requireNonEmpty(list: string[], label: string, id: string): string[] {
+  if (list.length === 0) {
+    throw new Error(
+      `corpus: "${label}" resolved to an empty list on instance_id=${id} — FAIL_TO_PASS must never be empty (empty = corrupt input, would vacuously "resolve" with zero evidence)`,
+    );
+  }
+  return list;
+}
+
 function difficultyFromPatchSize(patch: string): Difficulty {
   const changedLines = patch
     .split("\n")
@@ -119,7 +135,11 @@ function normalizeSweBench(r: Record<string, unknown>): Instance {
   // The gold fix is named `patch` in the raw schema, NOT `fix_patch` — do not rename this line.
   const fix_patch = requireString(r, "patch", family);
   const test_patch = requireString(r, "test_patch", family);
-  const fail_to_pass = parseJsonStringList(r, "FAIL_TO_PASS", family);
+  const fail_to_pass = requireNonEmpty(
+    parseJsonStringList(r, "FAIL_TO_PASS", family),
+    "FAIL_TO_PASS",
+    id,
+  );
   const pass_to_pass = parseJsonStringList(r, "PASS_TO_PASS", family);
   const repo = requireString(r, "repo", family);
   const base_commit = requireString(r, "base_commit", family);
@@ -170,7 +190,7 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
   const id = requireString(r, "instance_id", family);
   const fix_patch = requireString(r, "fix_patch", family);
   const test_patch = requireString(r, "test_patch", family);
-  const fail_to_pass = testNamesFromDict(r, "f2p_tests", family);
+  const fail_to_pass = requireNonEmpty(testNamesFromDict(r, "f2p_tests", family), "f2p_tests", id);
   const pass_to_pass = testNamesFromDict(r, "p2p_tests", family);
   const org = requireString(r, "org", family);
   const repo = requireString(r, "repo", family);

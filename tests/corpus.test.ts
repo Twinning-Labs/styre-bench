@@ -49,6 +49,18 @@ describe("normalizeInstance: swe-bench", () => {
     const { patch, ...broken } = sweRaw as Record<string, unknown> & { patch?: unknown };
     expect(() => normalizeInstance(broken, "swe-bench")).toThrow(/patch/);
   });
+
+  test("empty FAIL_TO_PASS ([]) throws loudly instead of vacuously resolving", () => {
+    const emptied = { ...sweRaw, FAIL_TO_PASS: "[]" };
+    expect(() => normalizeInstance(emptied, "swe-bench")).toThrow(/FAIL_TO_PASS/);
+  });
+
+  test("empty PASS_TO_PASS ([]) does NOT throw (empty pass_to_pass is legal)", () => {
+    const emptied = { ...sweRaw, PASS_TO_PASS: "[]" };
+    const inst = normalizeInstance(emptied, "swe-bench");
+    expect(inst.pass_to_pass).toEqual([]);
+    expect(inst.fail_to_pass.length).toBeGreaterThan(0);
+  });
 });
 
 describe("normalizeInstance: multi-swe-bench", () => {
@@ -81,6 +93,18 @@ describe("normalizeInstance: multi-swe-bench", () => {
   test("missing f2p_tests throws loudly instead of silently yielding []", () => {
     const { f2p_tests, ...broken } = msbRaw as Record<string, unknown> & { f2p_tests?: unknown };
     expect(() => normalizeInstance(broken, "multi-swe-bench")).toThrow(/f2p_tests/);
+  });
+
+  test("empty f2p_tests ({}) throws loudly instead of vacuously resolving", () => {
+    const emptied = { ...msbRaw, f2p_tests: {} };
+    expect(() => normalizeInstance(emptied, "multi-swe-bench")).toThrow(/f2p_tests/);
+  });
+
+  test("empty p2p_tests ({}) does NOT throw (empty pass_to_pass is legal)", () => {
+    const emptied = { ...msbRaw, p2p_tests: {} };
+    const inst = normalizeInstance(emptied, "multi-swe-bench");
+    expect(inst.pass_to_pass).toEqual([]);
+    expect(inst.fail_to_pass.length).toBeGreaterThan(0);
   });
 });
 
