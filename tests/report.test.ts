@@ -234,16 +234,28 @@ describe("renderReport", () => {
 
   test("grid marks the python/easy cell with ⚠ (it has a probe finding)", () => {
     const { markdown } = renderReport(records, META);
-    const gridSection = markdown.slice(markdown.indexOf("Resolve rate"));
+    // Anchor on the grid section's own `##` heading (not the bare "Resolve rate" substring,
+    // which also matches the unrelated "Resolve rate (oracle)" row in the Headline table).
+    const gridSection = markdown.slice(markdown.indexOf("## Resolve rate — language × difficulty"));
     expect(gridSection).toContain("⚠");
   });
 
   test("A/B preference distribution excludes the invalid record (r4) from the denominator", () => {
     const { markdown } = renderReport(records, META);
-    // non-null, non-invalid ab_preference among all records: r1(A), r2(tie), r3(B), r6(A) -> 4.
-    // r4's "invalid" and r5/r9/r10's null must not appear in that count.
-    expect(markdown).toContain("4"); // denominator surfaces somewhere (loose smoke check)
-    expect(markdown).toMatch(/invalid/i);
+    // ab_preference across the fixture: r1 A(styre), r2 tie, r3 B(human), r4 invalid, r5 null,
+    // r6 A(styre), r7/r8/r9/r10 null (default). Eligible (non-null, non-invalid) -> r1,r2,r3,r6 = 4.
+    //   styre: r1,r6 -> 2/4 = 50%
+    //   human: r3    -> 1/4 = 25%
+    //   tie:   r2    -> 1/4 = 25%
+    // Only r4 has ab_preference === "invalid" -> excludedCount = 1.
+    // This asserts the ACTUAL A/B numerator/denominator strings, so it fails if the invalid
+    // record (r4) re-enters the denominator (which would render "n=5" and shift every %).
+    const section = markdown.slice(markdown.indexOf("## Judgment quality"));
+    expect(section).toContain("n=4");
+    expect(section).toContain("1 excluded as invalid/unparsed");
+    expect(section).toContain("styre 50% (2/4)");
+    expect(section).toContain("human 25% (1/4)");
+    expect(section).toContain("tie 25% (1/4)");
   });
 
   test("gold-divergence renders ONLY as 'provisional (uncalibrated)', never a bare number", () => {
@@ -297,5 +309,114 @@ describe("renderReport", () => {
     const { markdown } = renderReport(webOffOnly, META);
     expect(markdown).not.toContain("NaN");
     expect(markdown).not.toContain("Infinity");
+  });
+
+  test("loop economics: median/p90 ticks and median cost per resolved/unresolved group, plus review<->oracle agreement", () => {
+    // Dedicated fixture, isolated from `records` above, built purely so the loop-economics
+    // stats (render.ts:211-270, previously uncovered) can be hand-verified. All web-off and
+    // hygiene-eligible (taxonomy not in EXCLUDED_FROM_RESOLVE_DENOM), split resolved/unresolved
+    // exactly as renderLoopEconomics does.
+    //
+    // percentile() in render.ts uses nearest-rank (ceil), not linear interpolation:
+    //   idx = min(len-1, max(0, ceil((p/100)*len) - 1))
+    //
+    // resolved group: ticks sorted = [1,2,3,4,5,6,7,8,9,100]  (n=10)
+    //   median = avg(s[4],s[5]) = avg(5,6)   = 5.5
+    //   p90:    idx = ceil(0.9*10)-1 = 8  -> s[8] = 9      (distinct from median 5.5 and max 100)
+    //   cost sorted = [1,2,3,4,5,6,7,8,9,100] (an outlier, deliberately NOT symmetric, so
+    //   median != mean and the test can distinguish the two) -> median cost = avg(5,6) = 5.5,
+    //   mean cost = (45+100)/10 = 14.5 -> asserting "$5.50" only passes under median.
+    //
+    // unresolved group: ticks sorted = [10,20,30,40,50,60,70,80,90,1000]  (n=10)
+    //   median = avg(s[4],s[5]) = avg(50,60) = 55
+    //   p90:    idx = ceil(0.9*10)-1 = 8  -> s[8] = 90     (distinct from median 55 and max 1000)
+    //   cost sorted = [11,12,13,14,15,16,17,18,19,200] (outlier again) -> median cost =
+    //   avg(15,16) = 15.5, mean cost = (135+200)/10 = 33.5 -> asserting "$15.50" only passes
+    //   under median.
+    //
+    // NOTE: render.ts's "cost / instance (med)" row is a MEDIAN, not a mean (see fmt2(median(...))
+    // at render.ts:238) -- asserting the median-cost value here, matching the actual grouping.
+    //
+    // review<->oracle agreement: only 4 records (of the 20) carry a non-null blind_quality;
+    // the rest are null and excluded from `reviewed`, per renderJudgmentQuality's own filter.
+    //   res-rev-0:   blind_quality "addresses-issue" (predicts resolved=true), resolved=true  -> match
+    //   res-rev-1:   blind_quality "addresses-issue" (predicts resolved=true), resolved=true  -> match
+    //   unres-rev-0: blind_quality "addresses-issue" (predicts resolved=true), resolved=false -> mismatch
+    //   unres-rev-1: blind_quality "does-not-address" (predicts resolved=false), resolved=false -> match
+    //   -> reviewed n=4, matches=3 -> ratio 3/4 = 0.75 -> "0.75" / "75%"
+    const resolvedTicks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 100];
+    const resolvedCosts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 100];
+    const unresolvedTicks = [10, 20, 30, 40, 50, 60, 70, 80, 90, 1000];
+    const unresolvedCosts = [11, 12, 13, 14, 15, 16, 17, 18, 19, 200];
+
+    const resolvedBlindQuality: (string | null)[] = [
+      "addresses-issue",
+      "addresses-issue",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ];
+    const unresolvedBlindQuality: (string | null)[] = [
+      "addresses-issue",
+      "does-not-address",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ];
+
+    const resolvedRecords = resolvedTicks.map((ticks, i) =>
+      makeRecord({
+        instance: `le-resolved-${i}`,
+        language: "ts",
+        difficulty: "medium",
+        cohort: "web-off",
+        resolved: true,
+        pr_opened: true,
+        taxonomy: "resolved",
+        ticks,
+        cost_usd: resolvedCosts[i] ?? 0,
+        blind_quality: resolvedBlindQuality[i] ?? null,
+      }),
+    );
+    const unresolvedRecords = unresolvedTicks.map((ticks, i) =>
+      makeRecord({
+        instance: `le-unresolved-${i}`,
+        language: "python",
+        difficulty: "medium",
+        cohort: "web-off",
+        resolved: false,
+        pr_opened: false,
+        taxonomy: "opened-but-unresolved",
+        ticks,
+        cost_usd: unresolvedCosts[i] ?? 0,
+        blind_quality: unresolvedBlindQuality[i] ?? null,
+      }),
+    );
+
+    const { markdown } = renderReport([...resolvedRecords, ...unresolvedRecords], META);
+
+    const econSection = markdown.slice(
+      markdown.indexOf("## Loop economics"),
+      markdown.indexOf("## Judgment quality"),
+    );
+    expect(econSection).toContain("5.5 / 9.0"); // resolved: median 5.5, p90 9.0
+    expect(econSection).toContain("55.0 / 90.0"); // unresolved: median 55.0, p90 90.0
+    expect(econSection).toContain("$5.50"); // resolved median cost
+    expect(econSection).toContain("$15.50"); // unresolved median cost
+
+    const judgmentSection = markdown.slice(markdown.indexOf("## Judgment quality"));
+    expect(judgmentSection).toContain(
+      "Review↔oracle agreement: 0.75 (blind reviewer predicts ground truth 75% of the time, n=4)",
+    );
   });
 });
