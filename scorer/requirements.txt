@@ -1,0 +1,6 @@
+swebench
+pytest
+# TODO(Task 3): pin the Multi-SWE-bench (TS oracle) package name + version here.
+# The exact PyPI/GitHub package name for the Multi-SWE-bench harness was not
+# certain at scaffold time (Task 1) -- verify and pin in Task 3 rather than
+# guessing a wrong name now.
