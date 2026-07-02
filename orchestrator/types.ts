@@ -43,4 +43,9 @@ export interface TaskRecord {
   suspected_leak: boolean;
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran
   taxonomy: string;
+  /** Task 11: count of whole-instance infra-retries consumed before this record was
+   *  finalized (0 if none). Optional/additive — pre-Task-11 code (e.g. report.test.ts's
+   *  hand-built fixtures) never sets this and remains valid; `renderReport` does not read
+   *  it today. */
+  infra_retries?: number;
 }
