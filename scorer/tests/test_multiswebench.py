@@ -14,7 +14,9 @@ Two tiers (see test_swebench.py's docstring for the same split):
 
 import json
 import os
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -87,6 +89,26 @@ def test_parse_report_missing_target_test_id_defaults_false_not_true():
         pass_to_pass_ids=[],
     )
     assert result["fail_to_pass"] == {"test.js::some test the harness never ran": False}
+
+
+def test_parse_report_raises_on_non_dict_report():
+    """Mirrors test_swebench.py's equivalent -- test symmetry (Task-3 review)."""
+    with pytest.raises(ValueError):
+        parse_report(["not", "a", "dict"], fail_to_pass_ids=[], pass_to_pass_ids=[])  # type: ignore[arg-type]
+
+
+def test_run_harness_propagates_subprocess_timeout_not_swallowed():
+    """A hung harness invocation must raise TimeoutExpired (fail-closed: the
+    instance is dropped, never scored) -- not hang forever or be swallowed
+    into a fake verdict."""
+    adapter = MultiSweBenchAdapter()
+    inst = _instance()
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="multi_swe_bench.harness.run_evaluation", timeout=1800),
+    ):
+        with pytest.raises(subprocess.TimeoutExpired):
+            adapter._run_harness(inst, "")
 
 
 # -- run_live tests: real harness + Docker -----------------------------------

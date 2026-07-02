@@ -91,6 +91,13 @@ from .base import OracleAdapter
 
 _SELF_TEST_TIMEOUT_S = 300
 
+# Ceiling for one `run_evaluation` harness invocation (subprocess). Without a
+# timeout, a hung/wedged harness (stuck container, deadlocked build, etc.)
+# blocks the whole scorer run forever. 1800s (30min) roughly matches styre's
+# verify-step budget ballpark. On expiry, subprocess.TimeoutExpired propagates
+# unmodified (fail-closed): the instance is dropped, never scored.
+HARNESS_TIMEOUT_SEC = 1800
+
 
 def parse_report(report: dict[str, Any], fail_to_pass_ids: list[str], pass_to_pass_ids: list[str]) -> dict[str, Any]:
     """Pure parser: multi-swe-bench's report.json -> {"resolved","fail_to_pass","pass_to_pass"}.
@@ -150,9 +157,6 @@ class MultiSweBenchAdapter(OracleAdapter):
     the methods themselves are exercised solely by the `RUN_LIVE`-gated tests.
     """
 
-    def __init__(self, workdir: Path | None = None):
-        self.workdir = workdir or Path(".msb-workdir")
-
     def _org_repo_number(self, instance: dict[str, Any]) -> tuple[str, str, int]:
         # ASSUMPTION (see module docstring): instance["repo"] is "org/repo" per
         # corpus.ts; the PR number is not carried by the normalized Instance at
@@ -203,7 +207,9 @@ class MultiSweBenchAdapter(OracleAdapter):
             "--log_dir",
             str(run_dir / "logs"),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # No except around this: subprocess.TimeoutExpired must propagate
+        # unmodified (fail-closed) -- never swallow a hang into a fake verdict.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=HARNESS_TIMEOUT_SEC)
         if result.returncode != 0:
             raise RuntimeError(
                 f"multi-swe-bench: harness invocation failed (exit {result.returncode}) for "
@@ -228,9 +234,11 @@ class MultiSweBenchAdapter(OracleAdapter):
         gold = self.score(instance, instance["fix_patch"])
         base_a = self.score(instance, "")
         base_b = self.score(instance, "")
+        # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.
         deterministic = (
             base_a["resolved"] == base_b["resolved"]
             and base_a["fail_to_pass"] == base_b["fail_to_pass"]
+            and base_a["pass_to_pass"] == base_b["pass_to_pass"]
         )
         return {
             "gold_resolved": gold["resolved"] is True,

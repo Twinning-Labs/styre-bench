@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 from typing import Any
 
 from swebench.harness.constants import (
@@ -192,9 +191,11 @@ class SweBenchAdapter(OracleAdapter):
         gold = self.score(instance, instance["fix_patch"])
         base_a = self.score(instance, "")
         base_b = self.score(instance, "")
+        # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.
         deterministic = (
             base_a["resolved"] == base_b["resolved"]
             and base_a["fail_to_pass"] == base_b["fail_to_pass"]
+            and base_a["pass_to_pass"] == base_b["pass_to_pass"]
         )
         return {
             "gold_resolved": gold["resolved"] is True,

@@ -84,6 +84,13 @@ describe("normalizeInstance: multi-swe-bench", () => {
     expect(inst.base_commit).toBe(msbRaw.base.sha);
   });
 
+  test("derives image by the mswebench/<org>_m_<repo>:pr-<number> convention", () => {
+    const inst = normalizeInstance(msbRaw, "multi-swe-bench");
+    expect(inst.image).toBe(
+      `mswebench/${msbRaw.org}_m_${msbRaw.repo}:pr-${msbRaw.number}`.toLowerCase(),
+    );
+  });
+
   test("problem_statement is built from title + body", () => {
     const inst = normalizeInstance(msbRaw, "multi-swe-bench");
     expect(inst.problem_statement).toContain(msbRaw.title);

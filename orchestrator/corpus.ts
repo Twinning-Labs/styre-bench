@@ -54,6 +54,16 @@ function optionalString(r: Record<string, unknown>, key: string): string | undef
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+function requireInt(r: Record<string, unknown>, key: string, family: Family): number {
+  const v = requireKey<unknown>(r, key, family);
+  if (typeof v !== "number" || !Number.isInteger(v)) {
+    throw new Error(
+      `corpus: expected "${key}" to be an integer on a ${family} raw record (instance_id=${recordId(r)}), got ${typeof v}`,
+    );
+  }
+  return v;
+}
+
 /**
  * SWE-bench's FAIL_TO_PASS/PASS_TO_PASS are UPPERCASE keys whose value is itself a
  * JSON-encoded string (e.g. `"[\"tests/x.py::test_y\"]"`), not a native array. Parse it
@@ -212,11 +222,20 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
 
   const difficulty = difficultyFromPatchSize(fix_patch);
 
-  // ASSUMPTION (verify in Task 3): no confirmed MSB image-tag convention was found; this
-  // mirrors SWE-bench's `sweb.eval.x86_64.<id>` pattern with an "mswebench" prefix as a
-  // placeholder. Must be corrected against the actual Multi-SWE-bench runner's image
-  // naming before Task 3's scorer tries to `docker pull`/`run` it.
-  const image = `mswebench.eval.x86_64.${id.toLowerCase()}`;
+  // CONFIRMED (Task-3 review) against the installed `multi-swe-bench==1.1.2` package
+  // source itself (`multi_swe_bench/harness/image.py`'s `Image.image_prefix()` /
+  // `image_name()` / `image_full_name()`): the image name is
+  // `<prefix>/<org>_m_<repo>` (prefix = "mswebench"), lowercased. This superseded the
+  // earlier `mswebench.eval.x86_64.<id>` placeholder, which does not match the harness
+  // at all.
+  // ASSUMPTION (verify at live pass): the tag `pr-<number>` is `SWEImageDefault`'s
+  // (and every sampled per-repo `Image` subclass under
+  // `multi_swe_bench/harness/repos/typescript/**`'s) documented default `image_tag()`,
+  // but was not exhaustively checked against the specific repo this corpus record
+  // belongs to.
+  const number = requireInt(r, "number", family);
+  const imageName = `mswebench/${org}_m_${repo}`.toLowerCase();
+  const image = `${imageName}:pr-${number}`;
 
   return {
     id,
