@@ -46,7 +46,9 @@ const defaultDeps: SeedLinearDeps = {
       throw new Error(`seedLinear: Linear project "${projectId}" has no associated team`);
     }
 
-    const existing = await team.labels();
+    // first: 250 — an existing label past the SDK's default page size must still be found
+    // (a false "not found" would create a duplicate label instead of reusing it).
+    const existing = await team.labels({ first: 250 });
     const labelIds: string[] = [];
     for (const name of labelNames) {
       const found = existing.nodes.find((l) => l.name === name);

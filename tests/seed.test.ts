@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  addedPaths,
   assertNoHeldOut,
   assertNoHeldOutPaths,
   stripClaudeDir,
@@ -65,22 +66,80 @@ describe("touchedPaths (pure)", () => {
   });
 });
 
+describe("addedPaths (pure)", () => {
+  test("does not include a path the patch only MODIFIES (pre-image is a real file, not /dev/null)", () => {
+    const patch =
+      "diff --git a/foo/bar.py b/foo/bar.py\n--- a/foo/bar.py\n+++ b/foo/bar.py\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+    expect(addedPaths(patch)).not.toContain("foo/bar.py");
+    expect(addedPaths(patch)).toEqual([]);
+  });
+
+  test("includes a path created via a `--- /dev/null` pre-image (SWE-bench-style patch, no `diff --git` header)", () => {
+    const patch = "--- /dev/null\n+++ b/tests/x_regression.py\n@@ -0,0 +1,1 @@\n+assert True\n";
+    expect(addedPaths(patch)).toContain("tests/x_regression.py");
+  });
+
+  test("includes a path created via the git-generated `new file mode` form", () => {
+    const patch =
+      "diff --git a/tests/x_new.py b/tests/x_new.py\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/tests/x_new.py\n@@ -0,0 +1,1 @@\n+assert True\n";
+    expect(addedPaths(patch)).toContain("tests/x_new.py");
+  });
+});
+
 describe("assertNoHeldOutPaths (pure, path-level firewall)", () => {
-  test("throws when a held-out test_patch path is present in the candidate path set", () => {
+  test("throws when a held-out test_patch-ADDED path is present in the candidate path set", () => {
     const inst = makeInstance();
     expect(() => assertNoHeldOutPaths(["tests/x_regression.py", "widget/core.py"], inst)).toThrow(
       /FIREWALL VIOLATION/,
     );
   });
 
-  test("throws when a held-out fix_patch path is present", () => {
-    const inst = makeInstance();
-    expect(() => assertNoHeldOutPaths(["widget/core.py"], inst)).toThrow(/FIREWALL VIOLATION/);
+  test("does NOT throw when the snapshot contains a path fix_patch only MODIFIES (legitimately pre-exists in base_commit as the buggy code to fix)", () => {
+    const inst = makeInstance(); // default fix_patch modifies widget/core.py, does not create it
+    expect(() => assertNoHeldOutPaths(["widget/core.py"], inst)).not.toThrow();
+  });
+
+  test("throws when a held-out fix_patch-ADDED path is present (fix_patch creates a new file)", () => {
+    const inst = makeInstance({
+      fix_patch: [
+        "diff --git a/widget/new_helper.py b/widget/new_helper.py",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/widget/new_helper.py",
+        "@@ -0,0 +1,1 @@",
+        SENTINEL_FIX_LINE,
+      ].join("\n"),
+    });
+    expect(() => assertNoHeldOutPaths(["widget/new_helper.py"], inst)).toThrow(
+      /FIREWALL VIOLATION/,
+    );
   });
 
   test("passes cleanly when no held-out path is present", () => {
     const inst = makeInstance();
     expect(() => assertNoHeldOutPaths(["widget/other.py", "README.md"], inst)).not.toThrow();
+  });
+});
+
+describe("assertNoHeldOutPaths / assertNoHeldOut: fail CLOSED on an unparseable patch", () => {
+  test("assertNoHeldOutPaths throws when test_patch is non-empty but has no recognizable diff headers", () => {
+    const inst = makeInstance({ test_patch: "this is not a valid unified diff at all" });
+    expect(() => assertNoHeldOutPaths(["widget/core.py"], inst)).toThrow(/unparseable patch/);
+  });
+
+  test("assertNoHeldOutPaths throws when fix_patch is non-empty but has no recognizable diff headers", () => {
+    const inst = makeInstance({ fix_patch: "garbage, not a diff" });
+    expect(() => assertNoHeldOutPaths(["widget/core.py"], inst)).toThrow(/unparseable patch/);
+  });
+
+  test("assertNoHeldOut throws when fix_patch is non-empty but has no recognizable diff headers", () => {
+    const inst = makeInstance({ fix_patch: "garbage, not a diff" });
+    expect(() => assertNoHeldOut("some issue text", inst)).toThrow(/unparseable patch/);
+  });
+
+  test("assertNoHeldOut throws when test_patch is non-empty but has no recognizable diff headers", () => {
+    const inst = makeInstance({ test_patch: "garbage, not a diff" });
+    expect(() => assertNoHeldOut("some issue text", inst)).toThrow(/unparseable patch/);
   });
 });
 
@@ -109,6 +168,19 @@ describe("assertNoHeldOut (pure, content-level firewall)", () => {
       test_patch: "diff --git a/y.py b/y.py\n+ok\n",
     });
     expect(() => assertNoHeldOut("pass, ok, }", inst)).not.toThrow();
+  });
+
+  test("does NOT throw when text quotes a REMOVED (-) line from fix_patch — old buggy code already visible in base_commit, not secret", () => {
+    const inst = makeInstance();
+    const removedLineBody = "return _old_broken_implementation(value)"; // the '-' line, sans leading '-'
+    const text = `Stack trace shows: ${removedLineBody}`;
+    expect(() => assertNoHeldOut(text, inst)).not.toThrow();
+  });
+
+  test("throws when text contains an ADDED (+) line from fix_patch even though a '-' line is also present in the patch", () => {
+    const inst = makeInstance();
+    const text = `leaked: ${SENTINEL_FIX_LINE.slice(1)}`;
+    expect(() => assertNoHeldOut(text, inst)).toThrow(/FIREWALL VIOLATION/);
   });
 });
 
@@ -213,6 +285,52 @@ describe("seedGithub (mocked deps — no network)", () => {
     expect(orgSeen).toBe("styre-bench-scratch");
     expect(result.repoUrl).toContain("styre-bench-scratch");
     expect(result.defaultBranch).toBe("main");
+  });
+});
+
+describe("seedGithub / seedLinear: fail CLOSED on an unparseable patch (integration)", () => {
+  test("seedGithub throws and never pushes when test_patch is unparseable", async () => {
+    const inst = makeInstance({ test_patch: "not a diff, no headers at all" });
+    let pushCalled = false;
+    await expect(
+      seedGithub(
+        inst,
+        { benchGithubOrg: "styre-bench-scratch" },
+        {
+          deps: {
+            fetchSnapshot: async () => [{ path: "widget/core.py", content: "def compute(): ..." }],
+            createRepo: async () => ({
+              repoUrl: "https://example.invalid/styre-bench-scratch/bench-org__repo-123.git",
+              defaultBranch: "main",
+            }),
+            pushSnapshot: async () => {
+              pushCalled = true;
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/unparseable patch/);
+    expect(pushCalled).toBe(false);
+  });
+
+  test("seedLinear throws and never creates the issue when fix_patch is unparseable", async () => {
+    const inst = makeInstance({ fix_patch: "not a diff, no headers at all" });
+    let called = false;
+    await expect(
+      seedLinear(
+        inst,
+        { linearProjectId: "proj-123" },
+        {
+          deps: {
+            createIssue: async () => {
+              called = true;
+              return { ident: "BENCH-X" };
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/unparseable patch/);
+    expect(called).toBe(false);
   });
 });
 
