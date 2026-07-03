@@ -142,9 +142,7 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).toContain('cd "/testbed"');
     // --trust-agent-commands: bench is autonomous/headless, so styre must accept agent-discovered
     // build/test/check commands (else it can't ground-truth-verify most stacks).
-    expect(script).toContain(
-      'setup "/testbed" --out "/out/profile.json" --trust-agent-commands',
-    );
+    expect(script).toContain('setup "/testbed" --out "/out/profile.json" --trust-agent-commands');
   });
 
   test("honors a repoDirInImage override", () => {
