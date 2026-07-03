@@ -213,6 +213,11 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
 
 export interface BuildDockerArgsInput {
   image: string;
+  /** `docker run --platform` value (from `Instance.platform`). Defaults to `linux/amd64`
+   *  when unset — the correct value for every Multi-SWE-bench image and for SWE-bench on an
+   *  x86_64 host; an arm64 host's SWE-bench instances carry `linux/arm64` so their native
+   *  arm64 images run without emulation. */
+  platform?: string;
   binaryPath: string;
   /** HOST directory mounted read-write to `CONTAINER_OUT_DIR` ("/out") — ndjson/transcript/
    *  profile all land under here on the host. */
@@ -231,15 +236,16 @@ export interface BuildDockerArgsInput {
  * type has no field for them — FIREWALL by construction, matching `buildEntrypoint`).
  */
 export function buildDockerArgs(input: BuildDockerArgsInput): string[] {
-  const { image, binaryPath, outDir, entrypointHostPath, creds } = input;
+  const { image, platform = "linux/amd64", binaryPath, outDir, entrypointHostPath, creds } = input;
   return [
     "run",
     "--rm",
-    // SWE-bench and Multi-SWE-bench images are x86_64-only. Forcing amd64 makes them run
-    // under emulation on an arm64 host (Apple Silicon); on a real linux/amd64 host this is
-    // a harmless no-op.
+    // Per-instance platform (set by corpus.ts's normalizers). SWE-bench on an arm64 host uses
+    // linux/arm64 to run its native arm64 image; SWE-bench on x86_64 and every Multi-SWE-bench
+    // image (amd64-only) use linux/amd64 — native on x86_64, emulated on arm64. The default
+    // keeps legacy/fixture callers (no platform) on linux/amd64.
     "--platform",
-    "linux/amd64",
+    platform,
     "-v",
     `${binaryPath}:${CONTAINER_BINARY_PATH}:ro`,
     "-v",
@@ -368,6 +374,7 @@ export async function runStyre(
 
   const args = buildDockerArgs({
     image: inst.image,
+    platform: inst.platform,
     binaryPath,
     outDir,
     entrypointHostPath,

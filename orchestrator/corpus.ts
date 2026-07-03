@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { BENCH_CONFIG } from "../config/bench.config";
+import { type ImageArch, dockerPlatform, hostImageArch } from "./platform";
 import type { Difficulty, Instance } from "./types";
 
 export type Family = "swe-bench" | "multi-swe-bench";
@@ -139,7 +140,7 @@ function difficultyFromPatchSize(patch: string): Difficulty {
   return "hard";
 }
 
-function normalizeSweBench(r: Record<string, unknown>): Instance {
+function normalizeSweBench(r: Record<string, unknown>, imageArch: ImageArch): Instance {
   const family: Family = "swe-bench";
   const id = requireString(r, "instance_id", family);
   // The gold fix is named `patch` in the raw schema, NOT `fix_patch` — do not rename this line.
@@ -170,11 +171,16 @@ function normalizeSweBench(r: Record<string, unknown>): Instance {
     problem_statement,
     hints,
     // SWE-bench eval image naming convention: the pullable image lives on Docker Hub under
-    // the `swebench/` namespace as `swebench/sweb.eval.x86_64.<instance_id>`, with every
-    // `__` in the instance_id replaced by `_1776_` (SWE-bench's own tag-sanitization rule),
-    // then lowercased. VERIFIED: `swebench/sweb.eval.x86_64.astropy_1776_astropy-12907`
-    // exists on Docker Hub for instance_id `astropy__astropy-12907`.
-    image: `swebench/sweb.eval.x86_64.${id.replaceAll("__", "_1776_").toLowerCase()}`,
+    // the `swebench/` namespace as `swebench/sweb.eval.<arch>.<instance_id>`, with every `__`
+    // in the instance_id replaced by `_1776_` (SWE-bench's own tag-sanitization rule), then
+    // lowercased. The `<arch>` infix is the actual per-arch image (SWE-bench publishes both):
+    // VERIFIED on Docker Hub for instance_id `astropy__astropy-12907` —
+    // `swebench/sweb.eval.x86_64.astropy_1776_astropy-12907` (linux/amd64) and
+    // `swebench/sweb.eval.arm64.astropy_1776_astropy-12907` (linux/arm64). Picking the
+    // host-native arch (see `hostImageArch`) means an Apple-Silicon host pulls the arm64
+    // image and runs it natively instead of emulating amd64.
+    image: `swebench/sweb.eval.${imageArch}.${id.replaceAll("__", "_1776_").toLowerCase()}`,
+    platform: dockerPlatform(imageArch),
     fail_to_pass,
     pass_to_pass,
     merge_date,
@@ -256,6 +262,11 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
     base_commit,
     problem_statement,
     image,
+    // Multi-SWE-bench publishes amd64-only images (no arch in the tag, no arm64 variant of
+    // `pr-<n>` on Docker Hub as of this writing), so MSB always runs linux/amd64: native on
+    // an x86_64 host, emulated on arm64. Unlike SWE-bench there is no host-native arm64 image
+    // to select — revisit here (and pull the arch into the tag) if `mswebench/*` gains one.
+    platform: "linux/amd64",
     fail_to_pass,
     pass_to_pass,
     merge_date,
@@ -269,9 +280,13 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
   };
 }
 
-export function normalizeInstance(raw: unknown, family: Family): Instance {
+export function normalizeInstance(
+  raw: unknown,
+  family: Family,
+  imageArch: ImageArch = hostImageArch(),
+): Instance {
   const r = assertRecord(raw, family);
-  return family === "swe-bench" ? normalizeSweBench(r) : normalizeMultiSweBench(r);
+  return family === "swe-bench" ? normalizeSweBench(r, imageArch) : normalizeMultiSweBench(r);
 }
 
 /** Best-effort id extraction from a raw record, for logging a dropped/corrupt one. */
@@ -320,11 +335,14 @@ export async function loadInstances(
   // mui__material-ui-39688). A single bad record must not kill loading the whole corpus. The
   // guard still holds (a dropped record never becomes a scoreable Instance); the drop is LOGGED,
   // never silent. If EVERY record fails, the cache is corrupt → throw rather than return [].
+  // Resolve the host image architecture ONCE for the whole corpus (rather than per-record)
+  // so image names + platforms are consistent and the env override / host probe runs once.
+  const imageArch = hostImageArch();
   const instances: Instance[] = [];
   const dropped: string[] = [];
   for (const rec of raw) {
     try {
-      instances.push(normalizeInstance(rec, family));
+      instances.push(normalizeInstance(rec, family, imageArch));
     } catch (err) {
       dropped.push(`${rawRecordId(rec)} (${(err as Error).message})`);
     }

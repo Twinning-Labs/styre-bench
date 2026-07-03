@@ -37,17 +37,26 @@ describe("normalizeInstance: swe-bench", () => {
     ]);
   });
 
-  test("derives a pullable swebench/ Docker Hub image, replacing __ with _1776_ and lowercasing", () => {
-    const inst = normalizeInstance(sweRaw, "swe-bench");
+  test("derives a pullable swebench/ Docker Hub image, replacing __ with _1776_ and lowercasing (x86_64)", () => {
+    const inst = normalizeInstance(sweRaw, "swe-bench", "x86_64");
     // sweRaw.instance_id is "pallets__flask-5063" -> "swebench/sweb.eval.x86_64.pallets_1776_flask-5063"
     const expectedId = sweRaw.instance_id.replaceAll("__", "_1776_").toLowerCase();
     expect(inst.image).toBe(`swebench/sweb.eval.x86_64.${expectedId}`);
     expect(inst.image).toBe("swebench/sweb.eval.x86_64.pallets_1776_flask-5063");
+    expect(inst.platform).toBe("linux/amd64");
+  });
+
+  test("selects the native arm64 image + linux/arm64 platform when imageArch is arm64", () => {
+    const raw = { ...sweRaw, instance_id: "astropy__astropy-12907" };
+    const inst = normalizeInstance(raw, "swe-bench", "arm64");
+    // VERIFIED on Docker Hub: swebench/sweb.eval.arm64.astropy_1776_astropy-12907 exists.
+    expect(inst.image).toBe("swebench/sweb.eval.arm64.astropy_1776_astropy-12907");
+    expect(inst.platform).toBe("linux/arm64");
   });
 
   test("replaces ALL __ occurrences, not just the first (e.g. astropy__astropy-12907)", () => {
     const raw = { ...sweRaw, instance_id: "astropy__astropy-12907" };
-    const inst = normalizeInstance(raw, "swe-bench");
+    const inst = normalizeInstance(raw, "swe-bench", "x86_64");
     expect(inst.image).toBe("swebench/sweb.eval.x86_64.astropy_1776_astropy-12907");
   });
 
@@ -109,6 +118,11 @@ describe("normalizeInstance: multi-swe-bench", () => {
     expect(inst.image).toBe(
       `mswebench/${msbRaw.org}_m_${msbRaw.repo}:pr-${msbRaw.number}`.toLowerCase(),
     );
+  });
+
+  test("Multi-SWE-bench is always linux/amd64 (amd64-only images), even when imageArch is arm64", () => {
+    const inst = normalizeInstance(msbRaw, "multi-swe-bench", "arm64");
+    expect(inst.platform).toBe("linux/amd64");
   });
 
   test("problem_statement is built from title + body", () => {

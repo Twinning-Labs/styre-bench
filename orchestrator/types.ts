@@ -9,6 +9,12 @@ export interface Instance {
   problem_statement: string;
   hints?: string;
   image: string; // pinned Docker image ref
+  /** `docker run --platform` value for this instance's image, set by `corpus.ts`'s
+   *  normalizers: SWE-bench (Python) uses the host-native arch (`linux/arm64` on Apple
+   *  Silicon, else `linux/amd64`) to match its arch-in-the-name image; Multi-SWE-bench (TS)
+   *  is always `linux/amd64` (amd64-only images). Optional only so test fixtures needn't set
+   *  it — `run-task.ts`'s `buildDockerArgs` defaults an unset value to `linux/amd64`. */
+  platform?: string;
   fail_to_pass: string[];
   pass_to_pass: string[];
   merge_date?: string; // ISO; for cutoff split
