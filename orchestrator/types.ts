@@ -15,6 +15,14 @@ export interface Instance {
    *  is always `linux/amd64` (amd64-only images). Optional only so test fixtures needn't set
    *  it — `run-task.ts`'s `buildDockerArgs` defaults an unset value to `linux/amd64`. */
   platform?: string;
+  /** Absolute path the eval image has the repo pre-checked-out at, set by `corpus.ts`'s
+   *  normalizers: SWE-bench (Python) uses `/testbed`; Multi-SWE-bench (TS) uses
+   *  `/home/<repo>` (CONFIRMED against the multi-swe-bench harness — all 230 TS repo classes
+   *  `cd /home/{repo}`, none use `/testbed` — and the live darkreader image). The entrypoint
+   *  `cd`s here before `styre setup`, so a wrong value dies with "cd: <path>: No such file or
+   *  directory". Optional only so fixtures needn't set it — `run-task.ts` defaults an unset
+   *  value to `DEFAULT_REPO_DIR_IN_IMAGE` ("/testbed"). */
+  repoDirInImage?: string;
   fail_to_pass: string[];
   pass_to_pass: string[];
   merge_date?: string; // ISO; for cutoff split

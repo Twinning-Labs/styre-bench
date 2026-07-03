@@ -181,6 +181,9 @@ function normalizeSweBench(r: Record<string, unknown>, imageArch: ImageArch): In
     // image and runs it natively instead of emulating amd64.
     image: `swebench/sweb.eval.${imageArch}.${id.replaceAll("__", "_1776_").toLowerCase()}`,
     platform: dockerPlatform(imageArch),
+    // SWE-bench eval images pre-check-out the repo at /testbed (the harness convention its
+    // fix-run.sh `cd /testbed`s into).
+    repoDirInImage: "/testbed",
     fail_to_pass,
     pass_to_pass,
     merge_date,
@@ -267,6 +270,10 @@ function normalizeMultiSweBench(r: Record<string, unknown>): Instance {
     // an x86_64 host, emulated on arm64. Unlike SWE-bench there is no host-native arm64 image
     // to select — revisit here (and pull the arch into the tag) if `mswebench/*` gains one.
     platform: "linux/amd64",
+    // Multi-SWE-bench TS images clone the repo to /home/<repo> (WORKDIR /home/), NOT /testbed.
+    // CONFIRMED against the multi-swe-bench harness (every typescript repo class `cd
+    // /home/{pr.repo}`; 0 use /testbed) and the live darkreader image (repo at /home/darkreader).
+    repoDirInImage: `/home/${repo}`,
     fail_to_pass,
     pass_to_pass,
     merge_date,

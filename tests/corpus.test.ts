@@ -54,6 +54,11 @@ describe("normalizeInstance: swe-bench", () => {
     expect(inst.platform).toBe("linux/arm64");
   });
 
+  test("SWE-bench repo is pre-checked-out at /testbed", () => {
+    const inst = normalizeInstance(sweRaw, "swe-bench", "x86_64");
+    expect(inst.repoDirInImage).toBe("/testbed");
+  });
+
   test("replaces ALL __ occurrences, not just the first (e.g. astropy__astropy-12907)", () => {
     const raw = { ...sweRaw, instance_id: "astropy__astropy-12907" };
     const inst = normalizeInstance(raw, "swe-bench", "x86_64");
@@ -123,6 +128,12 @@ describe("normalizeInstance: multi-swe-bench", () => {
   test("Multi-SWE-bench is always linux/amd64 (amd64-only images), even when imageArch is arm64", () => {
     const inst = normalizeInstance(msbRaw, "multi-swe-bench", "arm64");
     expect(inst.platform).toBe("linux/amd64");
+  });
+
+  test("Multi-SWE-bench repo is checked out at /home/<repo> (NOT /testbed)", () => {
+    const inst = normalizeInstance(msbRaw, "multi-swe-bench");
+    expect(inst.repoDirInImage).toBe(`/home/${msbRaw.repo}`);
+    expect(inst.repoDirInImage).not.toBe("/testbed");
   });
 
   test("problem_statement is built from title + body", () => {

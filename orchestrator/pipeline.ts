@@ -318,8 +318,13 @@ async function defaultRunStage(
 ): Promise<RunStyreResult> {
   // Thread cfg.cohort through so `run-task.ts`'s `claude` wrapper (LAYER 2 of the web-off
   // guarantee) knows whether to append --disallowedTools — see build-styre.ts's
-  // applyWebOffPatch doc for the two-layer explanation.
-  return runStyre(inst, seed, binaryPath, { cohort: cfg.cohort });
+  // applyWebOffPatch doc for the two-layer explanation. `repoDirInImage` is per-instance
+  // (SWE-bench /testbed vs MSB /home/<repo>) — see Instance.repoDirInImage; run-task defaults
+  // an unset value to /testbed.
+  return runStyre(inst, seed, binaryPath, {
+    cohort: cfg.cohort,
+    repoDirInImage: inst.repoDirInImage,
+  });
 }
 
 /** Selects the styre binary matching an instance's container platform (its `--platform`,
