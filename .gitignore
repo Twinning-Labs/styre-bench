@@ -69,6 +69,10 @@ web_modules/
 .env
 .env.*
 !.env.example
+# operator secrets live in config/config.env (anthropic/linear/github/bench tokens) — NEVER commit.
+# `.env`/`.env.*` above do NOT match a file named `config.env`, so cover it explicitly + a *.env catch-all.
+config/config.env
+*.env
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
