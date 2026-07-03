@@ -41,6 +41,13 @@ const CONTAINER_OUT_DIR = "/out";
 const CONTAINER_NDJSON_PATH = `${CONTAINER_OUT_DIR}/run.ndjson`;
 const CONTAINER_TRANSCRIPT_PATH = `${CONTAINER_OUT_DIR}/transcript.jsonl`;
 const CONTAINER_PROFILE_PATH = `${CONTAINER_OUT_DIR}/profile.json`;
+/** Distinct container exit code the entrypoint uses when `styre setup` fails (produced no
+ *  usable profile). Lets `collect` classify it as `probe` (a setup-coverage gap — styre
+ *  couldn't produce a runnable profile for this repo) rather than `infra`, and — because
+ *  `probe` is terminal — skip the pointless infra-retry (styre setup already retries its own
+ *  agent enrichment internally, so a bench-level retry just re-runs the same deterministic
+ *  failure). 70 = EX_SOFTWARE; styre itself uses 65/75 (resume/park) and 0/1, never 70. */
+export const SETUP_FAILED_EXIT = 70;
 const CONTAINER_ENTRYPOINT_PATH = "/entrypoint.sh";
 const WRAPPER_DIR = "/opt/styre-bench/wrapper-bin";
 const WRAPPER_PATH = `${WRAPPER_DIR}/claude`;
@@ -240,7 +247,19 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `git checkout -B "${seed.defaultBranch}"`,
     "",
     "echo 'styre-bench entrypoint: [5/6] styre setup'",
+    // Wrap styre setup so a failure exits with the distinct SETUP_FAILED_EXIT (not the generic
+    // 1 that claude-install/infra failures also use, nor styre run's own exit) — collect maps
+    // it to `probe` (setup-coverage gap), not `infra`. Without this, a setup crash writes no
+    // profile.json and emits no run summary, so collect would misread it as an infra failure
+    // and retry it (uselessly — styre setup is deterministic).
+    "set +e",
     `"${CONTAINER_BINARY_PATH}" setup "${repoDirInImage}" --out "${CONTAINER_PROFILE_PATH}"`,
+    'setup_exit="$?"',
+    "set -e",
+    'if [ "$setup_exit" -ne 0 ]; then',
+    `  echo "styre-bench entrypoint: styre setup failed (exit $setup_exit) — no usable profile; exiting ${SETUP_FAILED_EXIT} (probe)" >&2`,
+    `  exit ${SETUP_FAILED_EXIT}`,
+    "fi",
     "",
     "echo 'styre-bench entrypoint: [6/6] styre run'",
     "set +e",

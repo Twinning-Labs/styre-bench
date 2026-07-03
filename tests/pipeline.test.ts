@@ -9,11 +9,13 @@ import {
   type RunPoolOpts,
   type ScoreResult,
   type SelfTestResult,
+  defaultCollectStage,
   resolvePythonBin,
   runInstance,
   runPilot,
   runPool,
 } from "../orchestrator/pipeline";
+import { SETUP_FAILED_EXIT } from "../orchestrator/run-task";
 import type { RunSeed, RunStyreResult } from "../orchestrator/run-task";
 import type { Instance, TaskRecord } from "../orchestrator/types";
 
@@ -329,6 +331,30 @@ describe("runInstance: probe short-circuit", () => {
     expect(calls.abReview).toBe(0);
     // probe is not infra -- must NOT be retried
     expect(calls.collect).toBe(1);
+  });
+});
+
+describe("defaultCollectStage: styre-setup-failure -> probe (not infra)", () => {
+  const seed: RunSeed = {
+    repoUrl: "https://example.invalid/styre-bench-scratch/bench-x.git",
+    defaultBranch: "main",
+    ident: "BENCH-1",
+  };
+
+  test("a SETUP_FAILED_EXIT container exit is classified probe, with no PR/ndjson read", async () => {
+    // The probe branch returns before any profile/ndjson/PR read — only the transcript is
+    // read (best-effort), so nonexistent paths are safe (no network, no fixtures needed).
+    const record = await defaultCollectStage(makeInstance(), seed, {
+      ndjsonPath: "/nonexistent/run.ndjson",
+      transcriptPath: "/nonexistent/transcript.jsonl",
+      profilePath: "/nonexistent/profile.json",
+      exitCode: SETUP_FAILED_EXIT,
+    });
+    expect(record.record.taxonomy).toBe("probe");
+    expect(record.record.status).toMatch(/setup/i);
+    expect(record.record.self_authored_test).toBeNull();
+    expect(record.pr_opened).toBe(false);
+    expect(record.diff).toBe("");
   });
 });
 

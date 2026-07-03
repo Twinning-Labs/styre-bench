@@ -3,6 +3,7 @@ import {
   CLAUDE_CLI_VERSION,
   EXAMPLE_COM_TITLE,
   type RunSeed,
+  SETUP_FAILED_EXIT,
   buildDockerArgs,
   buildEntrypoint,
   detectWebReachable,
@@ -146,6 +147,17 @@ describe("buildEntrypoint (pure)", () => {
     const script = buildEntrypoint({ seed: makeSeed(), repoDirInImage: "/repo" });
     expect(script).toContain('cd "/repo"');
     expect(script).toContain('setup "/repo" --out "/out/profile.json"');
+  });
+
+  test("a styre setup failure exits with the distinct SETUP_FAILED_EXIT (probe), not a generic non-zero", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    // setup is wrapped so its non-zero exit is captured (not aborted by set -e) and mapped to
+    // the sentinel exit code — collect reads it as `probe`, not `infra`.
+    expect(script).toContain('setup_exit="$?"');
+    expect(script).toContain('if [ "$setup_exit" -ne 0 ]; then');
+    expect(script).toContain(`exit ${SETUP_FAILED_EXIT}`);
+    // The sentinel must differ from styre run's own exit passthrough.
+    expect(SETUP_FAILED_EXIT).toBe(70);
   });
 
   test("runs styre run with the seed ident + --profile, AFTER setup, teeing NDJSON stdout", () => {

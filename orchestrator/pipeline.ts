@@ -20,7 +20,7 @@ import { loadInstances } from "./corpus";
 import { addedPaths } from "./firewall";
 import { selectPilot, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
-import { runStyre } from "./run-task";
+import { SETUP_FAILED_EXIT, runStyre } from "./run-task";
 import type { RunSeed, RunStyreResult } from "./run-task";
 import { seedGithub } from "./seed-github";
 import { seedLinear } from "./seed-linear";
@@ -244,11 +244,32 @@ async function fetchPrDiff(
   }
 }
 
-async function defaultCollectStage(
+export async function defaultCollectStage(
   inst: Instance,
   seed: RunSeed,
   result: RunStyreResult,
 ): Promise<CollectStageResult> {
+  // styre setup failed (distinct exit code from the entrypoint): no usable profile was
+  // produced, so styre run never happened and there is nothing to collect. This is a
+  // setup-coverage gap (`probe`), NOT an infra/transport failure — classify it terminally so
+  // the infra-retry loop doesn't uselessly re-run a deterministic setup failure. The
+  // transcript (claude's stream from the enrichment attempts) is still read for diagnostics.
+  if (result.exitCode === SETUP_FAILED_EXIT) {
+    const transcript = await readFile(result.transcriptPath, "utf8").catch(() => "");
+    return {
+      record: {
+        taxonomy: "probe",
+        status: "styre setup failed — no usable profile produced (setup/enrichment gap)",
+        self_authored_test: null,
+        self_test_passed: null,
+      },
+      diff: "",
+      addedTestPaths: [],
+      transcript,
+      pr_opened: false,
+    };
+  }
+
   const [ndjson, profileText, transcript] = await Promise.all([
     readFile(result.ndjsonPath, "utf8").catch(() => ""),
     readFile(result.profilePath, "utf8").catch(() => "{}"),
