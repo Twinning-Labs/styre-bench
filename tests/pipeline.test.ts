@@ -17,6 +17,11 @@ import {
 import type { RunSeed, RunStyreResult } from "../orchestrator/run-task";
 import type { Instance, TaskRecord } from "../orchestrator/types";
 
+// The styre binaries map every runInstance/runPool/buildStyre stub uses. makeInstance()
+// fixtures leave `platform` unset, so the pipeline resolves them at the default "linux/amd64"
+// key (see pipeline.ts's resolveBinary).
+const STYRE_BINS: Record<string, string> = { "linux/amd64": "/bin/styre" };
+
 function makeInstance(overrides: Partial<Instance> = {}): Instance {
   return {
     id: "inst-1",
@@ -207,7 +212,7 @@ function trackedDeps(overrides: Partial<PipelineDeps> = {}): { deps: PipelineDep
 describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
   test("deterministic:false -> taxonomy dropped-flaky, styre NEVER invoked", async () => {
     const { deps, calls } = trackedDeps({ runControls: async () => FLAKY_CONTROLS });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("dropped-flaky");
     expect(rec.resolved).toBe(false);
@@ -225,7 +230,7 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const { deps, calls } = trackedDeps({
       runControls: async () => ({ gold_resolved: false, base_fails: true, deterministic: true }),
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
     expect(rec.taxonomy).toBe("dropped-flaky");
     expect(calls.seed).toBe(0);
   });
@@ -234,14 +239,14 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const { deps, calls } = trackedDeps({
       runControls: async () => ({ gold_resolved: true, base_fails: false, deterministic: true }),
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
     expect(rec.taxonomy).toBe("dropped-flaky");
     expect(calls.seed).toBe(0);
   });
 
   test("all controls true -> proceeds to seed/run/collect", async () => {
     const { deps, calls } = trackedDeps();
-    await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
     expect(calls.seed).toBe(1);
     expect(calls.run).toBe(1);
     expect(calls.collect).toBe(1);
@@ -257,7 +262,7 @@ describe("runInstance: whole-instance infra-retry", () => {
         return attempt === 1 ? infraStage() : pendingStage();
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(calls.seed).toBe(2);
     expect(calls.run).toBe(2);
@@ -271,7 +276,7 @@ describe("runInstance: whole-instance infra-retry", () => {
 
   test("a QUALITY outcome (opened-but-unresolved) is NOT retried", async () => {
     const { deps, calls } = trackedDeps({ score: async () => SCORE_UNRESOLVED });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(calls.seed).toBe(1);
     expect(calls.run).toBe(1);
@@ -282,7 +287,7 @@ describe("runInstance: whole-instance infra-retry", () => {
 
   test("infra on every attempt -> capped at maxInfraRetries, final taxonomy stays infra", async () => {
     const { deps, calls } = trackedDeps({ collect: async () => infraStage() });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       maxInfraRetries: 2,
     });
@@ -299,7 +304,7 @@ describe("runInstance: whole-instance infra-retry", () => {
     const { deps, calls } = trackedDeps({
       collect: async () => ({ ...infraStage(), record: { taxonomy: "infra", cost_usd: 10 } }),
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg({ perTaskCostCapUsd: 5 }), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg({ perTaskCostCapUsd: 5 }), {
       deps,
       maxInfraRetries: 5,
     });
@@ -314,7 +319,7 @@ describe("runInstance: whole-instance infra-retry", () => {
 describe("runInstance: probe short-circuit", () => {
   test("taxonomy:probe -> score/self-test/leak/review NOT called", async () => {
     const { deps, calls } = trackedDeps({ collect: async () => probeStage() });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("probe");
     expect(calls.score).toBe(0);
@@ -334,7 +339,7 @@ describe("runInstance: run_self_test transport-error contract", () => {
         throw new Error("subprocess exit 1: adapter crashed");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.self_test_passed).toBeNull();
     expect(rec.taxonomy).toBe("resolved"); // the rest of the pipeline still completed normally
@@ -344,7 +349,7 @@ describe("runInstance: run_self_test transport-error contract", () => {
     const { deps, calls } = trackedDeps({
       collect: async () => ({ ...pendingStage(), addedTestPaths: [] }),
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(calls.runSelfTest).toBe(0);
     expect(rec.self_test_passed).toBe(true); // pendingStage()'s record.self_test_passed
@@ -376,7 +381,7 @@ describe("runInstance: bare-tree-diff propagation", () => {
         return { preference: "A(styre)" as const, notes: "" };
       },
     });
-    await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(seenDiffs).toHaveLength(5);
     expect(new Set(seenDiffs).size).toBe(1);
@@ -393,7 +398,7 @@ describe("runInstance: bare-tree-diff propagation", () => {
       },
     });
     const inst = makeInstance({ id: "some-instance-id" });
-    await runInstance(inst, "/bin/styre", makeCfg({ seed: 99 }), { deps });
+    await runInstance(inst, STYRE_BINS, makeCfg({ seed: 99 }), { deps });
 
     expect(capturedInstanceId).toBe("some-instance-id");
     expect(capturedSeed).toBe(99);
@@ -407,7 +412,7 @@ describe("runInstance: cleanup always runs per started attempt", () => {
         throw new Error("docker daemon unreachable");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       maxInfraRetries: 0,
     });
@@ -424,7 +429,7 @@ describe("runInstance: cleanup always runs per started attempt", () => {
         throw new Error("github API rate-limited");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       maxInfraRetries: 0,
     });
@@ -441,7 +446,11 @@ describe("runInstance: cleanup always runs per started attempt", () => {
       makeInstance({ id: "ok-2" }),
     ];
 
-    const runInstanceStub = async (inst: Instance, _binaryPath: string, cfg: PipelineConfig) => {
+    const runInstanceStub = async (
+      inst: Instance,
+      _binaries: Record<string, string>,
+      cfg: PipelineConfig,
+    ) => {
       const { deps: innerDeps } = trackedDeps({
         cleanup: async () => {
           cleanupCalls.push(inst.id);
@@ -451,10 +460,10 @@ describe("runInstance: cleanup always runs per started attempt", () => {
           return RUN_RESULT;
         },
       });
-      return runInstance(inst, "/bin/styre", cfg, { deps: innerDeps, maxInfraRetries: 0 });
+      return runInstance(inst, STYRE_BINS, cfg, { deps: innerDeps, maxInfraRetries: 0 });
     };
 
-    const result = await runPool(instances, "/bin/styre", makeCfg({ concurrency: 1 }), {
+    const result = await runPool(instances, STYRE_BINS, makeCfg({ concurrency: 1 }), {
       runInstance: runInstanceStub,
     });
 
@@ -507,7 +516,7 @@ describe("runPool: runBudgetUsd kill-switch", () => {
 
     const result = await runPool(
       instances,
-      "/bin/styre",
+      STYRE_BINS,
       makeCfg({ concurrency: 1, runBudgetUsd: 15 }),
       {
         runInstance: runInstanceStub,
@@ -556,7 +565,7 @@ describe("runPool: runBudgetUsd kill-switch", () => {
 
     const result = await runPool(
       instances,
-      "/bin/styre",
+      STYRE_BINS,
       makeCfg({ concurrency: 2, runBudgetUsd: 150 }),
       {
         runInstance: runInstanceStub,
@@ -577,7 +586,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
         throw new Error("leak_detect.py: subprocess exit 1");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.resolved).toBe(true);
     expect(rec.taxonomy).toBe("resolved");
@@ -597,7 +606,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
         throw new Error("blind-quality reviewer: rate limited");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.resolved).toBe(true);
     expect(rec.taxonomy).toBe("resolved");
@@ -613,7 +622,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
         throw new Error("ab-review: malformed judge output");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.resolved).toBe(false);
     expect(rec.taxonomy).toBe("opened-but-unresolved");
@@ -628,7 +637,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
         throw new Error("scorer/score.py: docker daemon unreachable");
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       maxInfraRetries: 1,
     });
@@ -650,7 +659,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
       throw new Error("unhandled: some judgment stage crashed and rejected the whole call");
     };
 
-    const result = await runPool(instances, "/bin/styre", makeCfg({ concurrency: 1 }), {
+    const result = await runPool(instances, STYRE_BINS, makeCfg({ concurrency: 1 }), {
       runInstance: runInstanceStub,
     });
 
@@ -672,7 +681,7 @@ describe("runInstance: cumulative cost_usd across infra retries (Task-11 capston
           : { ...pendingStage(), record: { ...pendingStage().record, cost_usd: 1.5 } };
       },
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).not.toBe("infra");
     expect(rec.infra_retries).toBe(1);
@@ -689,7 +698,7 @@ describe("runInstance: cumulative cost_usd across infra retries (Task-11 capston
         record: { ...pendingStage().record, cost_usd: 3 },
       }),
     });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), { deps });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.cost_usd).toBeCloseTo(3.5, 5);
   });
@@ -703,7 +712,7 @@ describe("runPilot: threads runPool's skipped count into ReportMeta (Task-11 cap
     const deps: Partial<RunPilotDeps> = {
       loadInstances: async () => [inst],
       selectPilot: (pool) => pool,
-      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({
         records: [],
         spentUsd: 150,
@@ -739,7 +748,7 @@ describe("runPilot: SMOKE mode routes selection through selectSmoke, not selectP
         smokeCalled = true;
         return pool;
       },
-      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({
         records: [],
         spentUsd: 0,
@@ -802,7 +811,7 @@ describe("RUN_LIVE=1-gated: ONE full-pipeline run PER corpus family (placeholder
 describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () => {
   test("skips runControls/score/runSelfTest entirely; still runs seed/run/collect/detectLeak/blindQuality/abReview", async () => {
     const { deps, calls } = trackedDeps();
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       bypassOracle: true,
     });
@@ -829,7 +838,7 @@ describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () =
 
   test("a bypass run where collect returns infra still yields infra (bypass doesn't mask a real seed/run/collect failure)", async () => {
     const { deps, calls } = trackedDeps({ collect: async () => infraStage() });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       bypassOracle: true,
       maxInfraRetries: 0,
@@ -843,7 +852,7 @@ describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () =
 
   test("a bypass run where collect returns probe still short-circuits as probe (score/self-test/leak/review not called)", async () => {
     const { deps, calls } = trackedDeps({ collect: async () => probeStage() });
-    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       bypassOracle: true,
     });
@@ -863,7 +872,7 @@ describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
     const deps: Partial<RunPilotDeps> = {
       loadInstances: async (family) => (family === "swe-bench" ? [py] : [ts]),
       selectSmoke: (pool) => pool,
-      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async (_instances, _binaryPath, _cfg, opts) => {
         capturedOpts = opts;
         return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };

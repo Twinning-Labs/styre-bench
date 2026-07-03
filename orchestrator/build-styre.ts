@@ -65,14 +65,32 @@ export function applyWebOffPatch(fileText: string): string {
   return patched;
 }
 
+export interface BuildTarget {
+  /** The `docker run --platform` value this binary targets (e.g. "linux/arm64") — the key
+   *  the pipeline resolves an instance's binary by. */
+  platform: string;
+  /** The Bun `--compile --target` for that platform (see platform.ts's `bunLinuxTarget`). */
+  bunTarget: string;
+}
+
+/** Per-container-platform styre binaries (docker platform -> absolute binary path). A single
+ *  bench run mixes linux/arm64 (SWE-bench native) and linux/amd64 (MSB) containers, so styre
+ *  is cross-compiled once per distinct container platform and the runner mounts the matching
+ *  binary per instance. */
+export type StyreBinaries = Record<string, string>;
+
 export interface BuildStyreConfig {
   styreRepo: string;
   styreCommit: string;
   cohort: Cohort;
+  /** One entry per DISTINCT container platform in the run (computed by `runPilot` from the
+   *  selected instances' `platform`s). styre is compiled once per target after a single
+   *  clone/checkout/install/patch. */
+  targets: BuildTarget[];
 }
 
 export interface BuildStyreResult {
-  binaryPath: string;
+  binaries: StyreBinaries;
   commit: string;
   webTools: "off" | "on";
 }
@@ -87,7 +105,15 @@ export interface BuildStyreDeps {
   bunInstall: (cacheDir: string) => Promise<void>;
   readAllowlist: (cacheDir: string) => Promise<string>;
   writeAllowlist: (cacheDir: string, text: string) => Promise<void>;
-  runBuildScript: (cacheDir: string) => Promise<void>;
+  /** Cross-compiles styre to `bunTarget`, writing the binary to `outfile` (relative to the
+   *  checkout root `cacheDir`). Mirrors styre's own `scripts/build.sh` compile line
+   *  (`bun build --compile --target=$TARGET ./src/index.ts --outfile $OUTFILE`) but drives the
+   *  compiler directly so we can (a) target Linux from a macOS host and (b) skip build.sh's
+   *  macOS-only ad-hoc codesign — that fixes a macOS-runtime SIGKILL and both errors on and is
+   *  irrelevant to a Linux ELF binary, which is the only thing we ever build (styre runs inside
+   *  a Linux eval container). Not "modifying styre": same source, same commit, same compile
+   *  command, just a Linux target. */
+  compile: (cacheDir: string, bunTarget: string, outfile: string) => Promise<void>;
 }
 
 const defaultDeps: BuildStyreDeps = {
@@ -125,8 +151,10 @@ const defaultDeps: BuildStyreDeps = {
     // Applied to the local checkout ONLY — never committed or pushed back to styre.
     await writeFile(path.join(cacheDir, ALLOWLIST_FILE_REL), text, "utf8");
   },
-  async runBuildScript(cacheDir) {
-    await $`bash scripts/build.sh`.cwd(cacheDir);
+  async compile(cacheDir, bunTarget, outfile) {
+    await $`bun build --compile --target=${bunTarget} ./src/index.ts --outfile ${outfile}`.cwd(
+      cacheDir,
+    );
   },
 };
 
@@ -154,9 +182,12 @@ export interface BuildStyreOpts {
  * 3. If `cfg.cohort === "web-off"`, applies `applyWebOffPatch` to the local checkout's
  *    `src/dispatch/tool-allowlists.ts` (never committed/pushed to styre). `"web-on"` skips
  *    this step entirely — the file is left byte-for-byte untouched.
- * 4. Runs `scripts/build.sh` (bun `--compile` + macOS ad-hoc re-sign) and returns the
- *    resulting binary path (`<cacheDir>/dist/styre`, matching `build.sh`'s `OUTFILE`
- *    default).
+ * 4. Cross-compiles styre to Linux ONCE PER `cfg.targets` entry (bun `--compile
+ *    --target=bun-linux-<arch>`, one outfile each under `<cacheDir>/dist/`), and returns a
+ *    `binaries` map keyed by docker `--platform`. Drives the compiler directly rather than
+ *    `scripts/build.sh` — the binary always runs inside a Linux eval container, so build.sh's
+ *    macOS-only ad-hoc codesign is never wanted (and errors on a Linux ELF). See the `compile`
+ *    dep doc.
  */
 export async function buildStyre(
   cfg: BuildStyreConfig,
@@ -177,10 +208,21 @@ export async function buildStyre(
     await deps.writeAllowlist(cacheDir, patched);
   }
 
-  await deps.runBuildScript(cacheDir);
+  // Compile once per distinct container platform (after the single clone/checkout/patch), each
+  // to its own outfile so the arm64 and x64 binaries coexist in the same checkout's dist/.
+  // (The `git clean -fdx` in `checkout` runs BEFORE this loop, so it can't wipe a sibling
+  // target's just-built binary — all compiles happen after the one reset.)
+  const distDir = path.join(cacheDir, "dist");
+  await mkdir(distDir, { recursive: true });
+  const binaries: StyreBinaries = {};
+  for (const t of cfg.targets) {
+    const outfile = path.join("dist", `styre-${t.bunTarget}`);
+    await deps.compile(cacheDir, t.bunTarget, outfile);
+    binaries[t.platform] = path.join(cacheDir, outfile);
+  }
 
   return {
-    binaryPath: path.join(cacheDir, "dist", "styre"),
+    binaries,
     commit: cfg.styreCommit,
     webTools: cfg.cohort === "web-off" ? "off" : "on",
   };

@@ -11,7 +11,7 @@ import type { AbPreference } from "../reviewer/ab-review";
 import { abReview } from "../reviewer/ab-review";
 import { blindQuality } from "../reviewer/blind-quality";
 import { buildStyre } from "./build-styre";
-import type { BuildStyreConfig, BuildStyreResult } from "./build-styre";
+import type { BuildStyreConfig, BuildStyreResult, StyreBinaries } from "./build-styre";
 import { cleanup as tearDown } from "./cleanup";
 import { collect as collectPure, extractStrippedDiff } from "./collect";
 import type { CollectCtx, ProbeProfile } from "./collect";
@@ -19,6 +19,7 @@ import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
 import { addedPaths } from "./firewall";
 import { selectPilot, selectSmoke, tagCutoff } from "./matrix";
+import { archFromPlatform, bunLinuxTarget } from "./platform";
 import { runStyre } from "./run-task";
 import type { RunSeed, RunStyreResult } from "./run-task";
 import { seedGithub } from "./seed-github";
@@ -321,6 +322,22 @@ async function defaultRunStage(
   return runStyre(inst, seed, binaryPath, { cohort: cfg.cohort });
 }
 
+/** Selects the styre binary matching an instance's container platform (its `--platform`,
+ *  defaulting to linux/amd64 when a fixture leaves it unset). Throws — rather than silently
+ *  mounting a wrong-OS/arch binary that dies inside the container with "Cannot run macOS
+ *  executable" / "Exec format error" — if `buildStyre` produced no binary for that platform. */
+function resolveBinary(binaries: StyreBinaries, inst: Instance): string {
+  const platform = inst.platform ?? "linux/amd64";
+  const binaryPath = binaries[platform];
+  if (!binaryPath) {
+    throw new Error(
+      `pipeline: no styre binary was built for platform "${platform}" (instance ${inst.id}); ` +
+        `built platforms: [${Object.keys(binaries).join(", ") || "none"}]`,
+    );
+  }
+  return binaryPath;
+}
+
 /** Builds the production `PipelineDeps` — the only place `cfg.retainOnFailure`-equivalent
  *  wiring happens for `cleanup` (see `RunInstanceOpts.retainOnFailure`; not a `BENCH_CONFIG`
  *  field, matching this codebase's Deps/Opts convention — e.g. `BuildStyreOpts`,
@@ -412,10 +429,19 @@ function infraStageFromError(err: unknown, where: string): CollectStageResult {
  */
 async function attemptOnce(
   inst: Instance,
-  binaryPath: string,
+  binaries: StyreBinaries,
   cfg: PipelineConfig,
   deps: PipelineDeps,
 ): Promise<{ seed: RunSeed | undefined; stage: CollectStageResult }> {
+  // Resolve the platform-matched binary up front. A missing binary is an infra failure for
+  // THIS instance (classified like a seed failure) — never a crash of the whole pool.
+  let binaryPath: string;
+  try {
+    binaryPath = resolveBinary(binaries, inst);
+  } catch (err) {
+    return { seed: undefined, stage: infraStageFromError(err, "seed") };
+  }
+
   let seed: RunSeed;
   try {
     seed = await deps.seed(inst, cfg);
@@ -564,7 +590,7 @@ async function runJudgmentStages(
  */
 export async function runInstance(
   inst: Instance,
-  binaryPath: string,
+  binaries: StyreBinaries,
   cfg: PipelineConfig,
   opts: RunInstanceOpts = {},
 ): Promise<TaskRecord> {
@@ -595,7 +621,7 @@ export async function runInstance(
   let scoreResult: ScoreResult | undefined;
 
   for (;;) {
-    const attempt = await attemptOnce(inst, binaryPath, cfg, deps);
+    const attempt = await attemptOnce(inst, binaries, cfg, deps);
     stage = attempt.stage;
     taskSpentUsd += (stage.record.cost_usd ?? 0) + SETUP_COST_ESTIMATE_USD;
     scoreResult = undefined;
@@ -740,7 +766,7 @@ export interface RunPoolResult {
 export interface RunPoolOpts {
   runInstance?: (
     inst: Instance,
-    binaryPath: string,
+    binaries: StyreBinaries,
     cfg: PipelineConfig,
     opts?: RunInstanceOpts,
   ) => Promise<TaskRecord>;
@@ -759,7 +785,7 @@ export interface RunPoolOpts {
  */
 export async function runPool(
   instances: Instance[],
-  binaryPath: string,
+  binaries: StyreBinaries,
   cfg: PipelineConfig,
   opts: RunPoolOpts = {},
 ): Promise<RunPoolResult> {
@@ -780,7 +806,7 @@ export async function runPool(
 
       let record: TaskRecord;
       try {
-        record = await runInstanceFn(inst, binaryPath, cfg, opts.runInstanceOpts);
+        record = await runInstanceFn(inst, binaries, cfg, opts.runInstanceOpts);
       } catch (err) {
         record = {
           ...blankRecord(inst, cfg),
@@ -815,7 +841,7 @@ export interface RunPilotDeps {
   buildStyre: (cfg: BuildStyreConfig) => Promise<BuildStyreResult>;
   runPool: (
     instances: Instance[],
-    binaryPath: string,
+    binaries: StyreBinaries,
     cfg: PipelineConfig,
     opts?: RunPoolOpts,
   ) => Promise<RunPoolResult>;
@@ -836,7 +862,7 @@ const defaultRunPilotDeps: RunPilotDeps = {
   selectPilot: (pool, seed) => selectPilot(pool, seed),
   selectSmoke: (pool, seed) => selectSmoke(pool, seed),
   buildStyre: (cfg) => buildStyre(cfg),
-  runPool: (instances, binaryPath, cfg, opts) => runPool(instances, binaryPath, cfg, opts),
+  runPool: (instances, binaries, cfg, opts) => runPool(instances, binaries, cfg, opts),
   renderReport: (records, meta) => renderReport(records, meta),
   writeReport: defaultWriteReport,
 };
@@ -880,13 +906,24 @@ export async function runPilot(
   const select = opts.smoke ? deps.selectSmoke : deps.selectPilot;
   const instances = select([...pythonPool, ...tsPool], cfg.seed);
 
+  // Detect the DISTINCT container platforms this run actually needs (SWE-bench on an arm64
+  // host -> linux/arm64; MSB -> linux/amd64) and cross-compile a styre binary for each. The
+  // binary runs INSIDE the Linux eval container, so it must match that container's arch — a
+  // host-arch (macOS) binary dies with "Cannot run macOS executable ... Exec format error".
+  const platforms = [...new Set(instances.map((inst) => inst.platform ?? "linux/amd64"))];
+  const targets = platforms.map((platform) => ({
+    platform,
+    bunTarget: bunLinuxTarget(archFromPlatform(platform)),
+  }));
+
   const build = await deps.buildStyre({
     styreRepo: cfg.styreRepo,
     styreCommit: cfg.styreCommit,
     cohort: cfg.cohort,
+    targets,
   });
 
-  const poolResult = await deps.runPool(instances, build.binaryPath, cfg, {
+  const poolResult = await deps.runPool(instances, build.binaries, cfg, {
     runInstanceOpts: { bypassOracle: opts.bypassOracle },
   });
 

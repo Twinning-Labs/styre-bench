@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,10 @@ import { $ } from "bun";
 import { applyWebOffPatch, buildStyre } from "../orchestrator/build-styre";
 
 const ALLOWLIST_FILE_REL = "src/dispatch/tool-allowlists.ts";
+
+// Single-target fixture (one distinct container platform) for the stubbed cohort-branching
+// and cache-reuse tests — the arch-selection itself lives in runPilot/platform.ts, not here.
+const TARGETS = [{ platform: "linux/amd64", bunTarget: "bun-linux-x64" }];
 
 // Representative fixture mirroring the REAL shape of styre's
 // src/dispatch/tool-allowlists.ts (confirmed against the styre repo, ~line 10): a
@@ -118,6 +123,7 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
         styreRepo: "https://example.invalid/styre.git",
         styreCommit: "deadbeef",
         cohort: "web-off",
+        targets: TARGETS,
       },
       {
         cacheDir: "/tmp/fake-cache",
@@ -139,8 +145,8 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
             calls.push("writeAllowlist");
             writtenText = text;
           },
-          runBuildScript: async () => {
-            calls.push("runBuildScript");
+          compile: async () => {
+            calls.push("compile");
           },
         },
       },
@@ -152,19 +158,26 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
       "bunInstall",
       "readAllowlist",
       "writeAllowlist",
-      "runBuildScript",
+      "compile",
     ]);
     expect(writtenText).not.toContain('"WebSearch"');
     expect(writtenText).not.toContain('"WebFetch"');
     expect(result.webTools).toBe("off");
     expect(result.commit).toBe("deadbeef");
-    expect(result.binaryPath).toContain("/tmp/fake-cache");
+    // One target -> one binary, keyed by its docker platform, under the cache dir's dist/.
+    expect(result.binaries["linux/amd64"]).toContain("/tmp/fake-cache");
+    expect(result.binaries["linux/amd64"]).toContain("bun-linux-x64");
   });
 
   test("web-on: leaves the allowlist file UNTOUCHED (readAllowlist/writeAllowlist never called)", async () => {
     const calls: string[] = [];
     const result = await buildStyre(
-      { styreRepo: "https://example.invalid/styre.git", styreCommit: "deadbeef", cohort: "web-on" },
+      {
+        styreRepo: "https://example.invalid/styre.git",
+        styreCommit: "deadbeef",
+        cohort: "web-on",
+        targets: TARGETS,
+      },
       {
         cacheDir: "/tmp/fake-cache",
         deps: {
@@ -184,14 +197,14 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
           writeAllowlist: async () => {
             calls.push("writeAllowlist");
           },
-          runBuildScript: async () => {
-            calls.push("runBuildScript");
+          compile: async () => {
+            calls.push("compile");
           },
         },
       },
     );
 
-    expect(calls).toEqual(["clone", "checkout", "bunInstall", "runBuildScript"]);
+    expect(calls).toEqual(["clone", "checkout", "bunInstall", "compile"]);
     expect(calls).not.toContain("readAllowlist");
     expect(calls).not.toContain("writeAllowlist");
     expect(result.webTools).toBe("on");
@@ -200,7 +213,12 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
   test("bun install runs BEFORE the build script (compile needs node_modules)", async () => {
     const order: string[] = [];
     await buildStyre(
-      { styreRepo: "https://example.invalid/styre.git", styreCommit: "abc123", cohort: "web-on" },
+      {
+        styreRepo: "https://example.invalid/styre.git",
+        styreCommit: "abc123",
+        cohort: "web-on",
+        targets: TARGETS,
+      },
       {
         cacheDir: "/tmp/fake-cache",
         deps: {
@@ -211,13 +229,13 @@ describe("buildStyre: cohort branching (git clone / bun install / build.sh stubb
           },
           readAllowlist: async () => "",
           writeAllowlist: async () => {},
-          runBuildScript: async () => {
-            order.push("runBuildScript");
+          compile: async () => {
+            order.push("compile");
           },
         },
       },
     );
-    expect(order).toEqual(["bunInstall", "runBuildScript"]);
+    expect(order).toEqual(["bunInstall", "compile"]);
   });
 });
 
@@ -231,10 +249,16 @@ describe("buildStyre: heavy end-to-end (real clone + bun install + compile) — 
         styreRepo: "https://github.com/Twinning-Labs/styre.git",
         styreCommit: process.env.STYRE_BENCH_COMMIT ?? "a2406a4",
         cohort: "web-off" as const,
+        targets: TARGETS,
       };
       const result = await buildStyre(cfg);
-      const proc = Bun.spawnSync([result.binaryPath, "--version"]);
-      expect(proc.exitCode).toBe(0);
+      // Cross-compiled Linux binary — can't `--version` it on a macOS build host (that's the
+      // whole point: it runs in the Linux container, not here). Assert it compiled to a
+      // non-empty file at the platform-keyed path instead.
+      const binaryPath = result.binaries["linux/amd64"];
+      expect(binaryPath).toBeTruthy();
+      expect(existsSync(binaryPath as string)).toBe(true);
+      expect(statSync(binaryPath as string).size).toBeGreaterThan(0);
     },
     600_000,
   );
@@ -273,10 +297,15 @@ describe("buildStyre: SEQUENTIAL cache-dir reuse against a REAL temp git repo (T
     const { repoPath, commit } = await createTempStyreRepo();
     const cacheDir = await mkdtemp(path.join(os.tmpdir(), "styre-bench-cache-"));
     try {
-      const cfg = { styreRepo: repoPath, styreCommit: commit, cohort: "web-off" as const };
+      const cfg = {
+        styreRepo: repoPath,
+        styreCommit: commit,
+        cohort: "web-off" as const,
+        targets: TARGETS,
+      };
       const opts = {
         cacheDir,
-        deps: { bunInstall: async () => {}, runBuildScript: async () => {} },
+        deps: { bunInstall: async () => {}, compile: async () => {} },
       };
 
       // Run 1: strips WebSearch/WebFetch from the cache dir's working tree.
@@ -302,11 +331,11 @@ describe("buildStyre: SEQUENTIAL cache-dir reuse against a REAL temp git repo (T
     const { repoPath, commit } = await createTempStyreRepo();
     const cacheDir = await mkdtemp(path.join(os.tmpdir(), "styre-bench-cache-"));
     try {
-      const deps = { bunInstall: async () => {}, runBuildScript: async () => {} };
+      const deps = { bunInstall: async () => {}, compile: async () => {} };
 
       // Run 1: web-off patches the file in the shared cache dir.
       const webOffResult = await buildStyre(
-        { styreRepo: repoPath, styreCommit: commit, cohort: "web-off" },
+        { styreRepo: repoPath, styreCommit: commit, cohort: "web-off", targets: TARGETS },
         { cacheDir, deps },
       );
       expect(webOffResult.webTools).toBe("off");
@@ -316,12 +345,12 @@ describe("buildStyre: SEQUENTIAL cache-dir reuse against a REAL temp git repo (T
 
       // Run 2: web-on, SAME cacheDir, SAME commit (the documented way to get the web-on
       // delta). web-on skips the patch step entirely, so whatever is on disk when
-      // `runBuildScript` runs is what would get compiled. Before the fix, that was the
+      // `compile` runs is what would get compiled. Before the fix, that was the
       // STALE web-off-patched file — the binary would be silently web-OFF while the
       // function reports `webTools: "on"`, mislabeling the cohort and invalidating the
       // contamination delta. The checkout force-reset must restore the pristine file first.
       const webOnResult = await buildStyre(
-        { styreRepo: repoPath, styreCommit: commit, cohort: "web-on" },
+        { styreRepo: repoPath, styreCommit: commit, cohort: "web-on", targets: TARGETS },
         { cacheDir, deps },
       );
       expect(webOnResult.webTools).toBe("on");

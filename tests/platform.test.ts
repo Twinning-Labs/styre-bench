@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { dockerPlatform, hostImageArch } from "../orchestrator/platform";
+import {
+  archFromPlatform,
+  bunLinuxTarget,
+  dockerPlatform,
+  hostImageArch,
+} from "../orchestrator/platform";
 
 describe("hostImageArch", () => {
   test("maps an arm64 host to arm64", () => {
@@ -44,5 +49,35 @@ describe("dockerPlatform", () => {
 
   test("x86_64 -> linux/amd64", () => {
     expect(dockerPlatform("x86_64")).toBe("linux/amd64");
+  });
+});
+
+describe("archFromPlatform (inverse of dockerPlatform)", () => {
+  test("linux/arm64 -> arm64", () => {
+    expect(archFromPlatform("linux/arm64")).toBe("arm64");
+  });
+
+  test("linux/amd64 -> x86_64", () => {
+    expect(archFromPlatform("linux/amd64")).toBe("x86_64");
+  });
+
+  test("anything not linux/arm64 falls to x86_64 (we only ever run arm64 or amd64)", () => {
+    expect(archFromPlatform("something/else")).toBe("x86_64");
+  });
+
+  test("round-trips with dockerPlatform", () => {
+    expect(archFromPlatform(dockerPlatform("arm64"))).toBe("arm64");
+    expect(archFromPlatform(dockerPlatform("x86_64"))).toBe("x86_64");
+  });
+});
+
+describe("bunLinuxTarget (styre always cross-compiles to Linux)", () => {
+  test("arm64 -> bun-linux-arm64 (runs native in a linux/arm64 container)", () => {
+    expect(bunLinuxTarget("arm64")).toBe("bun-linux-arm64");
+  });
+
+  test("x86_64 -> bun-linux-x64 (never a bun-darwin-* host target)", () => {
+    expect(bunLinuxTarget("x86_64")).toBe("bun-linux-x64");
+    expect(bunLinuxTarget("x86_64")).not.toContain("darwin");
   });
 });

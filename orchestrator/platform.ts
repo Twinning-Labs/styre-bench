@@ -35,3 +35,20 @@ export function hostImageArch(
 export function dockerPlatform(arch: ImageArch): string {
   return arch === "arm64" ? "linux/arm64" : "linux/amd64";
 }
+
+/** Inverse of `dockerPlatform`: the `ImageArch` a `docker --platform` value denotes. Anything
+ *  other than `linux/arm64` maps to `x86_64` (we only ever run linux/arm64 or linux/amd64). */
+export function archFromPlatform(platform: string): ImageArch {
+  return platform === "linux/arm64" ? "arm64" : "x86_64";
+}
+
+/**
+ * The Bun `--compile --target` value for a Linux binary of the given arch. The styre binary
+ * runs INSIDE a Linux eval container, so it is ALWAYS cross-compiled to Linux (never the
+ * macOS host target) — `arm64` -> `bun-linux-arm64` (runs native in a linux/arm64 container),
+ * `x86_64` -> `bun-linux-x64` (native on linux/amd64, emulated on an arm64 host). glibc
+ * variants: the swebench/mswebench eval images are Debian/Ubuntu-based.
+ */
+export function bunLinuxTarget(arch: ImageArch): string {
+  return arch === "arm64" ? "bun-linux-arm64" : "bun-linux-x64";
+}
