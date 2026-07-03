@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Corpus cache (downloaded via scripts/fetch_datasets.py — never commit; ~1GB)
+/data/

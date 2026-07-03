@@ -25,6 +25,7 @@ import pathlib
 import sys
 
 from datasets import load_dataset
+from huggingface_hub import HfApi, hf_hub_download
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -53,17 +54,32 @@ def fetch_swe_bench_verified() -> None:
 
 def fetch_multi_swe_bench_ts() -> None:
     # MSB is stored as per-repo JSONL under a language directory: `ts/<owner>__<repo>_dataset.jsonl`.
-    # Glob just the TypeScript files so we don't pull Go/Rust/Java/etc.
-    print(f"[ts] loading {MULTI_SWE_BENCH} (data_files=ts/*.jsonl) ...")
-    ds = load_dataset(MULTI_SWE_BENCH, data_files="ts/*.jsonl", split="train")
-    records = [dict(r) for r in ds]
-    if not records:
+    # We do NOT use `load_dataset` here: it tries to unify all those per-repo files into ONE arrow
+    # schema and fails ("Couldn't cast array of type string to null") because a field that is null
+    # in one repo's file is a string/list in another. Instead we download each `ts/*.jsonl` file
+    # raw and parse it line-by-line with plain json — heterogeneous schemas are fine, and the raw
+    # dicts are exactly what normalizeMultiSweBench (corpus.ts) expects.
+    print(f"[ts] listing ts/*.jsonl files in {MULTI_SWE_BENCH} ...")
+    api = HfApi()
+    all_files = api.list_repo_files(MULTI_SWE_BENCH, repo_type="dataset")
+    ts_files = sorted(f for f in all_files if f.startswith("ts/") and f.endswith(".jsonl"))
+    if not ts_files:
         sys.exit(
-            "FATAL: 0 TypeScript records loaded from Multi-SWE-bench — the `ts/*.jsonl` glob "
-            "returned nothing. Check the dataset layout at "
-            "https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench (the language "
-            "subdirectory may have been renamed)."
+            "FATAL: no `ts/*.jsonl` files found in Multi-SWE-bench — the language subdirectory may "
+            "have been renamed. Check https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench"
         )
+    print(f"  found {len(ts_files)} TypeScript repo file(s)")
+    records: list[dict] = []
+    for fname in ts_files:
+        local = hf_hub_download(MULTI_SWE_BENCH, fname, repo_type="dataset")
+        with open(local, encoding="utf8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        print(f"  {fname}: cumulative {len(records)} records")
+    if not records:
+        sys.exit("FATAL: 0 TypeScript records parsed from Multi-SWE-bench ts/*.jsonl files")
     _dump(records, DATA_DIR / "multi-swe-bench.json")
 
 

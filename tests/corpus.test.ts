@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeInstance } from "../orchestrator/corpus";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { BENCH_CONFIG } from "../config/bench.config";
+import { loadInstances, normalizeInstance } from "../orchestrator/corpus";
 import msbRaw from "./fixtures/msb-raw.json";
 import sweRaw from "./fixtures/swebench-raw.json";
 
@@ -133,5 +137,29 @@ describe("normalizeInstance: shared error handling", () => {
   test("non-object raw input throws", () => {
     expect(() => normalizeInstance(null, "swe-bench")).toThrow();
     expect(() => normalizeInstance("nope", "multi-swe-bench")).toThrow();
+  });
+});
+
+describe("loadInstances: drops corrupt records without aborting the whole corpus", () => {
+  test("an empty-FAIL_TO_PASS record is dropped; the valid records still load", async () => {
+    // Real case: Multi-SWE-bench's mui__material-ui-39688 has an empty FAIL_TO_PASS. One such
+    // record must NOT crash loading the entire dataset (it did, before this fix).
+    const bad = { ...sweRaw, instance_id: "bad__corrupt-1", FAIL_TO_PASS: "[]" };
+    const dir = await mkdtemp(path.join(tmpdir(), "corpus-drop-"));
+    await writeFile(
+      path.join(dir, "swe-bench.json"),
+      JSON.stringify([sweRaw, bad, sweRaw]),
+      "utf8",
+    );
+    const instances = await loadInstances("swe-bench", BENCH_CONFIG, dir);
+    expect(instances.length).toBe(2); // two valid; the corrupt one dropped
+    expect(instances.every((i) => i.fail_to_pass.length > 0)).toBe(true);
+  });
+
+  test("a corpus where EVERY record is corrupt throws (refuses to return an empty corpus)", async () => {
+    const bad = { ...sweRaw, FAIL_TO_PASS: "[]" };
+    const dir = await mkdtemp(path.join(tmpdir(), "corpus-allbad-"));
+    await writeFile(path.join(dir, "swe-bench.json"), JSON.stringify([bad, bad]), "utf8");
+    await expect(loadInstances("swe-bench", BENCH_CONFIG, dir)).rejects.toThrow(/empty or corrupt/);
   });
 });

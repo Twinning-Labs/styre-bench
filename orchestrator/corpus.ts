@@ -270,6 +270,16 @@ export function normalizeInstance(raw: unknown, family: Family): Instance {
   return family === "swe-bench" ? normalizeSweBench(r) : normalizeMultiSweBench(r);
 }
 
+/** Best-effort id extraction from a raw record, for logging a dropped/corrupt one. */
+function rawRecordId(rec: unknown): string {
+  if (rec && typeof rec === "object") {
+    const o = rec as Record<string, unknown>;
+    if (typeof o.instance_id === "string") return o.instance_id;
+    if (typeof o.id === "string") return o.id;
+  }
+  return "<unknown>";
+}
+
 /**
  * Reads the pinned corpus for `family` off disk and returns normalized Instances.
  *
@@ -301,5 +311,31 @@ export async function loadInstances(
   if (!Array.isArray(raw)) {
     throw new Error(`corpus: expected ${file} to contain a JSON array of raw ${family} records`);
   }
-  return raw.map((rec) => normalizeInstance(rec, family));
+  // Normalize per-record, DROPPING (not aborting on) any record the fail-closed guards reject —
+  // e.g. a corrupt upstream record with an empty FAIL_TO_PASS (a real case in Multi-SWE-bench:
+  // mui__material-ui-39688). A single bad record must not kill loading the whole corpus. The
+  // guard still holds (a dropped record never becomes a scoreable Instance); the drop is LOGGED,
+  // never silent. If EVERY record fails, the cache is corrupt → throw rather than return [].
+  const instances: Instance[] = [];
+  const dropped: string[] = [];
+  for (const rec of raw) {
+    try {
+      instances.push(normalizeInstance(rec, family));
+    } catch (err) {
+      dropped.push(`${rawRecordId(rec)} (${(err as Error).message})`);
+    }
+  }
+  if (dropped.length > 0) {
+    console.error(
+      `[corpus] dropped ${dropped.length}/${raw.length} unnormalizable "${family}" record(s); ` +
+        `first: ${dropped.slice(0, 3).join("; ")}`,
+    );
+  }
+  if (instances.length === 0) {
+    throw new Error(
+      `corpus: every record in ${file} failed to normalize (${dropped.length} dropped) — the ` +
+        `${family} cache is empty or corrupt; refusing to return an empty corpus`,
+    );
+  }
+  return instances;
 }
