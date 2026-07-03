@@ -235,6 +235,11 @@ export function buildDockerArgs(input: BuildDockerArgsInput): string[] {
   return [
     "run",
     "--rm",
+    // SWE-bench and Multi-SWE-bench images are x86_64-only. Forcing amd64 makes them run
+    // under emulation on an arm64 host (Apple Silicon); on a real linux/amd64 host this is
+    // a harmless no-op.
+    "--platform",
+    "linux/amd64",
     "-v",
     `${binaryPath}:${CONTAINER_BINARY_PATH}:ro`,
     "-v",

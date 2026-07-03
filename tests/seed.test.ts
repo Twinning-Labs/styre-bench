@@ -6,7 +6,7 @@ import {
   stripClaudeDir,
   touchedPaths,
 } from "../orchestrator/firewall";
-import { seedGithub } from "../orchestrator/seed-github";
+import { repoNameFor, seedGithub } from "../orchestrator/seed-github";
 import { buildIssueBody, seedLinear } from "../orchestrator/seed-linear";
 import type { Instance } from "../orchestrator/types";
 
@@ -202,6 +202,17 @@ describe("stripClaudeDir (pure)", () => {
       "src/claude-helper.ts",
       ".claude-ignore",
     ]);
+  });
+});
+
+describe("repoNameFor (pure)", () => {
+  test("appends a unique 8-hex-char suffix so repeat calls for the same instance never collide", () => {
+    const inst = makeInstance({ id: "org__repo-123" });
+    const first = repoNameFor(inst);
+    const second = repoNameFor(inst);
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^bench-org__repo-123-[0-9a-f]{8}$/);
+    expect(second).toMatch(/^bench-org__repo-123-[0-9a-f]{8}$/);
   });
 });
 

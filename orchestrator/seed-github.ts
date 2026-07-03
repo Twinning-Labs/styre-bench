@@ -110,12 +110,20 @@ export interface SeedGithubOpts {
   deps?: Partial<SeedGithubDeps>;
 }
 
-function repoNameFor(inst: Instance): string {
+/**
+ * Exported so it's unit-testable (see tests/seed.test.ts). Appends a short random hex
+ * suffix so an infra-retry / re-run / concurrent attempt for the SAME instance never
+ * re-seeds the same repo name — a deterministic name collides on GitHub's "name already
+ * exists" and both masks the real post-seed error and fails the retry. `cleanup` deletes by
+ * the returned `repoUrl`, so the random suffix costs nothing at cleanup time.
+ */
+export function repoNameFor(inst: Instance): string {
   const slug = inst.id
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `bench-${slug || "instance"}`;
+  const suffix = crypto.randomUUID().slice(0, 8);
+  return `bench-${slug || "instance"}-${suffix}`;
 }
 
 /**

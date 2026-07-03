@@ -37,9 +37,18 @@ describe("normalizeInstance: swe-bench", () => {
     ]);
   });
 
-  test("derives image by the sweb.eval.x86_64.<instance_id> convention, lowercased", () => {
+  test("derives a pullable swebench/ Docker Hub image, replacing __ with _1776_ and lowercasing", () => {
     const inst = normalizeInstance(sweRaw, "swe-bench");
-    expect(inst.image).toBe(`sweb.eval.x86_64.${sweRaw.instance_id.toLowerCase()}`);
+    // sweRaw.instance_id is "pallets__flask-5063" -> "swebench/sweb.eval.x86_64.pallets_1776_flask-5063"
+    const expectedId = sweRaw.instance_id.replaceAll("__", "_1776_").toLowerCase();
+    expect(inst.image).toBe(`swebench/sweb.eval.x86_64.${expectedId}`);
+    expect(inst.image).toBe("swebench/sweb.eval.x86_64.pallets_1776_flask-5063");
+  });
+
+  test("replaces ALL __ occurrences, not just the first (e.g. astropy__astropy-12907)", () => {
+    const raw = { ...sweRaw, instance_id: "astropy__astropy-12907" };
+    const inst = normalizeInstance(raw, "swe-bench");
+    expect(inst.image).toBe("swebench/sweb.eval.x86_64.astropy_1776_astropy-12907");
   });
 
   test("missing FAIL_TO_PASS throws loudly instead of silently yielding []", () => {

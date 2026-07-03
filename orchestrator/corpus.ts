@@ -169,8 +169,12 @@ function normalizeSweBench(r: Record<string, unknown>): Instance {
     base_commit,
     problem_statement,
     hints,
-    // SWE-bench eval image naming convention: sweb.eval.x86_64.<instance_id>, lowercased.
-    image: `sweb.eval.x86_64.${id.toLowerCase()}`,
+    // SWE-bench eval image naming convention: the pullable image lives on Docker Hub under
+    // the `swebench/` namespace as `swebench/sweb.eval.x86_64.<instance_id>`, with every
+    // `__` in the instance_id replaced by `_1776_` (SWE-bench's own tag-sanitization rule),
+    // then lowercased. VERIFIED: `swebench/sweb.eval.x86_64.astropy_1776_astropy-12907`
+    // exists on Docker Hub for instance_id `astropy__astropy-12907`.
+    image: `swebench/sweb.eval.x86_64.${id.replaceAll("__", "_1776_").toLowerCase()}`,
     fail_to_pass,
     pass_to_pass,
     merge_date,

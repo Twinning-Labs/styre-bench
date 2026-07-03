@@ -167,6 +167,20 @@ describe("buildEntrypoint (pure)", () => {
 describe("buildDockerArgs (pure)", () => {
   const creds = { anthropicApiKey: "ak-1", linearApiKey: "lk-1", githubToken: "gh-1" };
 
+  test("forces --platform linux/amd64 (x86_64-only bench images need emulation on arm64 hosts)", () => {
+    const args = buildDockerArgs({
+      image: "sweb.eval.x86_64.org__repo-123",
+      binaryPath: "/host/dist/styre",
+      outDir: "/host/out",
+      entrypointHostPath: "/host/out/entrypoint.sh",
+      creds,
+    });
+    expect(args).toContain("--platform");
+    expect(args[args.indexOf("--platform") + 1]).toBe("linux/amd64");
+    // early, right after run/--rm
+    expect(args.slice(0, 4)).toEqual(["run", "--rm", "--platform", "linux/amd64"]);
+  });
+
   test("mounts exactly the binary (ro), the outDir (rw), and the entrypoint script (ro)", () => {
     const args = buildDockerArgs({
       image: "sweb.eval.x86_64.org__repo-123",
