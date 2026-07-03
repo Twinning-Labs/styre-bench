@@ -273,6 +273,64 @@ describe("seedGithub (mocked deps — no network)", () => {
     expect(paths).toContain("README.md");
   });
 
+  test("tears down the just-created repo (deleteRepo) when pushSnapshot throws, then re-throws the original error", async () => {
+    const inst = makeInstance();
+    let createdName = "";
+    let deletedOrg = "";
+    let deletedName = "";
+    await expect(
+      seedGithub(
+        inst,
+        { benchGithubOrg: "styre-bench-scratch" },
+        {
+          deps: {
+            fetchSnapshot: async () => [{ path: "README.md", content: "# widget" }],
+            createRepo: async (_org, name) => {
+              createdName = name;
+              return {
+                repoUrl: `https://example.invalid/styre-bench-scratch/${name}.git`,
+                defaultBranch: "main",
+              };
+            },
+            pushSnapshot: async () => {
+              throw new Error("remote rejected: workflow scope");
+            },
+            deleteRepo: async (org, name) => {
+              deletedOrg = org;
+              deletedName = name;
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/remote rejected: workflow scope/);
+    // The orphan repo must be torn down with the exact name createRepo minted.
+    expect(deletedOrg).toBe("styre-bench-scratch");
+    expect(deletedName).toBe(createdName);
+  });
+
+  test("does NOT call deleteRepo when pushSnapshot succeeds", async () => {
+    const inst = makeInstance();
+    let deleteCalled = false;
+    await seedGithub(
+      inst,
+      { benchGithubOrg: "styre-bench-scratch" },
+      {
+        deps: {
+          fetchSnapshot: async () => [{ path: "README.md", content: "# widget" }],
+          createRepo: async (_org, name) => ({
+            repoUrl: `https://example.invalid/styre-bench-scratch/${name}.git`,
+            defaultBranch: "main",
+          }),
+          pushSnapshot: async () => {},
+          deleteRepo: async () => {
+            deleteCalled = true;
+          },
+        },
+      },
+    );
+    expect(deleteCalled).toBe(false);
+  });
+
   test("creates the repo under cfg.benchGithubOrg", async () => {
     const inst = makeInstance();
     let orgSeen = "";

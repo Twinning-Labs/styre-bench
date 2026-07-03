@@ -32,6 +32,11 @@ export interface SeedGithubDeps {
   fetchSnapshot: (repo: string, baseCommit: string) => Promise<SnapshotFile[]>;
   createRepo: (org: string, name: string) => Promise<SeedGithubResult>;
   pushSnapshot: (files: SnapshotFile[], repoUrl: string, branch: string) => Promise<void>;
+  /** Best-effort teardown of a repo that was created but never fully seeded (a push failure
+   *  after createRepo). cleanup() only runs for attempts that produced a complete RunSeed, so
+   *  a mid-seed failure here is seedGithub's own responsibility to clean up — otherwise every
+   *  failed push leaks an orphan throwaway repo (observed: 14 accumulated in the first smoke). */
+  deleteRepo: (org: string, name: string) => Promise<void>;
 }
 
 const defaultDeps: SeedGithubDeps = {
@@ -81,10 +86,43 @@ const defaultDeps: SeedGithubDeps = {
     if (!repoUrl) {
       throw new Error(`seedGithub: createInOrg for ${org}/${name} returned no clone/html URL`);
     }
+    // Disable GitHub Actions on the throwaway repo. The seed snapshot carries the upstream
+    // repo's `.github/workflows/*` verbatim (BENCH_GH_TOKEN has the Workflows permission, so
+    // the push is allowed), but we do NOT want those workflows to actually RUN: the benchmark
+    // scores via the oracle harness, not the repo's own CI, and a throwaway repo firing
+    // push/PR/release workflows would burn Actions minutes and could trigger deploy side
+    // effects. Best-effort: a disable hiccup must not fail the whole seed (log and continue).
+    try {
+      await octokit.rest.actions.setGithubActionsPermissionsRepository({
+        owner: org,
+        repo: name,
+        enabled: false,
+      });
+    } catch (err) {
+      console.error(
+        `[seed] WARNING: could not disable Actions on ${org}/${name} — its workflows may run: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     return { repoUrl, defaultBranch: res.data.default_branch ?? "main" };
   },
 
   async pushSnapshot(files, repoUrl, branch) {
+    const token = process.env.BENCH_GH_TOKEN;
+    if (!token) {
+      throw new Error(
+        "seedGithub: BENCH_GH_TOKEN is not set — required to push the seed snapshot to the " +
+          "throwaway repo. Refusing to fall back to an ambient git credential helper: that " +
+          "would authenticate as a personal identity (violating the throwaway-org blast-radius " +
+          "isolation) and would fail headless/CI where no keychain exists.",
+      );
+    }
+    // Embed the scoped token in the push URL so the push authenticates as BENCH_GH_TOKEN
+    // (scoped ONLY to benchGithubOrg), NEVER via whatever the local git credential helper
+    // happens to hold. GIT_TERMINAL_PROMPT=0 makes a bad/absent credential fail fast instead
+    // of blocking on an interactive username prompt.
+    const authedUrl = repoUrl.replace(/^https:\/\//, `https://x-access-token:${token}@`);
     const scratch = await mkdtemp(path.join(tmpdir(), "styre-bench-seed-push-"));
     try {
       await $`git -C ${scratch} init --quiet -b ${branch}`.quiet();
@@ -97,9 +135,21 @@ const defaultDeps: SeedGithubDeps = {
       await $`git -C ${scratch} -c user.email=bench@styre.dev -c user.name=styre-bench commit --quiet -m "seed: base_commit snapshot"`
         .quiet()
         .nothrow(); // nothrow: an empty snapshot (e.g. a unit test with zero files) has nothing to commit
-      await $`git -C ${scratch} push --quiet ${repoUrl} HEAD:${branch}`.quiet();
+      await $`git -C ${scratch} push --quiet ${authedUrl} HEAD:${branch}`
+        .env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
+        .quiet();
     } finally {
       await rm(scratch, { recursive: true, force: true });
+    }
+  },
+
+  async deleteRepo(org, name) {
+    const token = process.env.BENCH_GH_TOKEN;
+    if (!token) return; // best-effort: no token -> nothing we can (or should) do
+    try {
+      await new Octokit({ auth: token }).rest.repos.delete({ owner: org, repo: name });
+    } catch {
+      // best-effort teardown of a half-seeded repo — never mask the original push error
     }
   },
 };
@@ -155,8 +205,17 @@ export async function seedGithub(
   );
   const cleaned = stripClaudeDir(snapshot);
 
-  const { repoUrl, defaultBranch } = await deps.createRepo(cfg.benchGithubOrg, repoNameFor(inst));
-  await deps.pushSnapshot(cleaned, repoUrl, defaultBranch);
+  const name = repoNameFor(inst);
+  const { repoUrl, defaultBranch } = await deps.createRepo(cfg.benchGithubOrg, name);
+  try {
+    await deps.pushSnapshot(cleaned, repoUrl, defaultBranch);
+  } catch (err) {
+    // The repo exists but the push failed — tear it down so a push failure never leaves an
+    // orphan throwaway repo behind (see deleteRepo's rationale). Then re-throw the ORIGINAL
+    // push error unchanged so the pipeline still classifies the attempt as an infra failure.
+    await deps.deleteRepo(cfg.benchGithubOrg, name);
+    throw err;
+  }
 
   return { repoUrl, defaultBranch };
 }
