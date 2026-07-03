@@ -95,9 +95,26 @@ describe("buildEntrypoint (pure)", () => {
   test("the wrapper passes through all other args and the exit code (via PIPESTATUS, not tee's)", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain('args+=("$a")');
-    expect(script).toContain('"$REAL_CLAUDE" "${args[@]}" | tee -a "$TRANSCRIPT_PATH" | tail -n 1');
+    // Tees the full stream-json to the transcript, but pipes stdout through the python3
+    // extractor (NOT `tail -n 1`) so styre gets the plain-text `.result`, not a JSON envelope.
+    expect(script).toContain(
+      '"$REAL_CLAUDE" "${args[@]}" | tee -a "$TRANSCRIPT_PATH" | python3 "/opt/styre-bench/wrapper-bin/extract-result.py"',
+    );
+    expect(script).not.toContain("| tail -n 1");
     expect(script).toContain('wrapper_exit="${PIPESTATUS[0]}"');
     expect(script).toContain('exit "$wrapper_exit"');
+  });
+
+  test("installs the python3 result-extractor (plain-text `.result` for styre's extractSidecar) and guards python3 presence", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    // Fails loudly if python3 is absent rather than silently emitting empty stdout.
+    expect(script).toContain("if ! command -v python3 >/dev/null 2>&1; then");
+    expect(script).toContain(
+      "cat > /opt/styre-bench/wrapper-bin/extract-result.py <<'EXTRACT_EOF'",
+    );
+    // The extractor keys on the terminal `result` event and prints its `.result` field.
+    expect(script).toContain('if isinstance(obj, dict) and obj.get("type") == "result"');
+    expect(script).toContain('sys.stdout.write(result if result is not None else "")');
   });
 
   test("sets git commit identity (user.email + user.name)", () => {

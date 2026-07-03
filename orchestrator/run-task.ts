@@ -45,6 +45,10 @@ const CONTAINER_ENTRYPOINT_PATH = "/entrypoint.sh";
 const WRAPPER_DIR = "/opt/styre-bench/wrapper-bin";
 const WRAPPER_PATH = `${WRAPPER_DIR}/claude`;
 const REAL_CLAUDE_LINK = "/opt/styre-bench/real-claude";
+// Extracts the terminal stream-json `result` event's `.result` (the assistant's final text,
+// with REAL newlines) for the wrapper to print to stdout — see the wrapper doc in
+// buildEntrypoint for why styre needs plain text, not a JSON envelope, on stdout.
+const EXTRACT_SCRIPT_PATH = `${WRAPPER_DIR}/extract-result.py`;
 const GIT_IDENTITY_EMAIL = "bench@styre.dev"; // matches seed-github.ts's push-commit identity
 const GIT_IDENTITY_NAME = "styre-bench";
 
@@ -99,13 +103,17 @@ export interface BuildEntrypointInput {
  *    probe's liveness gate, `hasAgentActivity`) depend on — without it only the terminal
  *    `result` event would stream. The wrapper tees the full NDJSON event stream to
  *    `CONTAINER_TRANSCRIPT_PATH` (append mode — the transcript accumulates across every
- *    `claude` call in the run) and prints only the LAST stream-json line (the terminal
- *    `result` event) to stdout — matching the shape `claude.ts`'s `parseClaudeJson` expects
- *    from `--output-format json` (KNOWN-BROKEN-UNTIL-LIVE: confirmed only by inspection of
- *    styre's `src/agent/providers/claude.ts`, which itself notes its flag/field assumptions
- *    are "verified against a real `claude` run in the Task 7 smoke" — re-verify this wrapper
- *    the same way before trusting it live). Exit code is passed through via `PIPESTATUS[0]`,
- *    not the tee/tail tail-of-pipe status.
+ *    `claude` call in the run), and pipes stdout through `extract-result.py`, which prints
+ *    ONLY the terminal `result` event's `.result` field — the assistant's final text with
+ *    REAL newlines. This is load-bearing: styre reads a fenced ```<fence>``` block off stdout
+ *    via `extractSidecar` (src/dispatch/sidecar.ts), whose regex needs REAL newlines. A JSON
+ *    envelope on stdout — whether `--output-format json` OR the stream-json `result` line —
+ *    has the fence's newlines escaped as `\n` and NEVER matches (confirmed live against
+ *    claude 2.1.199: `.result` = "```fence\n{...}\n```" only after JSON-decoding). The cost of
+ *    this: `claude.ts`'s `parseClaudeJson` (usage/cost) sees plain text and returns nulls —
+ *    it tolerates that by design (try/catch), so per-dispatch claude-side cost telemetry is
+ *    lost (revisit: derive cost from the stream-json transcript instead). Exit code is passed
+ *    through via `PIPESTATUS[0]` (the real claude), not the tee/python tail-of-pipe status.
  *
  *    WEB-OFF, LAYER 2: when `input.cohort === "web-off"`, the wrapper ALSO appends
  *    `--disallowedTools WebSearch WebFetch` to every `claude` invocation, after the forced
@@ -164,6 +172,35 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     "",
     "echo 'styre-bench entrypoint: [2/6] installing the claude transcript-tee wrapper on PATH'",
     `mkdir -p ${WRAPPER_DIR}`,
+    // The wrapper pipes claude's stdout through this python3 extractor (python3 is present in
+    // both the swebench and mswebench eval images; jq/node are each missing from one). It must
+    // exist before the wrapper runs; fail loudly if python3 is unavailable rather than silently
+    // emitting empty stdout (which styre would see as a missing sidecar).
+    "if ! command -v python3 >/dev/null 2>&1; then",
+    "  echo 'FATAL: entrypoint: python3 is required to extract the claude result for styre stdout but is not present in this image' >&2",
+    "  exit 1",
+    "fi",
+    `cat > ${EXTRACT_SCRIPT_PATH} <<'EXTRACT_EOF'`,
+    "import json, sys",
+    "",
+    "# Read the full claude stream-json event stream (already tee'd to the transcript) and print",
+    "# ONLY the terminal `result` event's `.result` field — the assistant's final text with REAL",
+    "# newlines. styre's extractSidecar needs a real ```fence``` block; a JSON envelope (where the",
+    "# fence's newlines are escaped as \\n) never matches. parseClaudeJson (cost, forensic-only)",
+    "# sees plain text and returns nulls, which it tolerates by design.",
+    "result = None",
+    "for line in sys.stdin:",
+    "    line = line.strip()",
+    "    if not line:",
+    "        continue",
+    "    try:",
+    "        obj = json.loads(line)",
+    "    except Exception:",
+    "        continue",
+    '    if isinstance(obj, dict) and obj.get("type") == "result" and isinstance(obj.get("result"), str):',
+    '        result = obj["result"]',
+    'sys.stdout.write(result if result is not None else "")',
+    "EXTRACT_EOF",
     `cat > ${WRAPPER_PATH} <<'WRAPPER_EOF'`,
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -180,7 +217,12 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     'args+=("--output-format" "stream-json" "--verbose")',
     ...(isWebOff ? ['args+=("--disallowedTools" "WebSearch" "WebFetch")'] : []),
     "set +e",
-    '"$REAL_CLAUDE" "${args[@]}" | tee -a "$TRANSCRIPT_PATH" | tail -n 1',
+    // Tee the FULL stream-json event stream to the transcript (the leak-scan/liveness gate
+    // parse it), but emit only the terminal event's `.result` — the plain assistant text with
+    // real newlines — to stdout, so styre's extractSidecar can find its ```fence``` block. A
+    // JSON envelope on stdout (json OR the stream-json result line) has the fence's newlines
+    // escaped and never matches. PIPESTATUS[0] is still the real claude's exit.
+    `"$REAL_CLAUDE" "\${args[@]}" | tee -a "$TRANSCRIPT_PATH" | python3 "${EXTRACT_SCRIPT_PATH}"`,
     'wrapper_exit="${PIPESTATUS[0]}"',
     "set -e",
     'exit "$wrapper_exit"',
