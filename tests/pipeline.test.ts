@@ -6,6 +6,7 @@ import {
   type PipelineDeps,
   type RunControlsResult,
   type RunPilotDeps,
+  type RunPoolOpts,
   type ScoreResult,
   type SelfTestResult,
   resolvePythonBin,
@@ -796,6 +797,85 @@ describe("RUN_LIVE=1-gated: ONE full-pipeline run PER corpus family (placeholder
       );
     },
   );
+});
+
+describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () => {
+  test("skips runControls/score/runSelfTest entirely; still runs seed/run/collect/detectLeak/blindQuality/abReview", async () => {
+    const { deps, calls } = trackedDeps();
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+      deps,
+      bypassOracle: true,
+    });
+
+    expect(calls.runControls).toBe(0);
+    expect(calls.score).toBe(0);
+    expect(calls.runSelfTest).toBe(0);
+    expect(calls.seed).toBe(1);
+    expect(calls.run).toBe(1);
+    expect(calls.collect).toBe(1);
+    expect(calls.detectLeak).toBe(1);
+    expect(calls.blindQuality).toBe(1);
+    expect(calls.abReview).toBe(1);
+
+    expect(rec.taxonomy).toBe("unscored");
+    expect(rec.resolved).toBeNull();
+
+    // the rest of the record still populates normally.
+    expect(rec.cost_usd).toBeGreaterThan(0);
+    expect(rec.pr_opened).toBe(true);
+    expect(rec.blind_quality).toBe("addresses-issue");
+    expect(rec.ab_preference).toBe("A(styre)");
+  });
+
+  test("a bypass run where collect returns infra still yields infra (bypass doesn't mask a real seed/run/collect failure)", async () => {
+    const { deps, calls } = trackedDeps({ collect: async () => infraStage() });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+      deps,
+      bypassOracle: true,
+      maxInfraRetries: 0,
+    });
+
+    expect(rec.taxonomy).toBe("infra");
+    expect(calls.score).toBe(0);
+    expect(calls.detectLeak).toBe(0);
+    expect(calls.blindQuality).toBe(0);
+  });
+
+  test("a bypass run where collect returns probe still short-circuits as probe (score/self-test/leak/review not called)", async () => {
+    const { deps, calls } = trackedDeps({ collect: async () => probeStage() });
+    const rec = await runInstance(makeInstance(), "/bin/styre", makeCfg(), {
+      deps,
+      bypassOracle: true,
+    });
+
+    expect(rec.taxonomy).toBe("probe");
+    expect(calls.detectLeak).toBe(0);
+    expect(calls.blindQuality).toBe(0);
+    expect(calls.abReview).toBe(0);
+  });
+});
+
+describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
+  test("{ smoke: true, bypassOracle: true } passes bypassOracle through runPool's runInstanceOpts", async () => {
+    const py = makeInstance({ id: "py-1", language: "python" });
+    const ts = makeInstance({ id: "ts-1", language: "ts" });
+    let capturedOpts: RunPoolOpts | undefined;
+    const deps: Partial<RunPilotDeps> = {
+      loadInstances: async (family) => (family === "swe-bench" ? [py] : [ts]),
+      selectSmoke: (pool) => pool,
+      buildStyre: async () => ({ binaryPath: "/bin/styre", commit: "abc123", webTools: "off" }),
+      runPool: async (_instances, _binaryPath, _cfg, opts) => {
+        capturedOpts = opts;
+        return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
+      },
+      renderReport: (records) => ({ markdown: "", json: records }),
+      writeReport: async () => {},
+    };
+
+    await runPilot(makeCfg(), { deps, smoke: true, bypassOracle: true });
+
+    expect(capturedOpts?.runInstanceOpts?.bypassOracle).toBe(true);
+  });
 });
 
 describe("resolvePythonBin: scorer uses the .venv interpreter, not bare python3", () => {

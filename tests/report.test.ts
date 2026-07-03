@@ -432,4 +432,62 @@ describe("renderReport", () => {
       "Review↔oracle agreement: 0.75 (blind reviewer predicts ground truth 75% of the time, n=4)",
     );
   });
+
+  describe("SMOKE=2 Option-B: unscored records (no oracle verdict)", () => {
+    const unscored = makeRecord({
+      instance: "u1-unscored-bypass",
+      language: "ts",
+      difficulty: "easy",
+      cohort: "web-off",
+      resolved: null,
+      pr_opened: true,
+      taxonomy: "unscored",
+      cost_usd: 4.2,
+      blind_quality: "addresses-issue",
+      ab_preference: "A(styre)",
+    });
+    const withUnscored = [...records, unscored];
+
+    test("excluded from the resolve-rate denominator (headline stays 4/6, not 4/7 or 5/7)", () => {
+      const { markdown } = renderReport(withUnscored, META);
+      expect(markdown).toContain("4/6");
+      expect(markdown).not.toContain("4/7");
+      expect(markdown).not.toContain("5/7");
+    });
+
+    test("appears in the failure-taxonomy histogram", () => {
+      const { markdown } = renderReport(withUnscored, META);
+      const section = markdown.slice(markdown.indexOf("## Failure taxonomy"));
+      expect(section).toContain("unscored 1");
+      const heading = /## Failure taxonomy \((\d+)\)/.exec(markdown);
+      expect(Number(heading?.[1])).toBe(withUnscored.length);
+    });
+
+    test("its ab_preference is NOT gated on resolved -> A/B eligible n grows 4 -> 5, styre count 2 -> 3", () => {
+      const { markdown } = renderReport(withUnscored, META);
+      const judgmentSection = markdown.slice(markdown.indexOf("## Judgment quality"));
+      expect(judgmentSection).toContain("styre 60% (3/5)");
+    });
+
+    test("its blind_quality is NOT gated on resolved but review<->oracle agreement IS: the reviewed n stays 5 (unscored excluded), never counted as a mismatch", () => {
+      // Without the fix, u1 (blind_quality:"addresses-issue", resolved:null) would enter
+      // `reviewed` and mismatch (true !== null) since there's no oracle verdict to agree
+      // with, dropping agreement from 4/5=80% to 4/6=67% -- this asserts the CORRECT n=5/80%,
+      // not the buggy n=6/67%.
+      const { markdown } = renderReport(withUnscored, META);
+      const judgmentSection = markdown.slice(markdown.indexOf("## Judgment quality"));
+      expect(judgmentSection).toContain(
+        "Review↔oracle agreement: 0.80 (blind reviewer predicts ground truth 80% of the time, n=5)",
+      );
+      expect(judgmentSection).not.toContain("n=6)");
+    });
+
+    test("its cost_usd is included in the run-level spend but excluded from the loop-economics resolved/unresolved cost split (no oracle verdict to bucket it by)", () => {
+      const { markdown } = renderReport(withUnscored, { ...META, spentUsd: 46.7 });
+      // meta.spentUsd (accumulated by runPool over ALL records regardless of taxonomy,
+      // independent of this renderer) already reflects the unscored instance's cost --
+      // asserted here only as documentation of where its cost surfaces.
+      expect(markdown).toContain("$46.70");
+    });
+  });
 });

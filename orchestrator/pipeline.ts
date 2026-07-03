@@ -448,6 +448,75 @@ export interface RunInstanceOpts {
   maxInfraRetries?: number;
   /** See `buildDefaultDeps` doc — a test/debug knob, not a `BENCH_CONFIG` field. */
   retainOnFailure?: boolean;
+  /** SMOKE=2 Option-B oracle-bypass: skips `deps.runControls` (the fail-closed drop gate),
+   *  `deps.score`, and `deps.runSelfTest` entirely — every one of those shells out to the
+   *  Linux-x86_64-only swebench/multi-swe-bench oracle harness, so on macOS they either don't
+   *  run or aren't trustworthy. `seed -> run -> collect` (with the normal infra-retry) still
+   *  runs, and so do `detectLeak`/`blindQuality`/`abReview` (ANTHROPIC + diffs only, no
+   *  oracle). A `collect`-emitted `probe`/`infra` taxonomy is still honored as-is — bypass
+   *  never masks a genuine seed/run/collect failure. A successful bypass run's terminal
+   *  record is `taxonomy: "unscored"`, `resolved: null` (see `runJudgmentStages` call site
+   *  below). Lets the operator validate the whole pipeline minus the oracle on macOS. */
+  bypassOracle?: boolean;
+}
+
+interface JudgmentStagesResult {
+  suspectedLeak: boolean;
+  leakReasons: string[];
+  blindVerdict: string | null;
+  abPreference: TaskRecord["ab_preference"];
+  abNotes: string | null;
+}
+
+/**
+ * Runs `detectLeak` -> `blindQuality` + `abReview`, each independently try/catch'd (Fix 1's
+ * JUDGMENT-STAGE-CRASH CONTRACT — a crash in one never loses the others' signal). Shared by
+ * BOTH the normal oracle-scored path and the SMOKE=2 bypass-oracle path below, since none of
+ * these three stages need an oracle verdict to run (only ANTHROPIC + the bare-tree diff).
+ */
+async function runJudgmentStages(
+  inst: Instance,
+  stage: CollectStageResult,
+  cfg: PipelineConfig,
+  deps: PipelineDeps,
+): Promise<JudgmentStagesResult> {
+  const issue = inst.problem_statement;
+
+  let suspectedLeak = false;
+  let leakReasons: string[] = [];
+  try {
+    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript);
+    suspectedLeak = leak.suspected;
+    leakReasons = leak.reasons;
+  } catch {
+    // See the doc on the equivalent inline try/catch this replaces (in `runInstance`, git
+    // blame) — reuses the canonical "transcript-unavailable" `leak_reasons` value rather than
+    // inventing a new taxonomy: a crashed detector means the scan did not complete.
+    suspectedLeak = false;
+    leakReasons = ["transcript-unavailable"];
+  }
+
+  let blindVerdict: string | null = null;
+  try {
+    const blind = await deps.blindQuality(issue, stage.diff);
+    blindVerdict = blind.verdict;
+  } catch {
+    blindVerdict = null;
+  }
+
+  let abPreference: TaskRecord["ab_preference"] = null;
+  let abNotes: string | null = null;
+  try {
+    const ab = await deps.abReview(issue, stage.diff, inst.fix_patch, inst.id, cfg.seed);
+    abPreference = ab.preference;
+    abNotes = ab.notes;
+  } catch {
+    // render.ts's `AB_EXCLUDED` already excludes `null` from every A/B denominator.
+    abPreference = null;
+    abNotes = null;
+  }
+
+  return { suspectedLeak, leakReasons, blindVerdict, abPreference, abNotes };
 }
 
 /**
@@ -501,11 +570,16 @@ export async function runInstance(
 ): Promise<TaskRecord> {
   const deps: PipelineDeps = { ...buildDefaultDeps(opts.retainOnFailure ?? false), ...opts.deps };
   const maxInfraRetries = opts.maxInfraRetries ?? DEFAULT_MAX_INFRA_RETRIES;
+  const bypassOracle = opts.bypassOracle ?? false;
   const base = blankRecord(inst, cfg);
 
-  const controls = await deps.runControls(inst);
-  if (!(controls.gold_resolved && controls.base_fails && controls.deterministic)) {
-    return { ...base, taxonomy: "dropped-flaky" };
+  // SMOKE=2 Option-B: `runControls` shells out to the Linux-only oracle harness too — skip
+  // the fail-closed drop gate entirely rather than call it against a harness that can't run.
+  if (!bypassOracle) {
+    const controls = await deps.runControls(inst);
+    if (!(controls.gold_resolved && controls.base_fails && controls.deterministic)) {
+      return { ...base, taxonomy: "dropped-flaky" };
+    }
   }
 
   let infraRetries = 0;
@@ -526,7 +600,7 @@ export async function runInstance(
     taskSpentUsd += (stage.record.cost_usd ?? 0) + SETUP_COST_ESTIMATE_USD;
     scoreResult = undefined;
 
-    if (stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
+    if (!bypassOracle && stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
       try {
         scoreResult = await deps.score(inst, stage.diff);
       } catch (err) {
@@ -583,6 +657,26 @@ export async function runInstance(
     return withCollect;
   }
 
+  if (bypassOracle) {
+    // SMOKE=2 Option-B: no oracle verdict was ever produced for this attempt (score/
+    // run_self_test were both skipped above/below) — `resolved: null`, `taxonomy: "unscored"`
+    // UNLESS `collect` already assigned a terminal taxonomy (e.g. "parked"/"loop-exhausted"),
+    // which — same as the normal path below — is preserved as-is. detectLeak/blindQuality/
+    // abReview still ran normally (they need ANTHROPIC + the diff, not the oracle), and
+    // `self_test_passed` keeps collect's own approximation untouched (no `runSelfTest` call).
+    const judgment = await runJudgmentStages(inst, stage, cfg, deps);
+    return {
+      ...withCollect,
+      resolved: null,
+      taxonomy: stage.record.taxonomy ?? "unscored",
+      suspected_leak: judgment.suspectedLeak,
+      leak_reasons: judgment.leakReasons,
+      blind_quality: judgment.blindVerdict,
+      ab_preference: judgment.abPreference,
+      ab_notes: judgment.abNotes,
+    };
+  }
+
   if (!scoreResult) {
     // Defensive only — unreachable given the loop invariant above (taxonomy is neither
     // "infra" nor "probe" here, which the loop only allows once `deps.score` has already
@@ -613,57 +707,21 @@ export async function runInstance(
     }
   }
 
-  const issue = inst.problem_statement;
-
   // JUDGMENT-STAGE-CRASH CONTRACT (Fix 1): `resolved`/`taxonomy` above are already final —
-  // each judgment call below is independently try/catch'd so a crash in ONE never loses the
-  // oracle verdict, the diff, or the OTHER judges' signals.
-  let suspectedLeak = false;
-  let leakReasons: string[] = [];
-  try {
-    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript);
-    suspectedLeak = leak.suspected;
-    leakReasons = leak.reasons;
-  } catch {
-    // Reuses the canonical "transcript-unavailable" `leak_reasons` value (see
-    // `orchestrator/types.ts`'s `TaskRecord.leak_reasons` contract) rather than inventing a
-    // new taxonomy value — the validity panel (`report/render.ts`) already renders this
-    // exact reason as "URL-scan did NOT run ... leak status UNKNOWN, not assumed clean",
-    // which is precisely correct here: a crashed detector means the scan did not complete.
-    suspectedLeak = false;
-    leakReasons = ["transcript-unavailable"];
-  }
-
-  let blindVerdict: string | null = null;
-  try {
-    const blind = await deps.blindQuality(issue, stage.diff);
-    blindVerdict = blind.verdict;
-  } catch {
-    blindVerdict = null;
-  }
-
-  let abPreference: TaskRecord["ab_preference"] = null;
-  let abNotes: string | null = null;
-  try {
-    const ab = await deps.abReview(issue, stage.diff, inst.fix_patch, inst.id, cfg.seed);
-    abPreference = ab.preference;
-    abNotes = ab.notes;
-  } catch {
-    // render.ts's `AB_EXCLUDED` already excludes `null` from every A/B denominator.
-    abPreference = null;
-    abNotes = null;
-  }
+  // each judgment call inside `runJudgmentStages` is independently try/catch'd so a crash in
+  // ONE never loses the oracle verdict, the diff, or the OTHER judges' signals.
+  const judgment = await runJudgmentStages(inst, stage, cfg, deps);
 
   return {
     ...withCollect,
     resolved,
     taxonomy,
     self_test_passed: selfTestPassed,
-    suspected_leak: suspectedLeak,
-    leak_reasons: leakReasons,
-    blind_quality: blindVerdict,
-    ab_preference: abPreference,
-    ab_notes: abNotes,
+    suspected_leak: judgment.suspectedLeak,
+    leak_reasons: judgment.leakReasons,
+    blind_quality: judgment.blindVerdict,
+    ab_preference: judgment.abPreference,
+    ab_notes: judgment.abNotes,
   };
 }
 
@@ -789,9 +847,15 @@ export interface RunPilotOpts {
   /**
    * SMOKE mode: run exactly one ts + one python instance (easiest difficulty) instead of the
    * full 6-cell pilot. For the FIRST live run — a plumbing test of the Docker/claude/oracle
-   * gate before trusting any pilot number. Driven by `SMOKE=1` at the `bin/run-pilot.ts` entry.
+   * gate before trusting any pilot number. Driven by `SMOKE=1` (or `SMOKE=2`) at the
+   * `bin/run-pilot.ts` entry.
    */
   smoke?: boolean;
+  /** SMOKE=2 Option-B: threaded straight through to every `runInstance` call's
+   *  `RunInstanceOpts.bypassOracle` (via `runPool`'s `runInstanceOpts`) — see that field's doc
+   *  for what it skips/still runs. Independent of `smoke`, but `bin/run-pilot.ts` only ever
+   *  sets both together (`SMOKE=2` implies smoke selection + bypass). */
+  bypassOracle?: boolean;
 }
 
 /**
@@ -822,7 +886,9 @@ export async function runPilot(
     cohort: cfg.cohort,
   });
 
-  const poolResult = await deps.runPool(instances, build.binaryPath, cfg);
+  const poolResult = await deps.runPool(instances, build.binaryPath, cfg, {
+    runInstanceOpts: { bypassOracle: opts.bypassOracle },
+  });
 
   const meta: ReportMeta = {
     styreRef: `${cfg.cohort} @ ${build.commit}`,

@@ -31,7 +31,12 @@ export interface TaskRecord {
   styre_commit: string;
   cohort: Cohort;
   post_cutoff: boolean | null;
-  resolved: boolean;
+  /** `null` iff no oracle verdict exists for this record — currently only `taxonomy:
+   *  "unscored"` (SMOKE=2 Option-B oracle-bypass, `orchestrator/pipeline.ts`'s `runInstance`
+   *  bypass branch): the Linux-only oracle never ran, so there is nothing to report `true`/
+   *  `false` from. Every other taxonomy still sets a real `boolean` (including the
+   *  `false` default on `dropped-flaky`/`probe`/`infra`/`parked` — see `blankRecord`). */
+  resolved: boolean | null;
   pr_opened: boolean;
   self_authored_test: boolean | null;
   self_test_passed: boolean | null;
@@ -51,6 +56,11 @@ export interface TaskRecord {
   ab_notes: string | null;
   suspected_leak: boolean;
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran
+  /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
+   *  `EXCLUDED_FROM_RESOLVE_DENOM` for the canonical known values: "resolved" |
+   *  "opened-but-unresolved" | "loop-exhausted" | "probe" | "parked" | "infra" |
+   *  "dropped-flaky" | "unscored" (SMOKE=2 Option-B oracle-bypass — a successful bypass run
+   *  with no oracle verdict; `resolved` is `null` on these records). */
   taxonomy: string;
   /** Task 11: count of whole-instance infra-retries consumed before this record was
    *  finalized (0 if none). Optional/additive — pre-Task-11 code (e.g. report.test.ts's

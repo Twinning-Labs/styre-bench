@@ -29,11 +29,20 @@ export interface RenderReportResult {
 /**
  * DENOMINATOR HYGIENE (the load-bearing correctness rule — reviews have hammered this):
  * these taxonomies never received a trustworthy oracle verdict (flaky-dropped before styre
- * ever ran, an unusable `styre setup` profile, a parked/resumable run, or an infra/tooling
- * failure) — they must NEVER appear in the resolve-rate / self-report-gap / PR-opened-rate
- * denominators. They are reported separately (taxonomy histogram + validity panel).
+ * ever ran, an unusable `styre setup` profile, a parked/resumable run, an infra/tooling
+ * failure, or — SMOKE=2 Option-B — the oracle was deliberately BYPASSED so no verdict was
+ * ever produced) — they must NEVER appear in the resolve-rate / self-report-gap /
+ * PR-opened-rate denominators. They are reported separately (taxonomy histogram + validity
+ * panel), and their cost/blind_quality/ab_preference still populate the sections that aren't
+ * gated on a `resolved` verdict (see `renderJudgmentQuality`'s `reviewed`/`abEligible`).
  */
-const EXCLUDED_FROM_RESOLVE_DENOM = new Set(["dropped-flaky", "probe", "infra", "parked"]);
+const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
+  "dropped-flaky",
+  "probe",
+  "infra",
+  "parked",
+  "unscored",
+]);
 
 function inResolveDenom(r: TaskRecord): boolean {
   return !EXCLUDED_FROM_RESOLVE_DENOM.has(r.taxonomy);
@@ -282,8 +291,14 @@ function renderJudgmentQuality(records: TaskRecord[]): string {
   const lines: string[] = [];
   lines.push("## Judgment quality");
 
+  // resolved !== null excludes "unscored" (SMOKE=2 Option-B) records: review<->oracle
+  // AGREEMENT requires an oracle verdict to agree/disagree WITH, so a record with no verdict
+  // must not silently count as a mismatch (its blind_quality still shows up elsewhere — the
+  // A/B section below, and the raw JSON export — since a blind-quality REVIEW itself doesn't
+  // need an oracle verdict to have run).
   const reviewed = records.filter(
-    (r): r is TaskRecord & { blind_quality: string } => r.blind_quality !== null,
+    (r): r is TaskRecord & { blind_quality: string } =>
+      r.blind_quality !== null && r.resolved !== null,
   );
   const agreementMatches = reviewed.filter(
     (r) => blindQualityPredictsResolved(r.blind_quality) === r.resolved,
@@ -340,6 +355,7 @@ const TAXONOMY_ORDER = [
   "parked",
   "infra",
   "dropped-flaky",
+  "unscored",
 ];
 
 function renderTaxonomy(records: TaskRecord[]): string {
