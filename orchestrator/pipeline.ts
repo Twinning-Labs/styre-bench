@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,6 +40,27 @@ export type PipelineConfig = typeof BENCH_CONFIG;
 
 const SCORER_SCRIPT = new URL("../scorer/score.py", import.meta.url).pathname;
 const LEAK_DETECT_SCRIPT = new URL("../scorer/leak_detect.py", import.meta.url).pathname;
+
+/**
+ * Interpreter for the scorer subprocess. The scorer's deps (swebench / multi-swe-bench) are
+ * installed in the repo's `.venv` (system python3 is PEP-668 externally-managed), so bare
+ * `python3` dies with ModuleNotFoundError → run_controls "unparseable stdout" → every instance
+ * infra-fails. Prefer `.venv/bin/python`; allow an explicit `BENCH_PYTHON` override; fall back
+ * to `python3` only when no venv exists.
+ */
+const VENV_PYTHON = new URL("../.venv/bin/python", import.meta.url).pathname;
+
+/** Pure resolver (testable): BENCH_PYTHON override > repo `.venv/bin/python` > bare `python3`. */
+export function resolvePythonBin(
+  env: Record<string, string | undefined> = process.env,
+  venvPath: string = VENV_PYTHON,
+  exists: (p: string) => boolean = existsSync,
+): string {
+  if (env.BENCH_PYTHON) return env.BENCH_PYTHON;
+  return exists(venvPath) ? venvPath : "python3";
+}
+
+const PYTHON_BIN = resolvePythonBin();
 
 export interface RunControlsResult {
   gold_resolved: boolean;
@@ -91,12 +113,12 @@ async function spawnPythonJson<T>(argv: string[], payload: unknown): Promise<T> 
 }
 
 async function callRunControls(inst: Instance): Promise<RunControlsResult> {
-  return spawnPythonJson<RunControlsResult>(["python3", SCORER_SCRIPT, "run_controls"], {
+  return spawnPythonJson<RunControlsResult>([PYTHON_BIN, SCORER_SCRIPT, "run_controls"], {
     instance: inst,
   });
 }
 async function callScore(inst: Instance, candidateDiff: string): Promise<ScoreResult> {
-  return spawnPythonJson<ScoreResult>(["python3", SCORER_SCRIPT, "score"], {
+  return spawnPythonJson<ScoreResult>([PYTHON_BIN, SCORER_SCRIPT, "score"], {
     instance: inst,
     candidate_diff: candidateDiff,
   });
@@ -106,7 +128,7 @@ async function callRunSelfTest(
   candidateDiff: string,
   addedTestPaths: string[],
 ): Promise<SelfTestResult> {
-  return spawnPythonJson<SelfTestResult>(["python3", SCORER_SCRIPT, "run_self_test"], {
+  return spawnPythonJson<SelfTestResult>([PYTHON_BIN, SCORER_SCRIPT, "run_self_test"], {
     instance: inst,
     candidate_diff: candidateDiff,
     added_test_paths: addedTestPaths,
@@ -117,7 +139,7 @@ async function callDetectLeak(
   fixPatch: string,
   transcript: string,
 ): Promise<LeakResult> {
-  return spawnPythonJson<LeakResult>(["python3", LEAK_DETECT_SCRIPT], {
+  return spawnPythonJson<LeakResult>([PYTHON_BIN, LEAK_DETECT_SCRIPT], {
     candidate_diff: candidateDiff,
     fix_patch: fixPatch,
     transcript,

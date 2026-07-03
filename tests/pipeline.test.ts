@@ -8,6 +8,7 @@ import {
   type RunPilotDeps,
   type ScoreResult,
   type SelfTestResult,
+  resolvePythonBin,
   runInstance,
   runPilot,
   runPool,
@@ -795,4 +796,20 @@ describe("RUN_LIVE=1-gated: ONE full-pipeline run PER corpus family (placeholder
       );
     },
   );
+});
+
+describe("resolvePythonBin: scorer uses the .venv interpreter, not bare python3", () => {
+  test("BENCH_PYTHON override wins", () => {
+    expect(
+      resolvePythonBin({ BENCH_PYTHON: "/custom/python" }, "/repo/.venv/bin/python", () => true),
+    ).toBe("/custom/python");
+  });
+  test("prefers the repo .venv when it exists (bare python3 lacks swebench)", () => {
+    expect(resolvePythonBin({}, "/repo/.venv/bin/python", () => true)).toBe(
+      "/repo/.venv/bin/python",
+    );
+  });
+  test("falls back to python3 only when no venv is present", () => {
+    expect(resolvePythonBin({}, "/repo/.venv/bin/python", () => false)).toBe("python3");
+  });
 });
