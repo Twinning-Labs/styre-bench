@@ -138,7 +138,8 @@ export interface BuildEntrypointInput {
  * 4. Points the ALREADY-checked-out repo's `origin` at `seed.repoUrl` and resets the local
  *    branch to `seed.defaultBranch` — styre's github adapter derives owner/repo from `origin`
  *    and throws otherwise.
- * 5. `styre setup <repoDirInImage> --out <profilePath>` — deterministic path (setup otherwise
+ * 5. `styre setup <repoDirInImage> --out <profilePath> --trust-agent-commands` (see the flag's
+ *    rationale at the call site) — deterministic path (setup otherwise
  *    writes under `$XDG_CONFIG_HOME/styre/<slug>/profile.json`, which `runStyre`'s caller has
  *    no fixed handle on).
  * 6. `styre run <seed.ident> --profile <profilePath>`, teeing NDJSON stdout to
@@ -253,7 +254,14 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     // profile.json and emits no run summary, so collect would misread it as an infra failure
     // and retry it (uselessly — styre setup is deterministic).
     "set +e",
-    `"${CONTAINER_BINARY_PATH}" setup "${repoDirInImage}" --out "${CONTAINER_PROFILE_PATH}"`,
+    // --trust-agent-commands: the bench is inherently autonomous/headless — there is no
+    // operator to approve agent-discovered build/test/check commands. Without this flag styre
+    // drops every agent-proposed command ("headless — agent override not accepted"), leaving it
+    // unable to ground-truth-verify most stacks, which cripples its self-correcting loop. This
+    // does NOT affect the final oracle score (the oracle uses the gold FAIL_TO_PASS tests); it
+    // only lets styre's own verify signal function so the loop measures styre's real autonomous
+    // capability rather than a command-starved cripple.
+    `"${CONTAINER_BINARY_PATH}" setup "${repoDirInImage}" --out "${CONTAINER_PROFILE_PATH}" --trust-agent-commands`,
     'setup_exit="$?"',
     "set -e",
     'if [ "$setup_exit" -ne 0 ]; then',

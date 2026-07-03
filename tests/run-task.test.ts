@@ -137,10 +137,14 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).toContain('git checkout -B "trunk"');
   });
 
-  test("runs styre setup with --out a deterministic profile path, on the repoDirInImage default (/testbed)", () => {
+  test("runs styre setup with --out a deterministic profile path + --trust-agent-commands, on the repoDirInImage default (/testbed)", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain('cd "/testbed"');
-    expect(script).toContain('setup "/testbed" --out "/out/profile.json"');
+    // --trust-agent-commands: bench is autonomous/headless, so styre must accept agent-discovered
+    // build/test/check commands (else it can't ground-truth-verify most stacks).
+    expect(script).toContain(
+      'setup "/testbed" --out "/out/profile.json" --trust-agent-commands',
+    );
   });
 
   test("honors a repoDirInImage override", () => {
