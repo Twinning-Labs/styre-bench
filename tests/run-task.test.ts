@@ -64,6 +64,27 @@ describe("buildEntrypoint (pure)", () => {
     expect(iRun).toBeGreaterThan(iSetup);
   });
 
+  test("runs styre --in-place with a repo-scoped .styre-disposable marker (git-excluded, before run)", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    // marker dropped at the repo root, and locally excluded so styre's `git add -A` won't commit it
+    expect(script).toContain('touch "/testbed/.styre-disposable"');
+    expect(script).toContain('echo ".styre-disposable" >> "/testbed/.git/info/exclude"');
+    // the styre run is --in-place
+    const runLine = script.split("\n").find((l) => l.includes('run "') && l.includes("--profile"));
+    expect(runLine).toContain("--in-place");
+    // the marker exists BEFORE the run mutates the repo
+    expect(script.indexOf('touch "/testbed/.styre-disposable"')).toBeLessThan(
+      script.indexOf('run "'),
+    );
+  });
+
+  test("the marker + exclude honor a repoDirInImage override (Multi-SWE-bench /home/<repo>)", () => {
+    const script = buildEntrypoint({ seed: makeSeed(), repoDirInImage: "/home/darkreader" });
+    expect(script).toContain('touch "/home/darkreader/.styre-disposable"');
+    expect(script).toContain('echo ".styre-disposable" >> "/home/darkreader/.git/info/exclude"');
+    expect(script).not.toContain("/testbed/.styre-disposable");
+  });
+
   test("installs a pinned claude CLI version (default CLAUDE_CLI_VERSION) via curl or npm", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain(`bash -s ${CLAUDE_CLI_VERSION}`);
@@ -165,7 +186,9 @@ describe("buildEntrypoint (pure)", () => {
   test("runs styre run with the seed ident + --profile, AFTER setup, teeing NDJSON stdout", () => {
     const seed = makeSeed({ ident: "ENG-999" });
     const script = buildEntrypoint({ seed });
-    expect(script).toContain('run "ENG-999" --profile "/out/profile.json" | tee "/out/run.ndjson"');
+    expect(script).toContain(
+      'run "ENG-999" --profile "/out/profile.json" --in-place | tee "/out/run.ndjson"',
+    );
     expect(script).toContain('run_exit="${PIPESTATUS[0]}"');
   });
 
