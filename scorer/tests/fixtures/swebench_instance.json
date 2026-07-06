@@ -1,0 +1,18 @@
+{
+  "id": "pallets__flask-5063",
+  "language": "python",
+  "difficulty": "easy",
+  "repo": "pallets/flask",
+  "base_commit": "d8c6d75b3adaa5b02d503dc3ba0c317c56d43647",
+  "problem_statement": "JSON provider raises TypeError for Decimal values instead of serializing them, breaking routes that return Decimal fields from a database row.",
+  "hints": "Look at flask.json.provider.DefaultJSONProvider.default; Decimal is not handled before the fallback raise.",
+  "image": "sweb.eval.x86_64.pallets__flask-5063",
+  "fail_to_pass": ["tests/test_json.py::test_decimal_serialization"],
+  "pass_to_pass": [
+    "tests/test_json.py::test_basic_serialization",
+    "tests/test_json.py::test_datetime_serialization"
+  ],
+  "merge_date": "2025-03-14T10:22:00Z",
+  "fix_patch": "diff --git a/src/flask/json/provider.py b/src/flask/json/provider.py\n--- a/src/flask/json/provider.py\n+++ b/src/flask/json/provider.py\n@@ -1,6 +1,7 @@\n-def default(o):\n+def default(o):  # fixed: handle Decimal\n     raise TypeError(o)\n",
+  "test_patch": "diff --git a/tests/test_json.py b/tests/test_json.py\n--- a/tests/test_json.py\n+++ b/tests/test_json.py\n@@ -1,3 +1,6 @@\n+def test_decimal_serialization():\n+    assert True\n+\n"
+}
