@@ -137,14 +137,18 @@ export interface BuildEntrypointInput {
  *    a bare image (no committer identity).
  * 4. Points the ALREADY-checked-out repo's `origin` at `seed.repoUrl` and resets the local
  *    branch to `seed.defaultBranch` — styre's github adapter derives owner/repo from `origin`
- *    and throws otherwise.
+ *    and throws otherwise. Then drops a repo-scoped `.styre-disposable` marker (git-excluded
+ *    locally so `git add -A` won't commit it) — the disposability signal `styre run --in-place`
+ *    gates on.
  * 5. `styre setup <repoDirInImage> --out <profilePath> --trust-agent-commands` (see the flag's
  *    rationale at the call site) — deterministic path (setup otherwise
  *    writes under `$XDG_CONFIG_HOME/styre/<slug>/profile.json`, which `runStyre`'s caller has
  *    no fixed handle on).
- * 6. `styre run <seed.ident> --profile <profilePath>`, teeing NDJSON stdout to
+ * 6. `styre run <seed.ident> --profile <profilePath> --in-place`, teeing NDJSON stdout to
  *    `CONTAINER_NDJSON_PATH`; the container's own exit code is styre run's exit code
- *    (`PIPESTATUS[0]`, not tee's).
+ *    (`PIPESTATUS[0]`, not tee's). `--in-place` makes styre work on a branch IN the repo root
+ *    (the pre-built editable env's target) instead of a separate worktree, so its conda-reuse
+ *    probe fires; discovery finds the repo from cwd (step 4 `cd`d in).
  *
  * FIREWALL: this function's input type carries no `test_patch`/`fix_patch`/`.claude` data at
  * all — `RunSeed` is only `{ repoUrl, defaultBranch, ident }` — so there is no code path by
@@ -246,6 +250,16 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `cd "${repoDirInImage}"`,
     `git remote set-url origin "${seed.repoUrl}" 2>/dev/null || git remote add origin "${seed.repoUrl}"`,
     `git checkout -B "${seed.defaultBranch}"`,
+    // styre run --in-place gate: it refuses unless a repo-scoped `.styre-disposable` marker
+    // exists (defense-in-depth against mutating a checkout someone owns). This is a single-use
+    // eval container, so the repo IS disposable. Exclude the marker LOCALLY first (a
+    // non-committed `.git/info/exclude` entry) so styre's `git add -A` never commits it into the
+    // fix diff — otherwise it'd surface as scope/firewall noise. `mkdir -p .git/info` guards a
+    // non-standard git template (an absent info/ dir would make the `>>` fail under `set -e`,
+    // aborting the run before styre ever starts).
+    `mkdir -p "${repoDirInImage}/.git/info"`,
+    `echo ".styre-disposable" >> "${repoDirInImage}/.git/info/exclude"`,
+    `touch "${repoDirInImage}/.styre-disposable"`,
     "",
     "echo 'styre-bench entrypoint: [5/6] styre setup'",
     // Wrap styre setup so a failure exits with the distinct SETUP_FAILED_EXIT (not the generic
@@ -271,7 +285,7 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     "",
     "echo 'styre-bench entrypoint: [6/6] styre run'",
     "set +e",
-    `"${CONTAINER_BINARY_PATH}" run "${seed.ident}" --profile "${CONTAINER_PROFILE_PATH}" | tee "${CONTAINER_NDJSON_PATH}"`,
+    `"${CONTAINER_BINARY_PATH}" run "${seed.ident}" --profile "${CONTAINER_PROFILE_PATH}" --in-place | tee "${CONTAINER_NDJSON_PATH}"`,
     'run_exit="${PIPESTATUS[0]}"',
     "set -e",
     'exit "$run_exit"',
