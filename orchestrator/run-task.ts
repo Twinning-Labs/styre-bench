@@ -254,7 +254,10 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     // exists (defense-in-depth against mutating a checkout someone owns). This is a single-use
     // eval container, so the repo IS disposable. Exclude the marker LOCALLY first (a
     // non-committed `.git/info/exclude` entry) so styre's `git add -A` never commits it into the
-    // fix diff — otherwise it'd surface as scope/firewall noise.
+    // fix diff — otherwise it'd surface as scope/firewall noise. `mkdir -p .git/info` guards a
+    // non-standard git template (an absent info/ dir would make the `>>` fail under `set -e`,
+    // aborting the run before styre ever starts).
+    `mkdir -p "${repoDirInImage}/.git/info"`,
     `echo ".styre-disposable" >> "${repoDirInImage}/.git/info/exclude"`,
     `touch "${repoDirInImage}/.styre-disposable"`,
     "",

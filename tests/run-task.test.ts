@@ -69,6 +69,11 @@ describe("buildEntrypoint (pure)", () => {
     // marker dropped at the repo root, and locally excluded so styre's `git add -A` won't commit it
     expect(script).toContain('touch "/testbed/.styre-disposable"');
     expect(script).toContain('echo ".styre-disposable" >> "/testbed/.git/info/exclude"');
+    // `.git/info` is ensured before the exclude write (robust to a non-standard git template)
+    expect(script).toContain('mkdir -p "/testbed/.git/info"');
+    expect(script.indexOf('mkdir -p "/testbed/.git/info"')).toBeLessThan(
+      script.indexOf(".git/info/exclude"),
+    );
     // the styre run is --in-place
     const runLine = script.split("\n").find((l) => l.includes('run "') && l.includes("--profile"));
     expect(runLine).toContain("--in-place");
