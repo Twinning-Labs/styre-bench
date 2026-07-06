@@ -154,3 +154,6 @@ __pycache__/
 
 # Corpus cache (downloaded via scripts/fetch_datasets.py — never commit; ~1GB)
 /data/
+
+# operator-specific run config (styre pin, Linear project id) — NEVER commit; cp config/bench.config.example.ts to seed it.
+config/bench.config.ts
