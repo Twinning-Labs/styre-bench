@@ -90,6 +90,16 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).not.toContain("/testbed/.styre-disposable");
   });
 
+  test("activates the SWE-bench `testbed` conda env before setup+run (non-login-shell gap), conda-guarded", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    expect(script).toContain("if command -v conda >/dev/null 2>&1; then");
+    expect(script).toContain('source "$(conda info --base)/etc/profile.d/conda.sh"');
+    expect(script).toContain("conda activate testbed");
+    // activation must precede BOTH styre setup and styre run (so styre's python3 = testbed python)
+    expect(script.indexOf("conda activate testbed")).toBeLessThan(script.indexOf('setup "'));
+    expect(script.indexOf("conda activate testbed")).toBeLessThan(script.indexOf('run "'));
+  });
+
   test("installs a pinned claude CLI version (default CLAUDE_CLI_VERSION) via curl or npm", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain(`bash -s ${CLAUDE_CLI_VERSION}`);

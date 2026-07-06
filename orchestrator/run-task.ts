@@ -261,6 +261,20 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `echo ".styre-disposable" >> "${repoDirInImage}/.git/info/exclude"`,
     `touch "${repoDirInImage}/.styre-disposable"`,
     "",
+    // SWE-bench Python images pre-build the repo's deps into a conda env named `testbed` and
+    // activate it via ~/.bashrc — which only runs in a LOGIN/interactive shell. This entrypoint
+    // is a non-login script, so testbed is never activated and styre would run against the BASE
+    // conda env, which lacks the repo's editable install (e.g. astropy is `pip install -e .`'d
+    // only into testbed). styre's interpreter probe takes the first `python3` on PATH, so it
+    // picks base python and the --in-place identity/reuse source-check fails ("not installed
+    // against <repo>"). Activate testbed the way SWE-bench's own eval harness does, BEFORE setup
+    // and run. `conda info --base` handles /opt/miniconda3 vs /opt/conda; the guards make this a
+    // no-op for Multi-SWE-bench (node) images that ship no conda / no `testbed` env.
+    "if command -v conda >/dev/null 2>&1; then",
+    `  source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true`,
+    "  conda activate testbed 2>/dev/null || true",
+    "fi",
+    "",
     "echo 'styre-bench entrypoint: [5/6] styre setup'",
     // Wrap styre setup so a failure exits with the distinct SETUP_FAILED_EXIT (not the generic
     // 1 that claude-install/infra failures also use, nor styre run's own exit) — collect maps
