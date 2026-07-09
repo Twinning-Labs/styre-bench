@@ -101,6 +101,17 @@ export function buildIssueTitle(inst: Instance): string {
  * `test_patch` are never referenced here. The caller (`seedLinear`) additionally runs
  * `assertNoHeldOut` over the result as a defense-in-depth firewall check before it is
  * ever sent to Linear.
+ *
+ * ACCEPTANCE CRITERIA — exactly ONE `- [ ]` item, by design (styre main #67, verify
+ * M1–M6). styre derives one AC per GFM `- [ ]` line and, at design time, `checks:dispatch`
+ * must author a RED-first *scoped* behavioral test for each AC or it throws → escalates.
+ * Only "the bug no longer reproduces" maps to such a test (and to the oracle's fail_to_pass).
+ * The former "existing tests still pass" / "a regression test is added" items were meta-
+ * criteria with no RED-first behavioral test — they risked a no-valid-check escalate with no
+ * gate value. Non-regression ("existing tests still pass") is already carried by styre's
+ * advisory whole-suite sweep (M4, non-gating) surfaced to the merging human (M6), and is
+ * stated as Scope-IN guidance below; a regression test is what `checks:dispatch` authors
+ * anyway. So the gate is the single behavioral criterion; the rest is guidance, not a gate.
  */
 export function buildIssueBody(inst: Instance): string {
   const hints = inst.hints?.trim();
@@ -120,8 +131,6 @@ export function buildIssueBody(inst: Instance): string {
     "",
     "## Acceptance criteria",
     "- [ ] The reported bug no longer reproduces",
-    "- [ ] Existing tests still pass",
-    "- [ ] A regression test covering this bug is added",
     "",
     "## Refs",
     hints && hints.length > 0 ? hints : "(none)",
