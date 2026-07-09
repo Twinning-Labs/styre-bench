@@ -422,6 +422,18 @@ describe("buildIssueBody (pure)", () => {
     expect(body).toContain("## Acceptance criteria");
     expect(body).toContain("## Refs");
   });
+
+  test("exactly ONE gated acceptance criterion — the behavioral bug criterion (styre M1–M6: 1 AC → 1 RED-first scoped check)", () => {
+    const inst = makeInstance();
+    const body = buildIssueBody(inst);
+    // styre derives one AC per GFM `- [ ]` line; each must yield a RED-first scoped check or
+    // checks:dispatch escalates. Only the bug-behavior criterion maps to such a check.
+    const checkboxes = body.split("\n").filter((l) => /^- \[ \]/.test(l));
+    expect(checkboxes).toEqual(["- [ ] The reported bug no longer reproduces"]);
+    // The former meta-criteria must NOT be gated ACs (non-regression rides styre's advisory sweep).
+    expect(body).not.toContain("- [ ] Existing tests still pass");
+    expect(body).not.toContain("- [ ] A regression test covering this bug is added");
+  });
 });
 
 describe("seedLinear (mocked deps — no network)", () => {
