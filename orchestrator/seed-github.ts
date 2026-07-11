@@ -1,9 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { $ } from "bun";
 import { Octokit } from "octokit";
-import { assertNoHeldOutPaths, stripClaudeDir } from "./firewall";
+import { assertNoHeldOutPaths } from "./firewall";
 import type { Instance } from "./types";
 
 export interface SeedGithubConfig {
@@ -29,9 +29,16 @@ export interface SeedGithubResult {
  * create via Octokit, and a git push of the (post-firewall, post-strip) snapshot.
  */
 export interface SeedGithubDeps {
-  fetchSnapshot: (repo: string, baseCommit: string) => Promise<SnapshotFile[]>;
+  /** Clones `repo` and checks out `baseCommit`, returning both its file listing (fed to
+   *  `assertNoHeldOutPaths` and the `stripClaude` decision) and the live clone dir `repoDir`
+   *  that `pushBaseRef` pushes from. `seedGithub` owns cleanup of `repoDir` on every path;
+   *  `fetchSnapshot` cleans up after itself only on its own internal failure (clone/fetch/
+   *  checkout), since in that case `repoDir` is never handed back to the caller. */
+  fetchSnapshot: (
+    repo: string,
+    baseCommit: string,
+  ) => Promise<{ files: SnapshotFile[]; repoDir: string }>;
   createRepo: (org: string, name: string) => Promise<SeedGithubResult>;
-  pushSnapshot: (files: SnapshotFile[], repoUrl: string, branch: string) => Promise<void>;
   /** Publish the REAL `baseCommit` (its ancestry included, nothing after it) as `branch` on
    *  `repoUrl`. styre's fix branch — rooted at the same content-addressed `baseCommit` in the
    *  container clone — then shares it as the PR merge-base, so the PR opens and `git diff
@@ -66,27 +73,30 @@ function requireBenchToken(action: string): string {
 
 export const defaultDeps: SeedGithubDeps = {
   async fetchSnapshot(repo, baseCommit) {
-    const scratch = await mkdtemp(path.join(tmpdir(), "styre-bench-seed-src-"));
+    const repoDir = await mkdtemp(path.join(tmpdir(), "styre-bench-seed-src-"));
     try {
-      await $`git clone --quiet https://github.com/${repo}.git ${scratch}`.quiet();
+      await $`git clone --quiet https://github.com/${repo}.git ${repoDir}`.quiet();
       // Fetch first so a base_commit not reachable from the default branch tip (e.g. a
       // shallow default clone) is still checkoutable; ignore failure and let checkout be
       // the real check (mirrors build-styre.ts's checkout dep).
-      await $`git -C ${scratch} fetch --quiet origin ${baseCommit}`.quiet().nothrow();
-      await $`git -C ${scratch} checkout --quiet ${baseCommit}`.quiet();
-      const lsOut = await $`git -C ${scratch} ls-files`.quiet().text();
+      await $`git -C ${repoDir} fetch --quiet origin ${baseCommit}`.quiet().nothrow();
+      await $`git -C ${repoDir} checkout --quiet ${baseCommit}`.quiet();
+      const lsOut = await $`git -C ${repoDir} ls-files`.quiet().text();
       const paths = lsOut
         .split("\n")
         .map((p) => p.trim())
         .filter((p) => p.length > 0);
       const files: SnapshotFile[] = [];
       for (const p of paths) {
-        const content = await readFile(path.join(scratch, p), "utf8").catch(() => "");
+        const content = await readFile(path.join(repoDir, p), "utf8").catch(() => "");
         files.push({ path: p, content });
       }
-      return files;
-    } finally {
-      await rm(scratch, { recursive: true, force: true });
+      return { files, repoDir };
+    } catch (err) {
+      // Clone/fetch/checkout failed before we could hand `repoDir` to the caller — clean it up
+      // here (the caller's finally only covers the success path), then rethrow unchanged.
+      await rm(repoDir, { recursive: true, force: true });
+      throw err;
     }
   },
 
@@ -131,41 +141,6 @@ export const defaultDeps: SeedGithubDeps = {
       );
     }
     return { repoUrl, defaultBranch: res.data.default_branch ?? "main" };
-  },
-
-  async pushSnapshot(files, repoUrl, branch) {
-    const token = process.env.BENCH_GH_TOKEN;
-    if (!token) {
-      throw new Error(
-        "seedGithub: BENCH_GH_TOKEN is not set — required to push the seed snapshot to the " +
-          "throwaway repo. Refusing to fall back to an ambient git credential helper: that " +
-          "would authenticate as a personal identity (violating the throwaway-org blast-radius " +
-          "isolation) and would fail headless/CI where no keychain exists.",
-      );
-    }
-    // Embed the scoped token in the push URL so the push authenticates as BENCH_GH_TOKEN
-    // (scoped ONLY to benchGithubOrg), NEVER via whatever the local git credential helper
-    // happens to hold. GIT_TERMINAL_PROMPT=0 makes a bad/absent credential fail fast instead
-    // of blocking on an interactive username prompt.
-    const authedUrl = repoUrl.replace(/^https:\/\//, `https://x-access-token:${token}@`);
-    const scratch = await mkdtemp(path.join(tmpdir(), "styre-bench-seed-push-"));
-    try {
-      await $`git -C ${scratch} init --quiet -b ${branch}`.quiet();
-      for (const f of files) {
-        const dest = path.join(scratch, f.path);
-        await mkdir(path.dirname(dest), { recursive: true });
-        await writeFile(dest, f.content);
-      }
-      await $`git -C ${scratch} add -A`.quiet();
-      await $`git -C ${scratch} -c user.email=bench@styre.dev -c user.name=styre-bench commit --quiet -m "seed: base_commit snapshot"`
-        .quiet()
-        .nothrow(); // nothrow: an empty snapshot (e.g. a unit test with zero files) has nothing to commit
-      await $`git -C ${scratch} push --quiet ${authedUrl} HEAD:${branch}`
-        .env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
-        .quiet();
-    } finally {
-      await rm(scratch, { recursive: true, force: true });
-    }
   },
 
   async pushBaseRef(repoDir, baseCommit, repoUrl, branch, opts) {
@@ -226,19 +201,26 @@ export function repoNameFor(inst: Instance): string {
 }
 
 /**
- * Creates a throwaway repo under `cfg.benchGithubOrg` and pushes the `inst.base_commit`
- * snapshot of `inst.repo` as its default branch.
+ * Creates a throwaway repo under `cfg.benchGithubOrg` and pushes the REAL `inst.base_commit`
+ * ref (its ancestry included, nothing after it) as its default branch — see `pushBaseRef`'s
+ * doc-comment for why this must be real shared history, not a fresh-init snapshot commit
+ * (styre's fix branch needs a common ancestor with `main` for its PR to open).
  *
  * FIREWALL (load-bearing, in this exact order):
- * 1. Fetch the snapshot at `base_commit`.
+ * 1. Fetch the snapshot at `base_commit` (`fetchSnapshot` also keeps the live clone dir,
+ *    which is what actually gets pushed).
  * 2. `assertNoHeldOutPaths` — throws (never pushes) if any path touched by `test_patch`/
  *    `fix_patch` is present in that snapshot. Checked BEFORE the repo is even created, so a
  *    firewall violation never results in a throwaway repo existing with tainted content.
- * 3. `stripClaudeDir` — unconditionally removes any `.claude/` path (esp.
- *    `.claude/settings.json`) so a real repo's own Claude config can't re-enable
- *    WebFetch/WebSearch and silently break the web-off cohort.
- * 4. Only then: create the repo (Octokit, `BENCH_GH_TOKEN` scoped to `benchGithubOrg`) and
- *    push the cleaned snapshot.
+ * 3. Only then: create the repo (Octokit, `BENCH_GH_TOKEN` scoped to `benchGithubOrg`) and
+ *    `pushBaseRef` the `base_commit`-rooted ref. `stripClaude` (computed from whether the
+ *    snapshot has any `.claude/` path) layers ONE on-top commit removing `.claude/` — defense-
+ *    in-depth so a real repo's own Claude config can't re-enable WebFetch/WebSearch and
+ *    silently break the web-off cohort — without rewriting `base_commit` itself.
+ *
+ * Note: pushing full ancestry (a real clone, one ref) is heavier per instance than the old
+ * fresh-init single snapshot commit. That's expected — it's inherent to publishing a real
+ * shared ancestor rather than a synthetic one.
  */
 export async function seedGithub(
   inst: Instance,
@@ -247,24 +229,29 @@ export async function seedGithub(
 ): Promise<SeedGithubResult> {
   const deps: SeedGithubDeps = { ...defaultDeps, ...opts.deps };
 
-  const snapshot = await deps.fetchSnapshot(inst.repo, inst.base_commit);
-  assertNoHeldOutPaths(
-    snapshot.map((f) => f.path),
-    inst,
-  );
-  const cleaned = stripClaudeDir(snapshot);
-
-  const name = repoNameFor(inst);
-  const { repoUrl, defaultBranch } = await deps.createRepo(cfg.benchGithubOrg, name);
+  const { files, repoDir } = await deps.fetchSnapshot(inst.repo, inst.base_commit);
   try {
-    await deps.pushSnapshot(cleaned, repoUrl, defaultBranch);
-  } catch (err) {
-    // The repo exists but the push failed — tear it down so a push failure never leaves an
-    // orphan throwaway repo behind (see deleteRepo's rationale). Then re-throw the ORIGINAL
-    // push error unchanged so the pipeline still classifies the attempt as an infra failure.
-    await deps.deleteRepo(cfg.benchGithubOrg, name);
-    throw err;
-  }
+    assertNoHeldOutPaths(
+      files.map((f) => f.path),
+      inst,
+    );
+    const stripClaude = files.some((f) => f.path === ".claude" || f.path.startsWith(".claude/"));
 
-  return { repoUrl, defaultBranch };
+    const name = repoNameFor(inst);
+    const { repoUrl, defaultBranch } = await deps.createRepo(cfg.benchGithubOrg, name);
+    try {
+      await deps.pushBaseRef(repoDir, inst.base_commit, repoUrl, defaultBranch, { stripClaude });
+    } catch (err) {
+      // The repo exists but the push failed — tear it down so a push failure never leaves an
+      // orphan throwaway repo behind (see deleteRepo's rationale). Then re-throw the ORIGINAL
+      // push error unchanged so the pipeline still classifies the attempt as an infra failure.
+      await deps.deleteRepo(cfg.benchGithubOrg, name);
+      throw err;
+    }
+
+    return { repoUrl, defaultBranch };
+  } finally {
+    // seedGithub owns the clone's lifetime once fetchSnapshot hands it back successfully.
+    await rm(repoDir, { recursive: true, force: true });
+  }
 }

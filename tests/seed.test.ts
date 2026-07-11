@@ -7,7 +7,6 @@ import {
   addedPaths,
   assertNoHeldOut,
   assertNoHeldOutPaths,
-  stripClaudeDir,
   touchedPaths,
 } from "../orchestrator/firewall";
 import { repoNameFor, seedGithub } from "../orchestrator/seed-github";
@@ -188,27 +187,6 @@ describe("assertNoHeldOut (pure, content-level firewall)", () => {
   });
 });
 
-describe("stripClaudeDir (pure)", () => {
-  test("removes a top-level .claude/settings.json entry", () => {
-    const files = [{ path: ".claude/settings.json" }, { path: "src/index.ts" }];
-    const result = stripClaudeDir(files);
-    expect(result.map((f) => f.path)).toEqual(["src/index.ts"]);
-  });
-
-  test("removes nested .claude/ paths at any depth", () => {
-    const files = [{ path: "a/b/.claude/hooks/pre.sh" }, { path: "a/b/keep.ts" }];
-    expect(stripClaudeDir(files).map((f) => f.path)).toEqual(["a/b/keep.ts"]);
-  });
-
-  test("leaves files with .claude only as a substring of a name untouched", () => {
-    const files = [{ path: "src/claude-helper.ts" }, { path: ".claude-ignore" }];
-    expect(stripClaudeDir(files).map((f) => f.path)).toEqual([
-      "src/claude-helper.ts",
-      ".claude-ignore",
-    ]);
-  });
-});
-
 describe("repoNameFor (pure)", () => {
   test("appends a unique 8-hex-char suffix so repeat calls for the same instance never collide", () => {
     const inst = makeInstance({ id: "org__repo-123" });
@@ -230,15 +208,18 @@ describe("seedGithub (mocked deps — no network)", () => {
         { benchGithubOrg: "styre-bench-scratch" },
         {
           deps: {
-            fetchSnapshot: async () => [
-              { path: "widget/core.py", content: "def compute(): ..." },
-              { path: "tests/x_regression.py", content: "def test_x(): ..." },
-            ],
+            fetchSnapshot: async () => ({
+              files: [
+                { path: "widget/core.py", content: "def compute(): ..." },
+                { path: "tests/x_regression.py", content: "def test_x(): ..." },
+              ],
+              repoDir: "/tmp/fake-clone",
+            }),
             createRepo: async () => ({
               repoUrl: "https://example.invalid/styre-bench-scratch/bench-org__repo-123.git",
               defaultBranch: "main",
             }),
-            pushSnapshot: async () => {
+            pushBaseRef: async () => {
               pushCalled = true;
             },
           },
@@ -248,36 +229,74 @@ describe("seedGithub (mocked deps — no network)", () => {
     expect(pushCalled).toBe(false);
   });
 
-  test("strips .claude/settings.json from the snapshot before pushing", async () => {
-    const inst = makeInstance();
-    let pushedFiles: { path: string; content: string }[] = [];
+  test("seedGithub pushes the real base_commit via pushBaseRef, stripClaude when .claude/ present", async () => {
+    const calls: Array<{ baseCommit: string; branch: string; opts: { stripClaude: boolean } }> = [];
+    const inst = {
+      id: "o__r-1",
+      repo: "o/r",
+      base_commit: "basesha",
+      test_patch: "",
+      fix_patch: "",
+    } as never;
     await seedGithub(
       inst,
-      { benchGithubOrg: "styre-bench-scratch" },
+      { benchGithubOrg: "org" },
       {
         deps: {
-          fetchSnapshot: async () => [
-            { path: "widget/other.py", content: "def helper(): ..." },
-            { path: ".claude/settings.json", content: '{"tools":["WebFetch"]}' },
-            { path: "README.md", content: "# widget" },
-          ],
+          fetchSnapshot: async () => ({
+            files: [
+              { path: "src/a.py", content: "x" },
+              { path: ".claude/settings.json", content: "{}" },
+            ],
+            repoDir: "/tmp/fake-clone",
+          }),
           createRepo: async () => ({
-            repoUrl: "https://example.invalid/styre-bench-scratch/bench-org__repo-123.git",
+            repoUrl: "https://github.com/org/r.git",
             defaultBranch: "main",
           }),
-          pushSnapshot: async (files) => {
-            pushedFiles = files;
+          pushBaseRef: async (_d, baseCommit, _u, branch, opts) => {
+            calls.push({ baseCommit, branch, opts });
           },
+          deleteRepo: async () => {},
         },
       },
     );
-    const paths = pushedFiles.map((f) => f.path);
-    expect(paths).not.toContain(".claude/settings.json");
-    expect(paths).toContain("widget/other.py");
-    expect(paths).toContain("README.md");
+    expect(calls).toEqual([{ baseCommit: "basesha", branch: "main", opts: { stripClaude: true } }]);
   });
 
-  test("tears down the just-created repo (deleteRepo) when pushSnapshot throws, then re-throws the original error", async () => {
+  test("seedGithub does not stripClaude when the snapshot has no .claude/ path", async () => {
+    const calls: Array<{ opts: { stripClaude: boolean } }> = [];
+    const inst = {
+      id: "o__r-2",
+      repo: "o/r",
+      base_commit: "b2",
+      test_patch: "",
+      fix_patch: "",
+    } as never;
+    await seedGithub(
+      inst,
+      { benchGithubOrg: "org" },
+      {
+        deps: {
+          fetchSnapshot: async () => ({
+            files: [{ path: "src/a.py", content: "x" }],
+            repoDir: "/tmp/c2",
+          }),
+          createRepo: async () => ({
+            repoUrl: "https://github.com/org/r.git",
+            defaultBranch: "main",
+          }),
+          pushBaseRef: async (_d, _b, _u, _br, opts) => {
+            calls.push({ opts });
+          },
+          deleteRepo: async () => {},
+        },
+      },
+    );
+    expect(calls[0]?.opts).toEqual({ stripClaude: false });
+  });
+
+  test("tears down the just-created repo (deleteRepo) when pushBaseRef throws, then re-throws the original error", async () => {
     const inst = makeInstance();
     let createdName = "";
     let deletedOrg = "";
@@ -288,7 +307,10 @@ describe("seedGithub (mocked deps — no network)", () => {
         { benchGithubOrg: "styre-bench-scratch" },
         {
           deps: {
-            fetchSnapshot: async () => [{ path: "README.md", content: "# widget" }],
+            fetchSnapshot: async () => ({
+              files: [{ path: "README.md", content: "# widget" }],
+              repoDir: "/tmp/fake-clone",
+            }),
             createRepo: async (_org, name) => {
               createdName = name;
               return {
@@ -296,7 +318,7 @@ describe("seedGithub (mocked deps — no network)", () => {
                 defaultBranch: "main",
               };
             },
-            pushSnapshot: async () => {
+            pushBaseRef: async () => {
               throw new Error("remote rejected: workflow scope");
             },
             deleteRepo: async (org, name) => {
@@ -312,7 +334,7 @@ describe("seedGithub (mocked deps — no network)", () => {
     expect(deletedName).toBe(createdName);
   });
 
-  test("does NOT call deleteRepo when pushSnapshot succeeds", async () => {
+  test("does NOT call deleteRepo when pushBaseRef succeeds", async () => {
     const inst = makeInstance();
     let deleteCalled = false;
     await seedGithub(
@@ -320,12 +342,15 @@ describe("seedGithub (mocked deps — no network)", () => {
       { benchGithubOrg: "styre-bench-scratch" },
       {
         deps: {
-          fetchSnapshot: async () => [{ path: "README.md", content: "# widget" }],
+          fetchSnapshot: async () => ({
+            files: [{ path: "README.md", content: "# widget" }],
+            repoDir: "/tmp/fake-clone",
+          }),
           createRepo: async (_org, name) => ({
             repoUrl: `https://example.invalid/styre-bench-scratch/${name}.git`,
             defaultBranch: "main",
           }),
-          pushSnapshot: async () => {},
+          pushBaseRef: async () => {},
           deleteRepo: async () => {
             deleteCalled = true;
           },
@@ -343,7 +368,10 @@ describe("seedGithub (mocked deps — no network)", () => {
       { benchGithubOrg: "styre-bench-scratch" },
       {
         deps: {
-          fetchSnapshot: async () => [{ path: "README.md", content: "# widget" }],
+          fetchSnapshot: async () => ({
+            files: [{ path: "README.md", content: "# widget" }],
+            repoDir: "/tmp/fake-clone",
+          }),
           createRepo: async (org) => {
             orgSeen = org;
             return {
@@ -351,7 +379,7 @@ describe("seedGithub (mocked deps — no network)", () => {
               defaultBranch: "main",
             };
           },
-          pushSnapshot: async () => {},
+          pushBaseRef: async () => {},
         },
       },
     );
@@ -371,12 +399,15 @@ describe("seedGithub / seedLinear: fail CLOSED on an unparseable patch (integrat
         { benchGithubOrg: "styre-bench-scratch" },
         {
           deps: {
-            fetchSnapshot: async () => [{ path: "widget/core.py", content: "def compute(): ..." }],
+            fetchSnapshot: async () => ({
+              files: [{ path: "widget/core.py", content: "def compute(): ..." }],
+              repoDir: "/tmp/fake-clone",
+            }),
             createRepo: async () => ({
               repoUrl: "https://example.invalid/styre-bench-scratch/bench-org__repo-123.git",
               defaultBranch: "main",
             }),
-            pushSnapshot: async () => {
+            pushBaseRef: async () => {
               pushCalled = true;
             },
           },
@@ -594,6 +625,19 @@ describe("pushBaseRef", () => {
       .quiet()
       .nothrow();
     expect(anc.exitCode).toBe(0); // withClaude is still the ancestor (shared history preserved)
+    await rm(dir, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  });
+
+  test("pushBaseRef with stripClaude:true on a base with NO .claude/ is a true no-op (no empty commit)", async () => {
+    const { dir, baseSha } = await makeUpstream();
+    const remote = await mkdtemp(path.join(tmpdir(), "sbx-remote3-"));
+    await $`git -C ${remote} init -q --bare -b main`.quiet();
+    const { defaultDeps } = await import("../orchestrator/seed-github");
+    await defaultDeps.pushBaseRef(dir, baseSha, `file://${remote}`, "main", { stripClaude: true });
+
+    const head = (await $`git -C ${remote} rev-parse main`.quiet().text()).trim();
+    expect(head).toBe(baseSha); // no .claude/ present → no strip commit → tip stays exactly baseSha
     await rm(dir, { recursive: true, force: true });
     await rm(remote, { recursive: true, force: true });
   });
