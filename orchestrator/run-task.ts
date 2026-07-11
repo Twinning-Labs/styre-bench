@@ -68,6 +68,11 @@ export interface RunStyreCreds {
   anthropicApiKey: string;
   linearApiKey: string;
   githubToken: string;
+  /** The PAT scoped to `benchGithubOrg` that seeded (created + pushed) the throwaway repo — the
+   *  ONLY token that can push styre's fix branch back to it. Wired into the container so styre's
+   *  `merge:push` can authenticate (`buildEntrypoint` configures a github.com credential helper
+   *  that reads it from the env, never embedding it in origin). */
+  benchGhToken: string;
 }
 
 export interface BuildEntrypointInput {
@@ -250,6 +255,14 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `cd "${repoDirInImage}"`,
     `git remote set-url origin "${seed.repoUrl}" 2>/dev/null || git remote add origin "${seed.repoUrl}"`,
     `git checkout -B "${seed.defaultBranch}"`,
+    // Give styre's `merge:push` an HTTPS credential for github.com so it can push the fix branch
+    // back to the seeded throwaway repo. An inline credential helper echoes BENCH_GH_TOKEN (the
+    // container env var, the org-scoped PAT that owns the repo) ONLY on a `get` — the token is
+    // NEVER embedded in origin (styre derives owner/repo from origin) nor written to a file.
+    // GIT_TERMINAL_PROMPT=0 makes an absent/bad credential fail fast instead of hanging on the
+    // interactive username prompt (which is what the missing-credential failure showed headless).
+    `git config --global credential.helper '!f() { test "$1" = get && echo username=x-access-token && echo "password=$BENCH_GH_TOKEN"; }; f'`,
+    "export GIT_TERMINAL_PROMPT=0",
     // styre run --in-place gate: it refuses unless a repo-scoped `.styre-disposable` marker
     // exists (defense-in-depth against mutating a checkout someone owns). This is a single-use
     // eval container, so the repo IS disposable. Exclude the marker LOCALLY first (a
@@ -328,7 +341,7 @@ export interface BuildDockerArgsInput {
 /**
  * PURE. Builds the `docker run` argv (everything after the `docker` binary itself). Mounts
  * EXACTLY three paths — the styre binary (ro), the host output dir (rw), and the entrypoint
- * script (ro) — and three cred env vars. `image` is the only per-instance value threaded
+ * script (ro) — and four cred env vars. `image` is the only per-instance value threaded
  * through; nothing here ever touches `inst.test_patch`/`inst.fix_patch`/`.claude` (the input
  * type has no field for them — FIREWALL by construction, matching `buildEntrypoint`).
  */
@@ -355,6 +368,8 @@ export function buildDockerArgs(input: BuildDockerArgsInput): string[] {
     `LINEAR_API_KEY=${creds.linearApiKey}`,
     "-e",
     `GITHUB_TOKEN=${creds.githubToken}`,
+    "-e",
+    `BENCH_GH_TOKEN=${creds.benchGhToken}`,
     "--entrypoint",
     "bash",
     image,
@@ -421,17 +436,19 @@ function resolveCreds(overrides: Partial<RunStyreCreds> | undefined): RunStyreCr
   const anthropicApiKey = overrides?.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
   const linearApiKey = overrides?.linearApiKey ?? process.env.LINEAR_API_KEY ?? "";
   const githubToken = overrides?.githubToken ?? process.env.GITHUB_TOKEN ?? "";
+  const benchGhToken = overrides?.benchGhToken ?? process.env.BENCH_GH_TOKEN ?? "";
   const missing = [
     anthropicApiKey ? null : "ANTHROPIC_API_KEY",
     linearApiKey ? null : "LINEAR_API_KEY",
     githubToken ? null : "GITHUB_TOKEN",
+    benchGhToken ? null : "BENCH_GH_TOKEN",
   ].filter((x): x is string => x !== null);
   if (missing.length > 0) {
     throw new Error(
       `runStyre: missing required creds (set env vars or pass cfg.creds): ${missing.join(", ")}`,
     );
   }
-  return { anthropicApiKey, linearApiKey, githubToken };
+  return { anthropicApiKey, linearApiKey, githubToken, benchGhToken };
 }
 
 /**
