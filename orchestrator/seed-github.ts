@@ -32,6 +32,19 @@ export interface SeedGithubDeps {
   fetchSnapshot: (repo: string, baseCommit: string) => Promise<SnapshotFile[]>;
   createRepo: (org: string, name: string) => Promise<SeedGithubResult>;
   pushSnapshot: (files: SnapshotFile[], repoUrl: string, branch: string) => Promise<void>;
+  /** Publish the REAL `baseCommit` (its ancestry included, nothing after it) as `branch` on
+   *  `repoUrl`. styre's fix branch — rooted at the same content-addressed `baseCommit` in the
+   *  container clone — then shares it as the PR merge-base, so the PR opens and `git diff
+   *  baseCommit..head` is unaffected. Pushing only the `baseCommit`-rooted ref keeps every commit
+   *  after it (incl. the gold fix) unreachable in the throwaway repo. `stripClaude` layers ONE
+   *  commit removing `.claude/` on top (defense-in-depth) — never rewrites `baseCommit`. */
+  pushBaseRef: (
+    repoDir: string,
+    baseCommit: string,
+    repoUrl: string,
+    branch: string,
+    opts: { stripClaude: boolean },
+  ) => Promise<void>;
   /** Best-effort teardown of a repo that was created but never fully seeded (a push failure
    *  after createRepo). cleanup() only runs for attempts that produced a complete RunSeed, so
    *  a mid-seed failure here is seedGithub's own responsibility to clean up — otherwise every
@@ -39,7 +52,19 @@ export interface SeedGithubDeps {
   deleteRepo: (org: string, name: string) => Promise<void>;
 }
 
-const defaultDeps: SeedGithubDeps = {
+/** Guards every default dep that pushes/writes to the throwaway org — a scoped
+ *  `BENCH_GH_TOKEN` PAT is required; never fall back to an ambient credential (blast-radius). */
+function requireBenchToken(action: string): string {
+  const token = process.env.BENCH_GH_TOKEN;
+  if (!token) {
+    throw new Error(
+      `seedGithub: BENCH_GH_TOKEN is not set — required to ${action}. It is a PAT scoped ONLY to benchGithubOrg; refusing to fall back to any ambient credential.`,
+    );
+  }
+  return token;
+}
+
+export const defaultDeps: SeedGithubDeps = {
   async fetchSnapshot(repo, baseCommit) {
     const scratch = await mkdtemp(path.join(tmpdir(), "styre-bench-seed-src-"));
     try {
@@ -141,6 +166,30 @@ const defaultDeps: SeedGithubDeps = {
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
+  },
+
+  async pushBaseRef(repoDir, baseCommit, repoUrl, branch, opts) {
+    // Local branch AT base_commit: the pushed ref is rooted here, so its ancestors travel and every
+    // commit AFTER base_commit stays unreachable in the throwaway repo (leak firewall).
+    await $`git -C ${repoDir} checkout -q -B ${branch} ${baseCommit}`.quiet();
+    if (opts.stripClaude) {
+      // Remove .claude/ at the TIP with one commit on top of base_commit — base_commit stays the
+      // shared ancestor. `--ignore-unmatch` + nothrow keep it a no-op when there is no .claude/.
+      await $`git -C ${repoDir} rm -r -q --ignore-unmatch .claude`.quiet().nothrow();
+      await $`git -C ${repoDir} -c user.email=bench@styre.dev -c user.name=styre-bench commit -q -m "seed: strip .claude/"`
+        .quiet()
+        .nothrow(); // nothrow: nothing staged (no .claude present) → no commit; tip stays base_commit
+    }
+    // file:// remotes (tests) carry no credential; a real https remote gets the scoped token.
+    const pushUrl = /^https:\/\//.test(repoUrl)
+      ? repoUrl.replace(
+          /^https:\/\//,
+          `https://x-access-token:${requireBenchToken("push the base_commit ref")}@`,
+        )
+      : repoUrl;
+    await $`git -C ${repoDir} push -q ${pushUrl} ${branch}:${branch}`
+      .env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
+      .quiet();
   },
 
   async deleteRepo(org, name) {

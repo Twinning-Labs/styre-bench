@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { $ } from "bun";
 import {
   addedPaths,
   assertNoHeldOut,
@@ -529,4 +533,68 @@ describe("seedGithub / seedLinear: live (real GitHub repo + Linear issue) — RU
     },
     60_000,
   );
+});
+
+async function makeUpstream() {
+  const dir = await mkdtemp(path.join(tmpdir(), "sbx-up-"));
+  const git = (a: string) => $`git -C ${dir} ${{ raw: a }}`.quiet();
+  await git("init -q -b main");
+  await git("config user.email t@t");
+  await git("config user.name t");
+  await writeFile(path.join(dir, "a.txt"), "c0");
+  await git("add -A");
+  await git("commit -q -m c0");
+  await writeFile(path.join(dir, "a.txt"), "base");
+  await git("add -A");
+  await git("commit -q -m base");
+  const baseSha = (await $`git -C ${dir} rev-parse HEAD`.quiet().text()).trim();
+  await writeFile(path.join(dir, "FIX.txt"), "the fix");
+  await git("add -A");
+  await git("commit -q -m future");
+  return { dir, baseSha };
+}
+
+describe("pushBaseRef", () => {
+  test("pushBaseRef publishes base_commit as main (shared ancestor) and NOTHING after it", async () => {
+    const { dir, baseSha } = await makeUpstream();
+    const remote = await mkdtemp(path.join(tmpdir(), "sbx-remote-"));
+    await $`git -C ${remote} init -q --bare -b main`.quiet();
+    const { defaultDeps } = await import("../orchestrator/seed-github");
+    await defaultDeps.pushBaseRef(dir, baseSha, `file://${remote}`, "main", { stripClaude: false });
+
+    const head = (await $`git -C ${remote} rev-parse main`.quiet().text()).trim();
+    expect(head).toBe(baseSha); // no strip → main IS the real base sha
+    const log = await $`git -C ${remote} log --format=%s main`.quiet().text();
+    expect(log).toContain("base");
+    expect(log).not.toContain("future"); // no forward/fix history leaked
+    await rm(dir, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  });
+
+  test("pushBaseRef with stripClaude removes .claude/ at the TIP but keeps base_commit as the ancestor", async () => {
+    const { dir, baseSha } = await makeUpstream();
+    // Add a .claude/ file on top of base (detached at baseSha), so the checkout base HAS a .claude tree.
+    await $`git -C ${dir} checkout -q ${baseSha}`.quiet();
+    await mkdir(path.join(dir, ".claude"), { recursive: true });
+    await writeFile(path.join(dir, ".claude", "settings.json"), "{}");
+    await $`git -C ${dir} add -A`.quiet();
+    await $`git -C ${dir} -c user.email=t@t -c user.name=t commit -q -m "add .claude"`.quiet();
+    const withClaude = (await $`git -C ${dir} rev-parse HEAD`.quiet().text()).trim();
+
+    const remote = await mkdtemp(path.join(tmpdir(), "sbx-remote2-"));
+    await $`git -C ${remote} init -q --bare -b main`.quiet();
+    const { defaultDeps } = await import("../orchestrator/seed-github");
+    await defaultDeps.pushBaseRef(dir, withClaude, `file://${remote}`, "main", {
+      stripClaude: true,
+    });
+
+    const tip = await $`git -C ${remote} ls-tree -r --name-only main`.quiet().text();
+    expect(tip).not.toContain(".claude/settings.json"); // stripped at the tip
+    const anc = await $`git -C ${remote} merge-base --is-ancestor ${withClaude} main`
+      .quiet()
+      .nothrow();
+    expect(anc.exitCode).toBe(0); // withClaude is still the ancestor (shared history preserved)
+    await rm(dir, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  });
 });
