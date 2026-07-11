@@ -154,20 +154,3 @@ export function assertNoHeldOut(
     }
   }
 }
-
-function isUnderClaudeDir(p: string): boolean {
-  const norm = p.replace(/^\.\//, "");
-  return norm === ".claude" || norm.startsWith(".claude/") || norm.includes("/.claude/");
-}
-
-/**
- * PURE. Strips any file whose path is under a `.claude/` directory (at any depth) — a real
- * seeded repo can carry its own `.claude/settings.json` that re-enables `WebFetch`/
- * `WebSearch`, silently breaking the web-off cohort's behavioral guarantee (design §3.1).
- * Unlike the held-out-path firewall, this is an unconditional strip, not an assert: `.claude/`
- * is expected to legitimately exist in real repos, so removing it is a routine safety step,
- * not evidence something has already gone wrong.
- */
-export function stripClaudeDir<T extends { path: string }>(files: T[]): T[] {
-  return files.filter((f) => !isUnderClaudeDir(f.path));
-}
