@@ -173,6 +173,22 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).toContain('git checkout -B "trunk"');
   });
 
+  test("configures a github.com push credential from BENCH_GH_TOKEN, without embedding it in origin", () => {
+    const seed = makeSeed({ repoUrl: "https://github.com/styre-bench-scratch/some-repo.git" });
+    const script = buildEntrypoint({ seed });
+    // an inline credential helper that reads the token from the container env (never a file/URL)
+    expect(script).toContain("git config --global credential.helper");
+    expect(script).toContain("$BENCH_GH_TOKEN");
+    expect(script).toContain("username=x-access-token");
+    // origin stays tokenless (styre derives owner/repo from it; the token must not leak there)
+    expect(script).toContain(
+      'git remote set-url origin "https://github.com/styre-bench-scratch/some-repo.git"',
+    );
+    expect(script).not.toContain("x-access-token:");
+    // set before styre run so merge:push can authenticate
+    expect(script.indexOf("credential.helper")).toBeLessThan(script.indexOf('run "BENCH-42"'));
+  });
+
   test("runs styre setup with --out a deterministic profile path + --trust-agent-commands, on the repoDirInImage default (/testbed)", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
     expect(script).toContain('cd "/testbed"');
@@ -234,7 +250,12 @@ describe("buildEntrypoint (pure)", () => {
 });
 
 describe("buildDockerArgs (pure)", () => {
-  const creds = { anthropicApiKey: "ak-1", linearApiKey: "lk-1", githubToken: "gh-1" };
+  const creds = {
+    anthropicApiKey: "ak-1",
+    linearApiKey: "lk-1",
+    githubToken: "gh-1",
+    benchGhToken: "bgh-1",
+  };
 
   test("defaults --platform to linux/amd64 when none is passed (MSB + legacy/fixture callers)", () => {
     const args = buildDockerArgs({
@@ -290,6 +311,7 @@ describe("buildDockerArgs (pure)", () => {
     expect(args).toContain("ANTHROPIC_API_KEY=ak-1");
     expect(args).toContain("LINEAR_API_KEY=lk-1");
     expect(args).toContain("GITHUB_TOKEN=gh-1");
+    expect(args).toContain("BENCH_GH_TOKEN=bgh-1");
   });
 
   test("runs the entrypoint script via --entrypoint bash <image> <script>", () => {
