@@ -79,6 +79,23 @@ export interface RunStyreCreds {
   slackBotToken: string;
 }
 
+/** styre's notification-verbosity tiers (its `notify` config field), quietest → noisiest. */
+export const NOTIFY_TIERS = ["escalations", "transitions", "everything"] as const;
+export type NotifyTier = (typeof NOTIFY_TIERS)[number];
+
+/** Validate a raw `STYRE_NOTIFY` env value. Returns `undefined` (→ default `"escalations"`) when
+ *  unset OR invalid, warning on an invalid value so a typo doesn't silently downgrade. Validated
+ *  HERE because styre fail-louds (zod enum) on an unknown `notify` value — an unvalidated bad tier
+ *  in the config we write would crash every container. */
+export function resolveNotifyTier(raw: string | undefined): NotifyTier | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if ((NOTIFY_TIERS as readonly string[]).includes(raw)) return raw as NotifyTier;
+  process.stderr.write(
+    `styre-bench: ignoring invalid STYRE_NOTIFY="${raw}" (use ${NOTIFY_TIERS.join("|")}); defaulting to "escalations"\n`,
+  );
+  return undefined;
+}
+
 export interface BuildEntrypointInput {
   seed: RunSeed;
   /** Path inside the instance image the corpus repo is already checked out at.
@@ -97,6 +114,9 @@ export interface BuildEntrypointInput {
   /** Slack channel styre posts notifications to — baked into the entrypoint's conditional config
    *  write (the token itself is checked at container runtime). Default `#harness`. Non-secret. */
   slackChannel?: string;
+  /** Notification verbosity tier baked into the config the entrypoint writes. Default
+   *  `"escalations"` (quietest). See `NotifyTier`. */
+  notifyTier?: NotifyTier;
 }
 
 /**
@@ -175,7 +195,7 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
   // no single quotes, so it's safe to single-quote in the emitted `printf` below.
   const slackConfigJson = JSON.stringify({
     notifier: "slack",
-    notify: "escalations",
+    notify: input.notifyTier ?? "escalations",
     slack: { channel: input.slackChannel ?? "#harness" },
   });
 
@@ -431,6 +451,8 @@ export interface RunStyreConfig {
   /** Slack channel for styre's notifications (falls back to `STYRE_SLACK_CHANNEL`, then
    *  `#harness`). Non-secret; the token itself is `SLACK_BOT_TOKEN` via creds. */
   slackChannel?: string;
+  /** Notification verbosity tier (falls back to `STYRE_NOTIFY`, then `"escalations"`). */
+  notifyTier?: NotifyTier;
 }
 
 /** Side-effecting steps, split out (same shape as build-styre.ts/seed-github.ts) so
@@ -519,6 +541,7 @@ export async function runStyre(
     claudeCliVersion: cfg.claudeCliVersion,
     cohort: cfg.cohort,
     slackChannel: cfg.slackChannel ?? process.env.STYRE_SLACK_CHANNEL,
+    notifyTier: cfg.notifyTier ?? resolveNotifyTier(process.env.STYRE_NOTIFY),
   });
   const entrypointHostPath = path.join(outDir, "entrypoint.sh");
   await deps.writeEntrypoint(entrypointHostPath, entrypoint);

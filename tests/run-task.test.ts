@@ -8,6 +8,7 @@ import {
   buildEntrypoint,
   detectWebReachable,
   hasAgentActivity,
+  resolveNotifyTier,
   runStyre,
   webOffProbe,
 } from "../orchestrator/run-task";
@@ -117,6 +118,13 @@ describe("buildEntrypoint (pure)", () => {
     const script = buildEntrypoint({ seed: makeSeed(), slackChannel: "#my-channel" });
     expect(script).toContain('"channel":"#my-channel"');
     expect(script).not.toContain('"channel":"#harness"');
+  });
+
+  test("notify tier defaults to escalations and is overridable via notifyTier", () => {
+    expect(buildEntrypoint({ seed: makeSeed() })).toContain('"notify":"escalations"');
+    const noisy = buildEntrypoint({ seed: makeSeed(), notifyTier: "everything" });
+    expect(noisy).toContain('"notify":"everything"');
+    expect(noisy).not.toContain('"notify":"escalations"');
   });
 
   test("installs a pinned claude CLI version (default CLAUDE_CLI_VERSION) via curl or npm", () => {
@@ -265,6 +273,37 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).not.toContain(SENTINEL_FIX_LINE);
     expect(script).not.toContain(SENTINEL_TEST_LINE);
     expect(script).not.toContain(".claude");
+  });
+});
+
+describe("resolveNotifyTier (pure)", () => {
+  test("accepts the three valid tiers", () => {
+    expect(resolveNotifyTier("escalations")).toBe("escalations");
+    expect(resolveNotifyTier("transitions")).toBe("transitions");
+    expect(resolveNotifyTier("everything")).toBe("everything");
+  });
+
+  test("returns undefined (→ default) for unset/empty", () => {
+    expect(resolveNotifyTier(undefined)).toBeUndefined();
+    expect(resolveNotifyTier("")).toBeUndefined();
+  });
+
+  test("returns undefined + warns for an invalid value (falls back, never crashes)", () => {
+    const orig = process.stderr.write.bind(process.stderr);
+    let warned = "";
+    // capture the warning so it's asserted AND doesn't pollute test output
+    process.stderr.write = ((s: string) => {
+      warned += s;
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(resolveNotifyTier("loud")).toBeUndefined();
+      expect(resolveNotifyTier("ESCALATIONS")).toBeUndefined(); // case-sensitive
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(warned).toContain("STYRE_NOTIFY");
+    expect(warned).toContain("loud");
   });
 });
 
