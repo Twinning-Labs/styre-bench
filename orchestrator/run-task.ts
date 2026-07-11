@@ -73,6 +73,27 @@ export interface RunStyreCreds {
    *  `merge:push` can authenticate (`buildEntrypoint` configures a github.com credential helper
    *  that reads it from the env, never embedding it in origin). */
   benchGhToken: string;
+  /** OPTIONAL Slack bot token for styre's outbound notifications. Empty string = off: the
+   *  entrypoint only writes styre's Slack config when this is non-empty, and styre fail-louds if
+   *  told `notifier:slack` without a token — so "unset" means silent, never a broken run. */
+  slackBotToken: string;
+}
+
+/** styre's notification-verbosity tiers (its `notify` config field), quietest → noisiest. */
+export const NOTIFY_TIERS = ["escalations", "transitions", "everything"] as const;
+export type NotifyTier = (typeof NOTIFY_TIERS)[number];
+
+/** Validate a raw `STYRE_NOTIFY` env value. Returns `undefined` (→ default `"escalations"`) when
+ *  unset OR invalid, warning on an invalid value so a typo doesn't silently downgrade. Validated
+ *  HERE because styre fail-louds (zod enum) on an unknown `notify` value — an unvalidated bad tier
+ *  in the config we write would crash every container. */
+export function resolveNotifyTier(raw: string | undefined): NotifyTier | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if ((NOTIFY_TIERS as readonly string[]).includes(raw)) return raw as NotifyTier;
+  process.stderr.write(
+    `styre-bench: ignoring invalid STYRE_NOTIFY="${raw}" (use ${NOTIFY_TIERS.join("|")}); defaulting to "escalations"\n`,
+  );
+  return undefined;
 }
 
 export interface BuildEntrypointInput {
@@ -90,6 +111,12 @@ export interface BuildEntrypointInput {
    *  level web-off layer, independent of `build-styre.ts`'s `applyWebOffPatch` (which strips
    *  the tools from styre's own compiled-in allowlist, layer 1). See the step-2 doc below. */
   cohort?: Cohort;
+  /** Slack channel styre posts notifications to — baked into the entrypoint's conditional config
+   *  write (the token itself is checked at container runtime). Default `#harness`. Non-secret. */
+  slackChannel?: string;
+  /** Notification verbosity tier baked into the config the entrypoint writes. Default
+   *  `"escalations"` (quietest). See `NotifyTier`. */
+  notifyTier?: NotifyTier;
 }
 
 /**
@@ -164,6 +191,13 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
   const claudeCliVersion = input.claudeCliVersion ?? CLAUDE_CLI_VERSION;
   const isWebOff = (input.cohort ?? "web-on") === "web-off";
   const { seed } = input;
+  // Slack config the entrypoint writes (only when SLACK_BOT_TOKEN is present at runtime). JSON has
+  // no single quotes, so it's safe to single-quote in the emitted `printf` below.
+  const slackConfigJson = JSON.stringify({
+    notifier: "slack",
+    notify: input.notifyTier ?? "escalations",
+    slack: { channel: input.slackChannel ?? "#harness" },
+  });
 
   const lines: string[] = [
     "#!/usr/bin/env bash",
@@ -288,6 +322,17 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     "  conda activate testbed 2>/dev/null || true",
     "fi",
     "",
+    // Slack notifications (styre's outbound notifier): enable ONLY when SLACK_BOT_TOKEN is present
+    // in the container env. styre reads its global config from $HOME/.config/styre/config.json and
+    // fail-louds if told notifier:slack WITHOUT a token — so writing this file only when the token
+    // is set keeps tokenless runs silent-but-working (no config => styre defaults to notifier:none).
+    // Quietest tier ("escalations") so parallel instances don't flood the channel; each message
+    // already carries the ticket ident to tell instances apart.
+    'if [ -n "${SLACK_BOT_TOKEN:-}" ]; then',
+    '  mkdir -p "${HOME}/.config/styre"',
+    `  printf '%s' '${slackConfigJson}' > "\${HOME}/.config/styre/config.json"`,
+    "fi",
+    "",
     "echo 'styre-bench entrypoint: [5/6] styre setup'",
     // Wrap styre setup so a failure exits with the distinct SETUP_FAILED_EXIT (not the generic
     // 1 that claude-install/infra failures also use, nor styre run's own exit) — collect maps
@@ -341,7 +386,8 @@ export interface BuildDockerArgsInput {
 /**
  * PURE. Builds the `docker run` argv (everything after the `docker` binary itself). Mounts
  * EXACTLY three paths — the styre binary (ro), the host output dir (rw), and the entrypoint
- * script (ro) — and four cred env vars. `image` is the only per-instance value threaded
+ * script (ro) — and five cred env vars (the fifth, SLACK_BOT_TOKEN, is optional/possibly-empty).
+ * `image` is the only per-instance value threaded
  * through; nothing here ever touches `inst.test_patch`/`inst.fix_patch`/`.claude` (the input
  * type has no field for them — FIREWALL by construction, matching `buildEntrypoint`).
  */
@@ -370,6 +416,10 @@ export function buildDockerArgs(input: BuildDockerArgsInput): string[] {
     `GITHUB_TOKEN=${creds.githubToken}`,
     "-e",
     `BENCH_GH_TOKEN=${creds.benchGhToken}`,
+    // OPTIONAL: "" when unset — the entrypoint's `[ -n "$SLACK_BOT_TOKEN" ]` guard treats empty as
+    // off, so styre never sees a Slack config and notifications stay silent.
+    "-e",
+    `SLACK_BOT_TOKEN=${creds.slackBotToken}`,
     "--entrypoint",
     "bash",
     image,
@@ -398,6 +448,11 @@ export interface RunStyreConfig {
   creds?: Partial<RunStyreCreds>;
   /** Forwarded to `buildEntrypoint` — see `BuildEntrypointInput.cohort`. Default `"web-on"`. */
   cohort?: Cohort;
+  /** Slack channel for styre's notifications (falls back to `STYRE_SLACK_CHANNEL`, then
+   *  `#harness`). Non-secret; the token itself is `SLACK_BOT_TOKEN` via creds. */
+  slackChannel?: string;
+  /** Notification verbosity tier (falls back to `STYRE_NOTIFY`, then `"escalations"`). */
+  notifyTier?: NotifyTier;
 }
 
 /** Side-effecting steps, split out (same shape as build-styre.ts/seed-github.ts) so
@@ -437,6 +492,9 @@ function resolveCreds(overrides: Partial<RunStyreCreds> | undefined): RunStyreCr
   const linearApiKey = overrides?.linearApiKey ?? process.env.LINEAR_API_KEY ?? "";
   const githubToken = overrides?.githubToken ?? process.env.GITHUB_TOKEN ?? "";
   const benchGhToken = overrides?.benchGhToken ?? process.env.BENCH_GH_TOKEN ?? "";
+  // OPTIONAL (unlike the four above): unset => "" => Slack notifications simply stay off. NOT added
+  // to the `missing` fail-loud list — a bench run must not require a Slack token.
+  const slackBotToken = overrides?.slackBotToken ?? process.env.SLACK_BOT_TOKEN ?? "";
   const missing = [
     anthropicApiKey ? null : "ANTHROPIC_API_KEY",
     linearApiKey ? null : "LINEAR_API_KEY",
@@ -448,7 +506,7 @@ function resolveCreds(overrides: Partial<RunStyreCreds> | undefined): RunStyreCr
       `runStyre: missing required creds (set env vars or pass cfg.creds): ${missing.join(", ")}`,
     );
   }
-  return { anthropicApiKey, linearApiKey, githubToken, benchGhToken };
+  return { anthropicApiKey, linearApiKey, githubToken, benchGhToken, slackBotToken };
 }
 
 /**
@@ -482,6 +540,8 @@ export async function runStyre(
     repoDirInImage: cfg.repoDirInImage,
     claudeCliVersion: cfg.claudeCliVersion,
     cohort: cfg.cohort,
+    slackChannel: cfg.slackChannel ?? process.env.STYRE_SLACK_CHANNEL,
+    notifyTier: cfg.notifyTier ?? resolveNotifyTier(process.env.STYRE_NOTIFY),
   });
   const entrypointHostPath = path.join(outDir, "entrypoint.sh");
   await deps.writeEntrypoint(entrypointHostPath, entrypoint);

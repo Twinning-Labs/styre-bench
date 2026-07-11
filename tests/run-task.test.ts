@@ -8,6 +8,7 @@ import {
   buildEntrypoint,
   detectWebReachable,
   hasAgentActivity,
+  resolveNotifyTier,
   runStyre,
   webOffProbe,
 } from "../orchestrator/run-task";
@@ -98,6 +99,32 @@ describe("buildEntrypoint (pure)", () => {
     // activation must precede BOTH styre setup and styre run (so styre's python3 = testbed python)
     expect(script.indexOf("conda activate testbed")).toBeLessThan(script.indexOf('setup "'));
     expect(script.indexOf("conda activate testbed")).toBeLessThan(script.indexOf('run "'));
+  });
+
+  test("writes styre's Slack config only when SLACK_BOT_TOKEN is set, before run, default #harness", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    // token-gated so tokenless runs stay silent (styre fail-louds on notifier:slack w/o a token)
+    expect(script).toContain('if [ -n "${SLACK_BOT_TOKEN:-}" ]; then');
+    expect(script).toContain('"${HOME}/.config/styre/config.json"');
+    // the written JSON: notifier slack, quietest tier, default channel
+    expect(script).toContain('"notifier":"slack"');
+    expect(script).toContain('"notify":"escalations"');
+    expect(script).toContain('"channel":"#harness"');
+    // the config write precedes styre run (so styre reads it)
+    expect(script.indexOf("SLACK_BOT_TOKEN")).toBeLessThan(script.indexOf('run "'));
+  });
+
+  test("Slack channel is overridable via slackChannel", () => {
+    const script = buildEntrypoint({ seed: makeSeed(), slackChannel: "#my-channel" });
+    expect(script).toContain('"channel":"#my-channel"');
+    expect(script).not.toContain('"channel":"#harness"');
+  });
+
+  test("notify tier defaults to escalations and is overridable via notifyTier", () => {
+    expect(buildEntrypoint({ seed: makeSeed() })).toContain('"notify":"escalations"');
+    const noisy = buildEntrypoint({ seed: makeSeed(), notifyTier: "everything" });
+    expect(noisy).toContain('"notify":"everything"');
+    expect(noisy).not.toContain('"notify":"escalations"');
   });
 
   test("installs a pinned claude CLI version (default CLAUDE_CLI_VERSION) via curl or npm", () => {
@@ -249,12 +276,44 @@ describe("buildEntrypoint (pure)", () => {
   });
 });
 
+describe("resolveNotifyTier (pure)", () => {
+  test("accepts the three valid tiers", () => {
+    expect(resolveNotifyTier("escalations")).toBe("escalations");
+    expect(resolveNotifyTier("transitions")).toBe("transitions");
+    expect(resolveNotifyTier("everything")).toBe("everything");
+  });
+
+  test("returns undefined (→ default) for unset/empty", () => {
+    expect(resolveNotifyTier(undefined)).toBeUndefined();
+    expect(resolveNotifyTier("")).toBeUndefined();
+  });
+
+  test("returns undefined + warns for an invalid value (falls back, never crashes)", () => {
+    const orig = process.stderr.write.bind(process.stderr);
+    let warned = "";
+    // capture the warning so it's asserted AND doesn't pollute test output
+    process.stderr.write = ((s: string) => {
+      warned += s;
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(resolveNotifyTier("loud")).toBeUndefined();
+      expect(resolveNotifyTier("ESCALATIONS")).toBeUndefined(); // case-sensitive
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(warned).toContain("STYRE_NOTIFY");
+    expect(warned).toContain("loud");
+  });
+});
+
 describe("buildDockerArgs (pure)", () => {
   const creds = {
     anthropicApiKey: "ak-1",
     linearApiKey: "lk-1",
     githubToken: "gh-1",
     benchGhToken: "bgh-1",
+    slackBotToken: "slk-1",
   };
 
   test("defaults --platform to linux/amd64 when none is passed (MSB + legacy/fixture callers)", () => {
@@ -312,6 +371,19 @@ describe("buildDockerArgs (pure)", () => {
     expect(args).toContain("LINEAR_API_KEY=lk-1");
     expect(args).toContain("GITHUB_TOKEN=gh-1");
     expect(args).toContain("BENCH_GH_TOKEN=bgh-1");
+    expect(args).toContain("SLACK_BOT_TOKEN=slk-1");
+  });
+
+  test("SLACK_BOT_TOKEN is forwarded even when empty (unset = notifications off, not an error)", () => {
+    const args = buildDockerArgs({
+      image: "img",
+      binaryPath: "/b",
+      outDir: "/o",
+      entrypointHostPath: "/e",
+      creds: { ...creds, slackBotToken: "" },
+    });
+    // present as an -e pair with an empty value; the entrypoint's [ -n ] guard treats it as off
+    expect(args).toContain("SLACK_BOT_TOKEN=");
   });
 
   test("runs the entrypoint script via --entrypoint bash <image> <script>", () => {
