@@ -41,6 +41,13 @@ const CONTAINER_OUT_DIR = "/out";
 const CONTAINER_NDJSON_PATH = `${CONTAINER_OUT_DIR}/run.ndjson`;
 const CONTAINER_TRANSCRIPT_PATH = `${CONTAINER_OUT_DIR}/transcript.jsonl`;
 const CONTAINER_PROFILE_PATH = `${CONTAINER_OUT_DIR}/profile.json`;
+// The ephemeral SoT SQLite, pinned INTO the mounted out dir (via `styre run --db`) instead of a
+// throwaway /tmp path, so it survives the `--rm` container. Many step failures (e.g. a silently
+// swallowed `merge:push`/`pr_create` forge error) are recorded ONLY in the SoT — `workflow_step.error`
+// and `projection_outbox.error` — and are never emitted to the NDJSON stdout stream, so without this
+// the sole ground truth for those failures is destroyed on container exit. WAL sidecars (`sot.db-wal`,
+// `sot.db-shm`) land in the same mounted dir, so the capture is complete even without a clean checkpoint.
+const CONTAINER_SOT_DB_PATH = `${CONTAINER_OUT_DIR}/sot.db`;
 /** Distinct container exit code the entrypoint uses when `styre setup` fails (produced no
  *  usable profile). Lets `collect` classify it as `probe` (a setup-coverage gap — styre
  *  couldn't produce a runnable profile for this repo) rather than `infra`, and — because
@@ -176,11 +183,13 @@ export interface BuildEntrypointInput {
  *    rationale at the call site) — deterministic path (setup otherwise
  *    writes under `$XDG_CONFIG_HOME/styre/<slug>/profile.json`, which `runStyre`'s caller has
  *    no fixed handle on).
- * 6. `styre run <seed.ident> --profile <profilePath> --in-place`, teeing NDJSON stdout to
- *    `CONTAINER_NDJSON_PATH`; the container's own exit code is styre run's exit code
- *    (`PIPESTATUS[0]`, not tee's). `--in-place` makes styre work on a branch IN the repo root
- *    (the pre-built editable env's target) instead of a separate worktree, so its conda-reuse
- *    probe fires; discovery finds the repo from cwd (step 4 `cd`d in).
+ * 6. `styre run <seed.ident> --profile <profilePath> --in-place --db <CONTAINER_SOT_DB_PATH>`,
+ *    teeing NDJSON stdout to `CONTAINER_NDJSON_PATH`; the container's own exit code is styre run's
+ *    exit code (`PIPESTATUS[0]`, not tee's). `--in-place` makes styre work on a branch IN the repo
+ *    root (the pre-built editable env's target) instead of a separate worktree, so its conda-reuse
+ *    probe fires; discovery finds the repo from cwd (step 4 `cd`d in). `--db` pins the SoT into the
+ *    mounted out dir so the post-run DB (the only record of NDJSON-invisible step/outbox errors)
+ *    survives `--rm` — see `CONTAINER_SOT_DB_PATH`.
  *
  * FIREWALL: this function's input type carries no `test_patch`/`fix_patch`/`.claude` data at
  * all — `RunSeed` is only `{ repoUrl, defaultBranch, ident }` — so there is no code path by
@@ -357,7 +366,7 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     "",
     "echo 'styre-bench entrypoint: [6/6] styre run'",
     "set +e",
-    `"${CONTAINER_BINARY_PATH}" run "${seed.ident}" --profile "${CONTAINER_PROFILE_PATH}" --in-place | tee "${CONTAINER_NDJSON_PATH}"`,
+    `"${CONTAINER_BINARY_PATH}" run "${seed.ident}" --profile "${CONTAINER_PROFILE_PATH}" --in-place --db "${CONTAINER_SOT_DB_PATH}" | tee "${CONTAINER_NDJSON_PATH}"`,
     'run_exit="${PIPESTATUS[0]}"',
     "set -e",
     'exit "$run_exit"',
