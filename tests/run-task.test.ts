@@ -245,9 +245,17 @@ describe("buildEntrypoint (pure)", () => {
     const seed = makeSeed({ ident: "ENG-999" });
     const script = buildEntrypoint({ seed });
     expect(script).toContain(
-      'run "ENG-999" --profile "/out/profile.json" --in-place | tee "/out/run.ndjson"',
+      'run "ENG-999" --profile "/out/profile.json" --in-place --db "/out/sot.db" | tee "/out/run.ndjson"',
     );
     expect(script).toContain('run_exit="${PIPESTATUS[0]}"');
+  });
+
+  test("pins the SoT DB into the mounted out dir via --db so it survives the --rm container", () => {
+    // The SoT is the ONLY record of NDJSON-invisible step/outbox errors (e.g. a swallowed
+    // merge:push forge failure). Pinning it to /out/sot.db (not a throwaway /tmp path) is what
+    // lets those errors be inspected on the host after the container is gone.
+    const script = buildEntrypoint({ seed: makeSeed({ ident: "ENG-999" }) });
+    expect(script).toContain('--db "/out/sot.db"');
   });
 
   test("web-off cohort: the claude wrapper appends --disallowedTools WebSearch WebFetch (layer 2)", () => {
