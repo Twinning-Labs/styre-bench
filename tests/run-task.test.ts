@@ -221,7 +221,18 @@ describe("buildEntrypoint (pure)", () => {
     expect(script).toContain('cd "/testbed"');
     // --trust-agent-commands: bench is autonomous/headless, so styre must accept agent-discovered
     // build/test/check commands (else it can't ground-truth-verify most stacks).
-    expect(script).toContain('setup "/testbed" --out "/out/profile.json" --trust-agent-commands');
+    expect(script).toContain(
+      'setup "/testbed" --out "/out/profile.json" --checks none --trust-agent-commands',
+    );
+  });
+
+  test("forces checksSystem:none via `styre setup --checks none` so a CI-less bench scratch repo does not stall merge on external_checks", () => {
+    // Bench instance repos ship .github/workflows in-tree, so styre setup would probe
+    // checksSystem:"github" and merge would idle forever polling for GH-Actions check-runs that
+    // a throwaway scratch repo never produces. Forcing "none" makes external_checks resolve
+    // "skipped" so the run reaches pr-ready. See docs/design/2026-07-14-bench-checks-system-none.md.
+    const script = buildEntrypoint({ seed: makeSeed() });
+    expect(script).toContain("--checks none");
   });
 
   test("honors a repoDirInImage override", () => {

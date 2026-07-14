@@ -179,7 +179,7 @@ export interface BuildEntrypointInput {
  *    and throws otherwise. Then drops a repo-scoped `.styre-disposable` marker (git-excluded
  *    locally so `git add -A` won't commit it) — the disposability signal `styre run --in-place`
  *    gates on.
- * 5. `styre setup <repoDirInImage> --out <profilePath> --trust-agent-commands` (see the flag's
+ * 5. `styre setup <repoDirInImage> --out <profilePath> --checks none --trust-agent-commands` (see the flag's
  *    rationale at the call site) — deterministic path (setup otherwise
  *    writes under `$XDG_CONFIG_HOME/styre/<slug>/profile.json`, which `runStyre`'s caller has
  *    no fixed handle on).
@@ -356,7 +356,13 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     // does NOT affect the final oracle score (the oracle uses the gold FAIL_TO_PASS tests); it
     // only lets styre's own verify signal function so the loop measures styre's real autonomous
     // capability rather than a command-starved cripple.
-    `"${CONTAINER_BINARY_PATH}" setup "${repoDirInImage}" --out "${CONTAINER_PROFILE_PATH}" --trust-agent-commands`,
+    // --checks none: bench instance repos ship .github/workflows in-tree, so styre setup would
+    // probe checksSystem:"github" — but the throwaway scratch repo never runs Actions, so merge
+    // would idle forever polling for check-runs that never arrive (external_checks stays pending
+    // → no-progress). Forcing "none" makes styre deliver external_checks="skipped", so the run
+    // reaches pr-ready. Narrow to the bench; styre core detection is untouched.
+    // See docs/design/2026-07-14-bench-checks-system-none.md.
+    `"${CONTAINER_BINARY_PATH}" setup "${repoDirInImage}" --out "${CONTAINER_PROFILE_PATH}" --checks none --trust-agent-commands`,
     'setup_exit="$?"',
     "set -e",
     'if [ "$setup_exit" -ne 0 ]; then',
