@@ -890,6 +890,62 @@ describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () =
   });
 });
 
+describe("runPilot: ONLY mode routes selection through selectSingle", () => {
+  test("opts.only set uses deps.selectSingle with that id; selectSmoke/selectPilot are not called", async () => {
+    const py = makeInstance({ id: "astropy__astropy-13236", language: "python" });
+    const ts = makeInstance({ id: "ts-1", language: "ts" });
+    let singleId: string | undefined;
+    let smokeCalled = false;
+    let pilotCalled = false;
+    const deps: Partial<RunPilotDeps> = {
+      loadInstances: async (family) => (family === "swe-bench" ? [py] : [ts]),
+      selectSingle: (pool, id) => {
+        singleId = id;
+        return pool.filter((i) => i.id === id);
+      },
+      selectSmoke: (pool) => {
+        smokeCalled = true;
+        return pool;
+      },
+      selectPilot: (pool) => {
+        pilotCalled = true;
+        return pool;
+      },
+      buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
+      runPool: async () => ({ records: [], spentUsd: 0, budgetExceeded: false, skipped: [] }),
+      renderReport: (records) => ({ markdown: "", json: records }),
+      writeReport: async () => {},
+    };
+
+    // ONLY wins even when smoke is also set — selection routes to selectSingle.
+    await runPilot(makeCfg(), { deps, only: "astropy__astropy-13236", smoke: true });
+
+    expect(singleId).toBe("astropy__astropy-13236");
+    expect(smokeCalled).toBe(false);
+    expect(pilotCalled).toBe(false);
+  });
+
+  test("ONLY threads bypassOracle through runPool's runInstanceOpts", async () => {
+    const py = makeInstance({ id: "astropy__astropy-13236", language: "python" });
+    let capturedOpts: RunPoolOpts | undefined;
+    const deps: Partial<RunPilotDeps> = {
+      loadInstances: async (family) => (family === "swe-bench" ? [py] : []),
+      selectSingle: (pool, id) => pool.filter((i) => i.id === id),
+      buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
+      runPool: async (_instances, _binaryPath, _cfg, opts) => {
+        capturedOpts = opts;
+        return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
+      },
+      renderReport: (records) => ({ markdown: "", json: records }),
+      writeReport: async () => {},
+    };
+
+    await runPilot(makeCfg(), { deps, only: "astropy__astropy-13236", bypassOracle: true });
+
+    expect(capturedOpts?.runInstanceOpts?.bypassOracle).toBe(true);
+  });
+});
+
 describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
   test("{ smoke: true, bypassOracle: true } passes bypassOracle through runPool's runInstanceOpts", async () => {
     const py = makeInstance({ id: "py-1", language: "python" });
