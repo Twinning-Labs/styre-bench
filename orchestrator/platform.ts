@@ -45,10 +45,19 @@ export function archFromPlatform(platform: string): ImageArch {
 /**
  * The Bun `--compile --target` value for a Linux binary of the given arch. The styre binary
  * runs INSIDE a Linux eval container, so it is ALWAYS cross-compiled to Linux (never the
- * macOS host target) — `arm64` -> `bun-linux-arm64` (runs native in a linux/arm64 container),
- * `x86_64` -> `bun-linux-x64` (native on linux/amd64, emulated on an arm64 host). glibc
- * variants: the swebench/mswebench eval images are Debian/Ubuntu-based.
+ * macOS host target) — `arm64` -> `bun-linux-arm64` (runs native in a linux/arm64 container).
+ *
+ * `x86_64` -> `bun-linux-x64` on a native x86_64 host, but `bun-linux-x64-baseline` when the
+ * HOST is arm64. A linux/amd64 container on Apple Silicon runs under Rosetta/qemu, which does
+ * NOT implement AVX2; Bun's default `bun-linux-x64` runtime uses AVX2 and SIGILLs at startup
+ * (exit 132 — "CPU lacks AVX support") the moment it runs there, which is why the Multi-SWE
+ * (amd64-only) leg dies at `styre setup`. The `-baseline` build omits AVX2 and runs everywhere,
+ * so we select it whenever the x64 target will be emulated. Verified empirically: in a
+ * linux/amd64 container on an arm64 host, `bun-linux-x64` exits 132 while `bun-linux-x64-baseline`
+ * runs `styre --version` cleanly. On a native x86_64 host AVX2 is present, so we keep the faster
+ * non-baseline build. glibc variants: the swebench/mswebench eval images are Debian/Ubuntu-based.
  */
-export function bunLinuxTarget(arch: ImageArch): string {
-  return arch === "arm64" ? "bun-linux-arm64" : "bun-linux-x64";
+export function bunLinuxTarget(arch: ImageArch, hostArch: string = process.arch): string {
+  if (arch === "arm64") return "bun-linux-arm64";
+  return hostArch === "arm64" ? "bun-linux-x64-baseline" : "bun-linux-x64";
 }
