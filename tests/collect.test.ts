@@ -56,9 +56,13 @@ describe("collect: summary parsing", () => {
     expect(rec.escalation_reasons).toEqual(["verify-red-exhausted"]);
     expect(rec.outcome).toBe("pr-ready");
     expect(rec.status).toBe("ok");
-    expect(rec.cost_usd).toBe(5.8);
-    expect(rec.tokens_in).toBe(210400);
-    expect(rec.tokens_out).toBe(38200);
+    // ENG-390: cost/tokens are NOT read off styre's summary any more — the container's
+    // `claude` wrapper makes them null for every dispatch. `defaultCollectStage` measures
+    // them from the teed transcript instead, so the pure collect() must not report them.
+    expect(rec).not.toHaveProperty("cost_usd");
+    expect(rec).not.toHaveProperty("cost_usd_measured");
+    expect(rec).not.toHaveProperty("tokens_in");
+    expect(rec).not.toHaveProperty("tokens_out");
     expect(rec.parked).toBe(false);
     expect(rec.taxonomy).toBeUndefined();
   });

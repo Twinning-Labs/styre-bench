@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { evidenceDirName } from "./evidence";
 import { seedGithub } from "./seed-github";
 import type { SeedGithubConfig, SeedGithubResult } from "./seed-github";
 import { seedLinear } from "./seed-linear";
@@ -447,13 +447,17 @@ export interface RunStyreResult {
   transcriptPath: string;
   profilePath: string;
   exitCode: number;
+  /** The HOST evidence dir these paths live under (ENG-393). Returned so the pipeline can
+   *  record it on the TaskRecord — a report row must be traceable to its evidence. */
+  outDir: string;
 }
 
 export interface RunStyreConfig {
-  /** HOST directory the container's `/out` is mounted from. Default: a fresh temp dir per
-   *  call (`os.tmpdir()/styre-bench-run-<instance-id>-<ts>-<rand>`) — the trailing random
-   *  suffix (Task-6 review fix) avoids a `Date.now()` collision under rapid re-invocation of
-   *  the same instance id (e.g. retries within the same millisecond). */
+  /** HOST directory the container's `/out` is mounted from. Default: a fresh DURABLE dir per
+   *  call, `<cwd>/runs/<instance-id>-<utc-stamp>-<rand>` (ENG-393). It was `os.tmpdir()` until
+   *  the OS reclaimed a run's sot.db and transcript overnight, destroying the only record of
+   *  why that run behaved as it did; there is deliberately no temp-dir fallback left. The
+   *  trailing random suffix avoids a same-millisecond collision when an instance is retried. */
   outDir?: string;
   repoDirInImage?: string;
   claudeCliVersion?: string;
@@ -546,7 +550,7 @@ export async function runStyre(
 
   const outDir =
     cfg.outDir ??
-    path.join(os.tmpdir(), `styre-bench-run-${inst.id}-${Date.now()}-${randomSuffix()}`);
+    path.join(process.cwd(), "runs", evidenceDirName(inst.id, new Date(), randomSuffix()));
   await deps.ensureOutDir(outDir);
 
   const creds = resolveCreds(cfg.creds);
@@ -577,6 +581,7 @@ export async function runStyre(
     transcriptPath: path.join(outDir, "transcript.jsonl"),
     profilePath: path.join(outDir, "profile.json"),
     exitCode,
+    outDir,
   };
 }
 

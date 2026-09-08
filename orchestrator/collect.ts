@@ -262,9 +262,9 @@ export function collect(
   result.escalation_reasons = summary.escalation_reasons;
   result.outcome = summary.outcome;
   result.status = summary.status;
-  result.cost_usd = summary.cost_usd;
-  result.tokens_in = summary.tokens_in;
-  result.tokens_out = summary.tokens_out;
+  // Cost/tokens are deliberately NOT taken from the summary (ENG-390): the container's
+  // `claude` wrapper hands styre plain text, so `summary.cost_usd`/`tokens_*` are null for
+  // every dispatch. `defaultCollectStage` measures them from the teed transcript instead.
   result.parked = summary.outcome === "paused";
 
   return result;

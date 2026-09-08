@@ -236,7 +236,10 @@ function renderLoopEconomics(records: TaskRecord[]): string {
     ticks: rs.map((r) => r.ticks),
     loopbacks: rs.map((r) => r.cycle_count),
     escalations: rs.map((r) => r.escalation_count),
-    cost: rs.map((r) => r.cost_usd),
+    // ENG-390: measured cost only. An unmeasured run contributes NOTHING to the median
+    // rather than a zero or an estimate — a guess must never be rendered as a measurement.
+    cost: rs.map((r) => r.cost_usd_measured).filter((c): c is number => c !== null),
+    costUnknown: rs.filter((r) => r.cost_usd_measured === null).length,
   });
   const gr = group(resolved);
   const gu = group(unresolved);
@@ -254,7 +257,15 @@ function renderLoopEconomics(records: TaskRecord[]): string {
   lines.push(
     `| escalations / run | ${fmt1(mean(gr.escalations))} | ${fmt1(mean(gu.escalations))} |`,
   );
-  lines.push(`| cost / instance (med) | $${fmt2(median(gr.cost))} | $${fmt2(median(gu.cost))} |`);
+  const costCell = (g: { cost: number[]; costUnknown: number }): string =>
+    g.cost.length === 0 ? "unknown" : `$${fmt2(median(g.cost))}`;
+  lines.push(`| cost / instance (med) | ${costCell(gr)} | ${costCell(gu)} |`);
+  const unknownTotal = gr.costUnknown + gu.costUnknown;
+  if (unknownTotal > 0) {
+    lines.push(
+      `> ⚠ ${unknownTotal} instance(s) reported NO measurable cost — excluded from the median above, not counted as $0.`,
+    );
+  }
 
   const reasonCounts = new Map<string, number>();
   for (const r of denom) {

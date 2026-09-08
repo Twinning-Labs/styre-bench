@@ -62,9 +62,19 @@ export interface TaskRecord {
   status: string;
   exit_code: number;
   parked: boolean;
-  cost_usd: number;
-  tokens_in: number;
-  tokens_out: number;
+  /** Measured USD, recovered from the run transcript (`usage.ts`, ENG-390). `null` means
+   *  UNKNOWN — no transcript, or no `result` event carried a cost. NEVER coerce to `0`:
+   *  "not measured" and "free" are different claims, and conflating them is exactly what
+   *  let a $11.84 run report $0.50 and made the run budget unable to fire. */
+  cost_usd_measured: number | null;
+  /** Fallback estimate, charged ONLY when no measured cost could be recovered. Kept separate
+   *  so an estimate is never rendered as though it were a measurement. */
+  cost_usd_estimated: number;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  /** Absolute path to this attempt's durable evidence dir (ENG-393) — the sot.db/transcript/
+   *  profile/ndjson for this run. `null` when the container never ran. */
+  evidence_dir: string | null;
   blind_quality: string | null;
   ab_preference: "A(styre)" | "B(human)" | "tie" | "invalid" | null;
   ab_notes: string | null;
