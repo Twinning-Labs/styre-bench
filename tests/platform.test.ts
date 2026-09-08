@@ -76,8 +76,19 @@ describe("bunLinuxTarget (styre always cross-compiles to Linux)", () => {
     expect(bunLinuxTarget("arm64")).toBe("bun-linux-arm64");
   });
 
-  test("x86_64 -> bun-linux-x64 (never a bun-darwin-* host target)", () => {
-    expect(bunLinuxTarget("x86_64")).toBe("bun-linux-x64");
-    expect(bunLinuxTarget("x86_64")).not.toContain("darwin");
+  test("x86_64 on a native x86_64 host -> bun-linux-x64 (never a bun-darwin-* host target)", () => {
+    expect(bunLinuxTarget("x86_64", "x64")).toBe("bun-linux-x64");
+    expect(bunLinuxTarget("x86_64", "x64")).not.toContain("darwin");
+  });
+
+  test("x86_64 on an arm64 host -> bun-linux-x64-baseline (Rosetta lacks AVX2 -> SIGILL otherwise)", () => {
+    // A linux/amd64 container on Apple Silicon runs emulated; the default bun-linux-x64 runtime
+    // uses AVX2 and exits 132 there. The -baseline build omits AVX2 and runs everywhere.
+    expect(bunLinuxTarget("x86_64", "arm64")).toBe("bun-linux-x64-baseline");
+  });
+
+  test("arm64 target is unaffected by host arch", () => {
+    expect(bunLinuxTarget("arm64", "arm64")).toBe("bun-linux-arm64");
+    expect(bunLinuxTarget("arm64", "x64")).toBe("bun-linux-arm64");
   });
 });

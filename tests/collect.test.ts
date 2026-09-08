@@ -65,7 +65,7 @@ describe("collect: summary parsing", () => {
 
   test("parses the LAST summary event, not an earlier one", () => {
     const ndjson = [
-      summaryLine({ outcome: "blocked", ticks: 1 }),
+      summaryLine({ outcome: "paused", reason: "needs_you", ticks: 1 }),
       summaryLine({ outcome: "pr-ready", ticks: 99 }),
     ].join("\n");
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: true });
@@ -73,23 +73,38 @@ describe("collect: summary parsing", () => {
     expect(rec.ticks).toBe(99);
   });
 
-  test("outcome:no-progress (even with exit 1) -> taxonomy loop-exhausted", () => {
-    const ndjson = summaryLine({ outcome: "no-progress" });
+  test("outcome:paused reason:needs_you -> taxonomy loop-exhausted, parked===true", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
     expect(rec.taxonomy).toBe("loop-exhausted");
+    expect(rec.parked).toBe(true);
   });
 
-  test("outcome:blocked -> taxonomy loop-exhausted", () => {
-    const ndjson = summaryLine({ outcome: "blocked" });
-    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
-    expect(rec.taxonomy).toBe("loop-exhausted");
-  });
-
-  test("outcome:parked -> taxonomy parked, parked===true", () => {
-    const ndjson = summaryLine({ outcome: "parked" });
+  test("outcome:paused reason:budget -> taxonomy parked, parked===true", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "budget" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
     expect(rec.taxonomy).toBe("parked");
     expect(rec.parked).toBe(true);
+  });
+
+  test("outcome:paused reason:interrupted -> taxonomy infra (operator stop, not a styre verdict)", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "interrupted" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.parked).toBe(true);
+  });
+
+  test("outcome:paused with no reason -> taxonomy infra, never a loop failure", () => {
+    const ndjson = summaryLine({ outcome: "paused" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("infra");
+  });
+
+  test("outcome:abandoned -> taxonomy loop-exhausted, parked===false", () => {
+    const ndjson = summaryLine({ outcome: "abandoned" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("loop-exhausted");
+    expect(rec.parked).toBe(false);
   });
 
   test("profile whose only component's commands.test is {unavailable} -> taxonomy probe", () => {
@@ -332,8 +347,8 @@ describe("collect: no-summary / malformed-summary -> taxonomy infra", () => {
 });
 
 describe("collect: taxonomy ordering — probe before loop-exhausted", () => {
-  test("unrunnable profile + outcome blocked -> taxonomy probe, not loop-exhausted", () => {
-    const ndjson = summaryLine({ outcome: "blocked" });
+  test("unrunnable profile + paused/needs_you -> taxonomy probe, not loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
       language: "ts",
       pr_opened: false,
@@ -341,12 +356,41 @@ describe("collect: taxonomy ordering — probe before loop-exhausted", () => {
     expect(rec.taxonomy).toBe("probe");
   });
 
-  test("unrunnable profile + outcome no-progress -> taxonomy probe, not loop-exhausted", () => {
-    const ndjson = summaryLine({ outcome: "no-progress" });
+  test("unrunnable profile + abandoned -> taxonomy probe, not loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "abandoned" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
       language: "ts",
       pr_opened: false,
     });
     expect(rec.taxonomy).toBe("probe");
+  });
+
+  test("a budget pause outranks an unrunnable profile (parked before probe)", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "budget" });
+    const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
+      language: "ts",
+      pr_opened: false,
+    });
+    expect(rec.taxonomy).toBe("parked");
+  });
+});
+
+describe("collect: vocabulary drift guard", () => {
+  // ENG-384 retired `blocked`/`no-progress`/`parked`. An outcome this module does not
+  // recognise must land in `infra` (excluded from the oracle rate) and NEVER `undefined`,
+  // which reads as "pending" — that is exactly how the v0.12.0 sweep reported 0/0 while
+  // looking healthy.
+  for (const dead of ["blocked", "no-progress", "parked"]) {
+    test(`retired outcome ${dead} -> taxonomy infra, not pending`, () => {
+      const ndjson = summaryLine({ outcome: dead });
+      const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+      expect(rec.taxonomy).toBe("infra");
+    });
+  }
+
+  test("an unrecognised future outcome -> taxonomy infra, not pending", () => {
+    const ndjson = summaryLine({ outcome: "some-new-outcome" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("infra");
   });
 });

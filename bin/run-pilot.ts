@@ -16,17 +16,25 @@ async function main(): Promise<void> {
   // but BYPASSES the oracle (Option-B): the swebench/multi-swe-bench oracle harnesses are
   // Linux-x86_64-only, so this lets the operator validate the whole pipeline minus the oracle
   // on macOS (seed -> styre-in-container -> collect -> leak-detect -> blind judges).
+  // ONLY=<instance_id> -> run exactly that one named SWE / multi-SWE image (skips SMOKE/pilot
+  // selection). It ALWAYS bypasses the oracle: the swebench/multi-swe oracle harnesses are
+  // Linux-x86_64-only, and ONLY is a fast single-image dev-iteration mode, not a scored run.
+  const only = process.env.ONLY?.trim() || undefined;
   const smokeEnv = process.env.SMOKE;
   const smoke = smokeEnv === "1" || smokeEnv === "2";
-  const bypassOracle = smokeEnv === "2";
-  if (smoke) {
+  const bypassOracle = smokeEnv === "2" || Boolean(only);
+  if (only) {
+    console.error(
+      `[run-pilot] ONLY=${only} — single-image run, oracle-BYPASS (dev iteration; SMOKE ignored)`,
+    );
+  } else if (smoke) {
     console.error(
       bypassOracle
         ? "[run-pilot] SMOKE=2 — oracle-BYPASS: validating pipeline minus the Linux oracle"
         : "[run-pilot] SMOKE=1 — running one ts + one python instance only",
     );
   }
-  const result = await runPilot(BENCH_CONFIG, { smoke, bypassOracle });
+  const result = await runPilot(BENCH_CONFIG, { smoke, only, bypassOracle });
   console.log(result.markdown);
 }
 

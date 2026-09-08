@@ -18,7 +18,7 @@ import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
 import { addedPaths } from "./firewall";
-import { selectPilot, selectSmoke, tagCutoff } from "./matrix";
+import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
 import { SETUP_FAILED_EXIT, runStyre } from "./run-task";
 import type { RunSeed, RunStyreResult } from "./run-task";
@@ -864,6 +864,7 @@ export interface RunPilotDeps {
   loadInstances: (family: Family, cfg: PipelineConfig) => Promise<Instance[]>;
   selectPilot: (pool: Instance[], seed: number) => Instance[];
   selectSmoke: (pool: Instance[], seed: number) => Instance[];
+  selectSingle: (pool: Instance[], id: string) => Instance[];
   buildStyre: (cfg: BuildStyreConfig) => Promise<BuildStyreResult>;
   runPool: (
     instances: Instance[],
@@ -887,6 +888,7 @@ const defaultRunPilotDeps: RunPilotDeps = {
   loadInstances: (family, cfg) => loadInstances(family, cfg),
   selectPilot: (pool, seed) => selectPilot(pool, seed),
   selectSmoke: (pool, seed) => selectSmoke(pool, seed),
+  selectSingle: (pool, id) => selectSingle(pool, id),
   buildStyre: (cfg) => buildStyre(cfg),
   runPool: (instances, binaries, cfg, opts) => runPool(instances, binaries, cfg, opts),
   renderReport: (records, meta) => renderReport(records, meta),
@@ -903,6 +905,13 @@ export interface RunPilotOpts {
    * `bin/run-pilot.ts` entry.
    */
   smoke?: boolean;
+  /**
+   * ONLY mode: run exactly the one instance whose `id` equals this string (a named SWE /
+   * multi-SWE image), skipping both the SMOKE and pilot selectors. For fast dev iteration on a
+   * single image. Takes precedence over `smoke`. Driven by `ONLY=<instance_id>` at the
+   * `bin/run-pilot.ts` entry, which also sets `bypassOracle` (the oracle is Linux-only).
+   */
+  only?: string;
   /** SMOKE=2 Option-B: threaded straight through to every `runInstance` call's
    *  `RunInstanceOpts.bypassOracle` (via `runPool`'s `runInstanceOpts`) — see that field's doc
    *  for what it skips/still runs. Independent of `smoke`, but `bin/run-pilot.ts` only ever
@@ -929,8 +938,11 @@ export async function runPilot(
     deps.loadInstances("swe-bench", cfg),
     deps.loadInstances("multi-swe-bench", cfg),
   ]);
-  const select = opts.smoke ? deps.selectSmoke : deps.selectPilot;
-  const instances = select([...pythonPool, ...tsPool], cfg.seed);
+  const pool = [...pythonPool, ...tsPool];
+  // ONLY (single named image) wins over SMOKE/pilot selection when set.
+  const instances = opts.only
+    ? deps.selectSingle(pool, opts.only)
+    : (opts.smoke ? deps.selectSmoke : deps.selectPilot)(pool, cfg.seed);
 
   // Detect the DISTINCT container platforms this run actually needs (SWE-bench on an arm64
   // host -> linux/arm64; MSB -> linux/amd64) and cross-compile a styre binary for each. The

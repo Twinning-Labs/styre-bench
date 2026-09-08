@@ -28,12 +28,18 @@ export interface CollectCtx {
 
 /** The subset of styre's `summary` telemetry event (`src/telemetry/events.ts` /
  * `SummaryEvent`) this module reads. NOTE: styre's summary schema carries NO `parked`
- * field — `outcome` is the union `"pr-ready" | "done" | "blocked" | "no-progress" |
- * "parked"` (`src/daemon/run-ticket.ts`); `parked` on `TaskRecord` is derived from
- * `outcome === "parked"`, not read off the wire. */
+ * field — `outcome` is the union `"pr-ready" | "done" | "paused" | "abandoned"`
+ * (`src/daemon/run-ticket.ts` `RunOutcome`), with `reason` (`"budget" | "needs_you" |
+ * "interrupted"`, `PauseReason`) set iff `outcome === "paused"`. `parked` on `TaskRecord`
+ * is derived from `outcome === "paused"`, not read off the wire.
+ *
+ * `reason` is typed `string`, not the `PauseReason` union: it arrives off the wire from a
+ * separately-versioned binary, so an unmodelled value must be handled at runtime (it maps
+ * to `infra`) rather than assumed away by the type. */
 interface SummaryEventLike {
   type: "summary";
   outcome: string;
+  reason?: string;
   status: string;
   ticks: number;
   cost_usd: number;
@@ -166,22 +172,41 @@ function isProbeProfile(profile: ProbeProfile): boolean {
   return isUnrunnableTestCommand(profile.components?.[0]);
 }
 
-/** PURE. Derives `taxonomy` from `outcome` — NEVER the process exit code (design §9a: exit
- * codes lie, e.g. `blocked`/`no-progress` both exit 1 but still emit a `summary` first).
- * Only called when a valid `summary` exists (the no-summary case is handled upstream in
- * `collect` as `infra`, before `outcome` is even available). Checked in this order:
- * `parked` (outcome==="parked", which styre only reaches via the exit-75 park path) >
- * `probe` (the setup profile can't run any test at all — an environment failure, not a
- * run failure; checked BEFORE loop-exhausted so an unrunnable-profile run that ends
- * blocked/no-progress is excluded as `probe` rather than counted as a styre loop failure,
- * which would deflate the resolve rate) > `loop-exhausted` (outcome ∈ {blocked,
- * no-progress}) > pending (`undefined` — Task 11 resolves this to
- * `resolved`/`opened-but-unresolved` from the score). */
-function deriveTaxonomy(outcome: string, profile: ProbeProfile): string | undefined {
-  if (outcome === "parked") return "parked";
+/** PURE. Derives `taxonomy` from styre's terminal `outcome` (plus `reason` when paused) —
+ * NEVER the process exit code (design §9a: exit codes lie; `paused` exits 75 and
+ * `abandoned` exits 1, but both emit a `summary` first). Only called when a valid
+ * `summary` exists (the no-summary case is handled upstream in `collect` as `infra`,
+ * before `outcome` is even available).
+ *
+ * styre's vocabulary is `pr-ready | done | paused | abandoned` with `reason` set iff
+ * paused — ENG-380/384 collapsed the former `blocked`/`no-progress`/`parked` outcomes into
+ * one resumable `paused` state. Checked in this order:
+ *
+ *   `parked` (paused for `budget` — it ran out of money, which says nothing about the loop,
+ *   so it outranks even an unrunnable profile) > `probe` (the setup profile can't run any
+ *   test at all — an environment failure, not a run failure; checked BEFORE loop-exhausted
+ *   so an unrunnable-profile run that gives up is excluded as `probe` rather than counted
+ *   as a styre loop failure, which would deflate the resolve rate) > `loop-exhausted`
+ *   (paused for `needs_you`, or a terminal `abandoned`) > pending (`undefined` for
+ *   `pr-ready`/`done` — Task 11 resolves this to `resolved`/`opened-but-unresolved` from
+ *   the score).
+ *
+ * Everything else is `infra`, so it is excluded from the oracle rate rather than silently
+ * attributed to styre: a paused run whose `reason` is missing or unmodelled, an operator
+ * `interrupted` stop, and any outcome from a future styre. Returning `undefined` for an
+ * unrecognised outcome is what let the v0.12.0 sweep render a healthy-looking 0/0 — an
+ * unknown value must never fall through into "pending". */
+function deriveTaxonomy(
+  outcome: string,
+  reason: string | undefined,
+  profile: ProbeProfile,
+): string | undefined {
+  if (outcome === "paused" && reason === "budget") return "parked";
   if (isProbeProfile(profile)) return "probe";
-  if (outcome === "blocked" || outcome === "no-progress") return "loop-exhausted";
-  return undefined;
+  if (outcome === "paused" && reason === "needs_you") return "loop-exhausted";
+  if (outcome === "abandoned") return "loop-exhausted";
+  if (outcome === "pr-ready" || outcome === "done") return undefined;
+  return "infra";
 }
 
 /**
@@ -228,7 +253,7 @@ export function collect(
     return result;
   }
 
-  const taxonomy = deriveTaxonomy(summary.outcome, profile);
+  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, profile);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
   result.ticks = summary.ticks;
@@ -240,7 +265,7 @@ export function collect(
   result.cost_usd = summary.cost_usd;
   result.tokens_in = summary.tokens_in;
   result.tokens_out = summary.tokens_out;
-  result.parked = summary.outcome === "parked";
+  result.parked = summary.outcome === "paused";
 
   return result;
 }

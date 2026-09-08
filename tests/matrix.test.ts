@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { selectPilot, selectSmoke, tagCutoff } from "../orchestrator/matrix";
+import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "../orchestrator/matrix";
 import type { Difficulty, Instance } from "../orchestrator/types";
 
 function makeInstance(
@@ -106,6 +106,35 @@ describe("selectSmoke", () => {
   test("throws naming the language when one language has zero candidates", () => {
     const tsOnly = buildFullPool().filter((i) => i.language === "ts");
     expect(() => selectSmoke(tsOnly, 42)).toThrow(/python/);
+  });
+});
+
+describe("selectSingle", () => {
+  test("returns exactly the one instance whose id matches (across both languages)", () => {
+    const pool = buildFullPool();
+    const picked = selectSingle(pool, "python-hard-2");
+    expect(picked.length).toBe(1);
+    expect(picked[0]?.id).toBe("python-hard-2");
+    expect(picked[0]?.language).toBe("python");
+  });
+
+  test("matches a ts instance by id just as well as a python one", () => {
+    const picked = selectSingle(buildFullPool(), "ts-easy-1");
+    expect(picked.map((i) => i.id)).toEqual(["ts-easy-1"]);
+  });
+
+  test("throws naming the missing id when no instance matches", () => {
+    const pool = buildFullPool();
+    expect(() => selectSingle(pool, "astropy__astropy-99999")).toThrow(/astropy__astropy-99999/);
+  });
+
+  test("the not-found error lists example ids from the pool so the operator can copy an exact one", () => {
+    const pool = buildFullPool();
+    expect(() => selectSingle(pool, "nope")).toThrow(/ts-easy-1/);
+  });
+
+  test("throws on an empty pool rather than returning nothing", () => {
+    expect(() => selectSingle([], "anything")).toThrow(/no instance with id/);
   });
 });
 

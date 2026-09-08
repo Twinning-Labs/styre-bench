@@ -92,6 +92,29 @@ export function selectSmoke(pool: Instance[], _seed: number): Instance[] {
 }
 
 /**
+ * Single-image selection: return exactly the one instance whose `id` matches `id`, ignoring
+ * language/difficulty. For fast dev iteration on ONE named SWE / multi-SWE image (driven by
+ * `ONLY=<instance_id>` at `bin/run-pilot.ts`) instead of spending a 2-image SMOKE or 6-cell
+ * pilot. Throws — naming the missing id and listing a sample of available ids so the operator
+ * can copy an exact one — when the id isn't in the loaded corpus (or the pool is empty).
+ */
+export function selectSingle(pool: Instance[], id: string): Instance[] {
+  const chosen = pool.find((i) => i.id === id);
+  if (!chosen) {
+    const sample = pool
+      .slice(0, 8)
+      .map((i) => i.id)
+      .join(", ");
+    const more = pool.length > 8 ? ", …" : "";
+    throw new Error(
+      `matrix (single): no instance with id "${id}" in the loaded corpus ` +
+        `(${pool.length} available). Example ids: ${sample}${more}`,
+    );
+  }
+  return [chosen];
+}
+
+/**
  * True iff the instance's merge_date is strictly after the model cutoff — used to tag
  * `post_cutoff` on a TaskRecord. Null-safe: an instance with no known merge_date is
  * treated as NOT post-cutoff (false), never throws.
