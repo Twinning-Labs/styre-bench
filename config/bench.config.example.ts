@@ -14,6 +14,15 @@ export const BenchConfig = z.object({
   perTaskCostCapUsd: z.number().default(15),
   runBudgetUsd: z.number().default(150),
   concurrency: z.number().default(3),
+  // ENG-393: run evidence (sot.db, transcript.jsonl, profile.json, run.ndjson) lands here,
+  // repo-relative, NOT in os.tmpdir() where the OS reclaims it mid-investigation.
+  evidenceRoot: z.string().default("runs"),
+  // How many run evidence dirs to keep. Pruning is deliberate and operator-controlled; the
+  // OS must never be the retention policy. 0 disables pruning entirely (keep everything).
+  evidenceKeepRuns: z.number().int().nonnegative().default(20),
+  // ENG-390: when a run's cost cannot be measured, the sweep stops rather than treating the
+  // unknown as free. Set true to keep going anyway (the report still marks it unknown).
+  continueOnUnknownCost: z.boolean().default(false),
   benchGithubOrg: z.string().default("styre-bench-scratch"),
   linearProjectId: z.string().default(""), // FILL IN: dedicated throwaway Linear project id
 });

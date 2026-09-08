@@ -57,6 +57,9 @@ function makeCfg(overrides: Partial<PipelineConfig> = {}): PipelineConfig {
     concurrency: 3,
     benchGithubOrg: "styre-bench-scratch",
     linearProjectId: "proj-1",
+    evidenceRoot: "runs",
+    evidenceKeepRuns: 20,
+    continueOnUnknownCost: false,
     ...overrides,
   };
 }
@@ -83,6 +86,7 @@ const RUN_RESULT: RunStyreResult = {
   transcriptPath: "/tmp/transcript.jsonl",
   profilePath: "/tmp/profile.json",
   exitCode: 0,
+  outDir: "/tmp",
 };
 
 function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): CollectStageResult {
@@ -96,7 +100,7 @@ function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): Co
       escalation_reasons: [],
       outcome: "pr-ready",
       status: "ok",
-      cost_usd: 1.5,
+      cost_usd_measured: 1.5,
       tokens_in: 100,
       tokens_out: 50,
       parked: false,
@@ -111,7 +115,7 @@ function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): Co
 
 function infraStage(): CollectStageResult {
   return {
-    record: { taxonomy: "infra", cost_usd: 0.2 },
+    record: { taxonomy: "infra", cost_usd_measured: 0.2 },
     diff: "",
     addedTestPaths: [],
     transcript: "",
@@ -121,7 +125,12 @@ function infraStage(): CollectStageResult {
 
 function probeStage(): CollectStageResult {
   return {
-    record: { taxonomy: "probe", cost_usd: 0.1, self_authored_test: null, self_test_passed: null },
+    record: {
+      taxonomy: "probe",
+      cost_usd_measured: 0.1,
+      self_authored_test: null,
+      self_test_passed: null,
+    },
     diff: "",
     addedTestPaths: [],
     transcript: "",
@@ -304,7 +313,10 @@ describe("runInstance: whole-instance infra-retry", () => {
 
   test("perTaskCostCapUsd stops retrying even before maxInfraRetries is reached", async () => {
     const { deps, calls } = trackedDeps({
-      collect: async () => ({ ...infraStage(), record: { taxonomy: "infra", cost_usd: 10 } }),
+      collect: async () => ({
+        ...infraStage(),
+        record: { taxonomy: "infra", cost_usd_measured: 10 },
+      }),
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg({ perTaskCostCapUsd: 5 }), {
       deps,
@@ -349,6 +361,7 @@ describe("defaultCollectStage: styre-setup-failure -> probe (not infra)", () => 
       transcriptPath: "/nonexistent/transcript.jsonl",
       profilePath: "/nonexistent/profile.json",
       exitCode: SETUP_FAILED_EXIT,
+      outDir: "/nonexistent",
     });
     expect(record.record.taxonomy).toBe("probe");
     expect(record.record.status).toMatch(/setup/i);
@@ -514,6 +527,8 @@ describe("runPool: runBudgetUsd kill-switch", () => {
         language: inst.language,
         difficulty: inst.difficulty,
         styre_commit: "abc",
+        cost_usd_estimated: 0,
+        evidence_dir: "/runs/stub",
         cohort: "web-off",
         post_cutoff: false,
         resolved: true,
@@ -528,7 +543,7 @@ describe("runPool: runBudgetUsd kill-switch", () => {
         status: "ok",
         exit_code: 0,
         parked: false,
-        cost_usd: 6, // 3 instances -> 18, exceeds a budget of 15 after the 3rd
+        cost_usd_measured: 6, // 3 instances -> 18, exceeds a budget of 15 after the 3rd
         tokens_in: 0,
         tokens_out: 0,
         blind_quality: null,
@@ -564,6 +579,8 @@ describe("runPool: runBudgetUsd kill-switch", () => {
       language: inst.language,
       difficulty: inst.difficulty,
       styre_commit: "abc",
+      cost_usd_estimated: 0,
+      evidence_dir: "/runs/stub",
       cohort: "web-off",
       post_cutoff: false,
       resolved: true,
@@ -578,7 +595,7 @@ describe("runPool: runBudgetUsd kill-switch", () => {
       status: "ok",
       exit_code: 0,
       parked: false,
-      cost_usd: 1,
+      cost_usd_measured: 1,
       tokens_in: 0,
       tokens_out: 0,
       blind_quality: null,
@@ -696,37 +713,66 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
   });
 });
 
-describe("runInstance: cumulative cost_usd across infra retries (Task-11 capstone Fix 2)", () => {
-  test("an instance that consumed one infra-retry reports cost = sum of both attempts (+ setup), not just the last", async () => {
+describe("runInstance: cost accrual across attempts (ENG-390)", () => {
+  test("sums MEASURED cost across every attempt, including a retried-and-discarded one", async () => {
     let attempt = 0;
     const { deps } = trackedDeps({
       collect: async () => {
         attempt++;
         return attempt === 1
-          ? { ...infraStage(), record: { taxonomy: "infra", cost_usd: 2 } }
-          : { ...pendingStage(), record: { ...pendingStage().record, cost_usd: 1.5 } };
+          ? { ...infraStage(), record: { taxonomy: "infra", cost_usd_measured: 2 } }
+          : { ...pendingStage(), record: { ...pendingStage().record, cost_usd_measured: 1.5 } };
       },
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).not.toBe("infra");
     expect(rec.infra_retries).toBe(1);
-    // attempt 1: 2 (run cost) + 0.5 (setup estimate) = 2.5
-    // attempt 2: 1.5 (run cost) + 0.5 (setup estimate) = 2.0
-    // total: 4.5 -- NOT just the last attempt's raw 1.5 cost_usd.
-    expect(rec.cost_usd).toBeCloseTo(4.5, 5);
+    // 2 + 1.5, both MEASURED. No setup estimate is added on top: the transcript already
+    // covers styre setup's own agent calls, so adding one would double-count.
+    expect(rec.cost_usd_measured).toBeCloseTo(3.5, 5);
+    expect(rec.cost_usd_estimated).toBe(0);
   });
 
-  test("a single-attempt (no retry) instance still adds the fixed setup estimate on top of its own cost_usd", async () => {
+  test("a measured single attempt reports exactly what was measured, with no estimate bolted on", async () => {
     const { deps } = trackedDeps({
       collect: async () => ({
         ...pendingStage(),
-        record: { ...pendingStage().record, cost_usd: 3 },
+        record: { ...pendingStage().record, cost_usd_measured: 3 },
       }),
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
-    expect(rec.cost_usd).toBeCloseTo(3.5, 5);
+    expect(rec.cost_usd_measured).toBeCloseTo(3, 5);
+    expect(rec.cost_usd_estimated).toBe(0);
+  });
+
+  test("a container that ran but left nothing measurable falls back to the estimate, reported separately", async () => {
+    const { deps } = trackedDeps({
+      collect: async () => ({
+        ...pendingStage(),
+        record: { ...pendingStage().record, cost_usd_measured: null, evidence_dir: "/runs/x" },
+      }),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+
+    expect(rec.cost_usd_measured).toBeNull();
+    expect(rec.cost_usd_estimated).toBeCloseTo(0.5, 5);
+  });
+
+  test("an attempt that died BEFORE the container is charged nothing at all", async () => {
+    // The 2026-09-08 regression: a seed-stage failure with two infra retries billed $1.50
+    // without ever starting a container. No evidence_dir => no container => no estimate.
+    const { deps } = trackedDeps({
+      seed: async () => {
+        throw new Error("Bad credentials");
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.cost_usd_measured).toBeNull();
+    expect(rec.cost_usd_estimated).toBe(0);
   });
 });
 
@@ -856,7 +902,7 @@ describe("runInstance: SMOKE=2 Option-B oracle-bypass (bypassOracle:true)", () =
     expect(rec.resolved).toBeNull();
 
     // the rest of the record still populates normally.
-    expect(rec.cost_usd).toBeGreaterThan(0);
+    expect(rec.cost_usd_measured).toBeGreaterThan(0);
     expect(rec.pr_opened).toBe(true);
     expect(rec.blind_quality).toBe("addresses-issue");
     expect(rec.ab_preference).toBe("A(styre)");

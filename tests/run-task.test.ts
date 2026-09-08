@@ -482,6 +482,7 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
       transcriptPath: "/host/out/abc123/transcript.jsonl",
       profilePath: "/host/out/abc123/profile.json",
       exitCode: 0,
+      outDir: "/host/out/abc123",
     });
   });
 
@@ -665,6 +666,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
               exitCode: 0,
+              outDir: "/out",
             };
           },
           readDiff: async () => "",
@@ -700,6 +702,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
             exitCode: 0,
+            outDir: "/out",
           }),
           readDiff: async () => "diff --git a/README.md b/README.md\n+unrelated change\n",
           readTranscript: async () => JSON.stringify({ type: "tool_use", name: "Read", input: {} }),
@@ -730,6 +733,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
               exitCode: 1,
+              outDir: "/out",
             }),
             readDiff: async () => "",
             readTranscript: async () => "",
@@ -760,6 +764,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
               exitCode: 0,
+              outDir: "/out",
             }),
             readDiff: async () => "",
             readTranscript: async () => "",
@@ -790,6 +795,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
               exitCode: 0,
+              outDir: "/out",
             }),
             readDiff: async () => "",
             readTranscript: async () => null,
@@ -819,6 +825,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
             exitCode: 0,
+            outDir: "/out",
           }),
           readDiff: async () =>
             "diff --git a/PLAN.md b/PLAN.md\n+The page title is: Example Domain\n",

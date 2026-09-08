@@ -41,7 +41,9 @@ function makeRecord(overrides: Partial<TaskRecord> & { instance: string }): Task
     status: "ok",
     exit_code: 0,
     parked: false,
-    cost_usd: 3,
+    cost_usd_measured: 3,
+    cost_usd_estimated: 0,
+    evidence_dir: "/runs/base",
     tokens_in: 1000,
     tokens_out: 200,
     blind_quality: null,
@@ -66,7 +68,7 @@ const r1 = makeRecord({
   ab_preference: "A(styre)",
   ticks: 6,
   cycle_count: 1,
-  cost_usd: 3.0,
+  cost_usd_measured: 3.0,
 });
 
 const r2 = makeRecord({
@@ -81,7 +83,7 @@ const r2 = makeRecord({
   ab_preference: "tie",
   ticks: 8,
   cycle_count: 1,
-  cost_usd: 3.5,
+  cost_usd_measured: 3.5,
 });
 
 const r3 = makeRecord({
@@ -99,7 +101,7 @@ const r3 = makeRecord({
   cycle_count: 4,
   escalation_count: 1,
   escalation_reasons: ["verify-red-exhausted"],
-  cost_usd: 6.4,
+  cost_usd_measured: 6.4,
 });
 
 const r4 = makeRecord({
@@ -116,7 +118,7 @@ const r4 = makeRecord({
   cycle_count: 5,
   escalation_count: 2,
   escalation_reasons: ["no-progress"],
-  cost_usd: 7.0,
+  cost_usd_measured: 7.0,
 });
 
 const r5 = makeRecord({
@@ -131,7 +133,7 @@ const r5 = makeRecord({
   ab_preference: null,
   ticks: 7,
   cycle_count: 1,
-  cost_usd: 3.2,
+  cost_usd_measured: 3.2,
 });
 
 const r6 = makeRecord({
@@ -146,7 +148,7 @@ const r6 = makeRecord({
   ab_preference: "A(styre)",
   ticks: 9,
   cycle_count: 2,
-  cost_usd: 4.0,
+  cost_usd_measured: 4.0,
 });
 
 const r7 = makeRecord({
@@ -397,7 +399,7 @@ describe("renderReport", () => {
         pr_opened: true,
         taxonomy: "resolved",
         ticks,
-        cost_usd: resolvedCosts[i] ?? 0,
+        cost_usd_measured: resolvedCosts[i] ?? 0,
         blind_quality: resolvedBlindQuality[i] ?? null,
       }),
     );
@@ -411,7 +413,7 @@ describe("renderReport", () => {
         pr_opened: false,
         taxonomy: "opened-but-unresolved",
         ticks,
-        cost_usd: unresolvedCosts[i] ?? 0,
+        cost_usd_measured: unresolvedCosts[i] ?? 0,
         blind_quality: unresolvedBlindQuality[i] ?? null,
       }),
     );
@@ -442,7 +444,7 @@ describe("renderReport", () => {
       resolved: null,
       pr_opened: true,
       taxonomy: "unscored",
-      cost_usd: 4.2,
+      cost_usd_measured: 4.2,
       blind_quality: "addresses-issue",
       ab_preference: "A(styre)",
     });

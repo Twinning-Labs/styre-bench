@@ -157,3 +157,6 @@ __pycache__/
 
 # operator-specific run config (styre pin, Linear project id) — NEVER commit; cp config/bench.config.example.ts to seed it.
 config/bench.config.ts
+
+# ENG-393: durable per-run evidence dirs (sot.db, transcripts) — local only
+runs

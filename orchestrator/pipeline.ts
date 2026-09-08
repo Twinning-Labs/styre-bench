@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import { collect as collectPure, extractStrippedDiff } from "./collect";
 import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
+import { evidenceDirName, pruneEvidenceDirs } from "./evidence";
 import { addedPaths } from "./firewall";
 import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
@@ -25,6 +27,7 @@ import type { RunSeed, RunStyreResult } from "./run-task";
 import { seedGithub } from "./seed-github";
 import { seedLinear } from "./seed-linear";
 import type { Instance, TaskRecord } from "./types";
+import { sumTranscriptUsage } from "./usage";
 
 /** The subset of `BENCH_CONFIG` (plus a few sibling fields the pipeline reads) every stage
  *  here needs — kept as `typeof BENCH_CONFIG` (type-only import, matches `corpus.ts`'s own
@@ -256,12 +259,18 @@ export async function defaultCollectStage(
   // transcript (claude's stream from the enrichment attempts) is still read for diagnostics.
   if (result.exitCode === SETUP_FAILED_EXIT) {
     const transcript = await readFile(result.transcriptPath, "utf8").catch(() => "");
+    // Even a failed setup burned real money on its enrichment calls — recover it (ENG-390).
+    const usage = sumTranscriptUsage(transcript);
     return {
       record: {
         taxonomy: "probe",
         status: "styre setup failed — no usable profile produced (setup/enrichment gap)",
         self_authored_test: null,
         self_test_passed: null,
+        cost_usd_measured: usage.costUsd,
+        tokens_in: usage.tokensIn,
+        tokens_out: usage.tokensOut,
+        evidence_dir: result.outDir,
       },
       diff: "",
       addedTestPaths: [],
@@ -292,7 +301,25 @@ export async function defaultCollectStage(
   const strippedDiff = extractStrippedDiff(rawDiff);
   const addedTestPaths = addedPaths(strippedDiff);
 
-  return { record, diff: strippedDiff, addedTestPaths, transcript, pr_opened };
+  // ENG-390: styre's summary reports null cost/tokens for every dispatch, because the
+  // container's `claude` wrapper hands it plain text (see usage.ts). The real numbers are in
+  // the transcript the same wrapper tees — including `styre setup`'s own agent calls, which
+  // is why no separate setup estimate is needed whenever a transcript exists.
+  const usage = sumTranscriptUsage(transcript);
+
+  return {
+    record: {
+      ...record,
+      cost_usd_measured: usage.costUsd,
+      tokens_in: usage.tokensIn,
+      tokens_out: usage.tokensOut,
+      evidence_dir: result.outDir,
+    },
+    diff: strippedDiff,
+    addedTestPaths,
+    transcript,
+    pr_opened,
+  };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -345,6 +372,15 @@ async function defaultRunStage(
   return runStyre(inst, seed, binaryPath, {
     cohort: cfg.cohort,
     repoDirInImage: inst.repoDirInImage,
+    // ENG-393: durable, operator-rooted evidence dir. Previously this fell through to
+    // run-task's os.tmpdir() default and the OS reclaimed a run's sot.db + transcript
+    // overnight, destroying the only record of why that run behaved as it did.
+    outDir: path.join(
+      path.isAbsolute(cfg.evidenceRoot)
+        ? cfg.evidenceRoot
+        : path.join(process.cwd(), cfg.evidenceRoot),
+      evidenceDirName(inst.id, new Date(), randomUUID().slice(0, 8)),
+    ),
   });
 }
 
@@ -387,12 +423,18 @@ function buildDefaultDeps(retainOnFailure: boolean): PipelineDeps {
 const DEFAULT_MAX_INFRA_RETRIES = 2;
 
 /**
- * Fixed per-instance estimate for the mandatory `styre setup` Opus call, which emits NO
- * `summary`/cost telemetry of its own (`run-task.ts`'s entrypoint step 5 — a bare CLI
- * invocation, not a `styre run` that produces a `summary` event). `perTaskCostCapUsd`
- * enforcement below adds this on top of each attempt's OWN measured `cost_usd` (from
- * `styre run`'s summary) — the cap covers the run cost AND this estimate, but this estimate
- * is never claimed to be a measured value (Task-11 brief note).
+ * LAST-RESORT floor for an attempt whose container ran but whose transcript yielded no
+ * measurable cost (ENG-390).
+ *
+ * This used to be charged unconditionally, once per attempt, as the ONLY cost input — because
+ * styre reports null cost for every dispatch (the container's `claude` wrapper hands it plain
+ * text). Reported cost therefore degenerated to `attempts x $0.50`: the 2026-09-08 astropy run
+ * reported $0.50 against $11.84 actually spent, and a seed-stage failure that never started a
+ * container still billed $1.50.
+ *
+ * Now cost is MEASURED from the transcript (`usage.ts`), which covers `styre setup`'s own agent
+ * calls too. This estimate applies only when the container ran and left nothing measurable, and
+ * it is reported in `cost_usd_estimated`, never merged into the measured figure.
  */
 const SETUP_COST_ESTIMATE_USD = 0.5;
 
@@ -416,9 +458,11 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     status: "",
     exit_code: 0,
     parked: false,
-    cost_usd: 0,
-    tokens_in: 0,
-    tokens_out: 0,
+    cost_usd_measured: null,
+    cost_usd_estimated: 0,
+    tokens_in: null,
+    tokens_out: null,
+    evidence_dir: null,
     blind_quality: null,
     ab_preference: null,
     ab_notes: null,
@@ -582,7 +626,7 @@ async function runJudgmentStages(
  * 2. seed -> run -> collect, wrapped in a whole-instance infra-retry loop: retried (capped at
  *    `maxInfraRetries`, default 2) ONLY when the attempt's `taxonomy === "infra"` — a quality
  *    outcome (e.g. `opened-but-unresolved`, `loop-exhausted`, `parked`) is a terminal result,
- *    never retried. Each attempt's `cost_usd` (+ the fixed `SETUP_COST_ESTIMATE_USD`) accrues
+ *    never retried. Each attempt's MEASURED cost (+ the estimate floor only when the
  *    against `cfg.perTaskCostCapUsd`; once that cap would be exceeded, retrying stops even if
  *    `maxInfraRetries` hasn't been reached yet (enforces `perTaskCostCapUsd`, per the brief).
  * 3. probe short-circuit: if the final attempt's `taxonomy === "probe"` (an unrunnable
@@ -609,8 +653,9 @@ async function runJudgmentStages(
  * `resolved` verdict, the diff, or the rest of the record.
  *
  * COST CONTRACT (Task-11 capstone reviews, Fix 2): the returned `cost_usd` is
- * `taskSpentUsd` — the SUM of every attempt's own `cost_usd` plus one
- * `SETUP_COST_ESTIMATE_USD` per attempt (including retried-and-discarded attempts), never
+ * split into `cost_usd_measured` (the SUM of every attempt's transcript-measured cost,
+ * including retried-and-discarded attempts; null if never measured) and `cost_usd_estimated`,
+ * never
  * just the last attempt's cost alone. This is what `runPool`'s `runBudgetUsd` kill-switch
  * and the report's cost stats sum over, so it must reflect true cumulative spend.
  */
@@ -635,7 +680,9 @@ export async function runInstance(
   }
 
   let infraRetries = 0;
-  let taskSpentUsd = 0;
+  // Measured stays null until something is actually measured — see TaskRecord.cost_usd_measured.
+  let taskMeasuredUsd: number | null = null;
+  let taskEstimatedUsd = 0;
   let stage: CollectStageResult = infraStageFromError(
     new Error("runInstance: internal error — the attempt loop never ran"),
     "internal",
@@ -649,7 +696,15 @@ export async function runInstance(
   for (;;) {
     const attempt = await attemptOnce(inst, binaries, cfg, deps);
     stage = attempt.stage;
-    taskSpentUsd += (stage.record.cost_usd ?? 0) + SETUP_COST_ESTIMATE_USD;
+    // ENG-390: prefer the measured transcript total. Charge the estimate ONLY when the
+    // container actually ran (evidence_dir is set) but left nothing measurable — an attempt
+    // that died before the container, e.g. at seed, spent nothing and is charged nothing.
+    const attemptMeasured = stage.record.cost_usd_measured ?? null;
+    if (attemptMeasured !== null) {
+      taskMeasuredUsd = (taskMeasuredUsd ?? 0) + attemptMeasured;
+    } else if (stage.record.evidence_dir) {
+      taskEstimatedUsd += SETUP_COST_ESTIMATE_USD;
+    }
     scoreResult = undefined;
 
     if (!bypassOracle && stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
@@ -677,7 +732,7 @@ export async function runInstance(
     const canRetry =
       stage.record.taxonomy === "infra" &&
       infraRetries < maxInfraRetries &&
-      taskSpentUsd < cfg.perTaskCostCapUsd;
+      (taskMeasuredUsd ?? 0) + taskEstimatedUsd < cfg.perTaskCostCapUsd;
     if (canRetry) {
       infraRetries++;
       continue;
@@ -692,7 +747,8 @@ export async function runInstance(
       taxonomy: "infra",
       pr_opened: stage.pr_opened,
       infra_retries: infraRetries,
-      cost_usd: taskSpentUsd,
+      cost_usd_measured: taskMeasuredUsd,
+      cost_usd_estimated: taskEstimatedUsd,
     };
   }
 
@@ -702,7 +758,8 @@ export async function runInstance(
     pr_opened: stage.pr_opened,
     infra_retries: infraRetries,
     taxonomy: stage.record.taxonomy ?? base.taxonomy,
-    cost_usd: taskSpentUsd,
+    cost_usd_measured: taskMeasuredUsd,
+    cost_usd_estimated: taskEstimatedUsd,
   };
 
   if (stage.record.taxonomy === "probe") {
@@ -841,7 +898,12 @@ export async function runPool(
         };
       }
       results[idx] = record;
-      spentUsd += record.cost_usd;
+      // ENG-390: an unmeasurable run must NEVER read as free. If the container ran (so it
+      // certainly spent money) but left nothing measurable, stop the sweep instead of
+      // spending blind — unless the operator explicitly opted in via continueOnUnknownCost.
+      const unmeasured = Boolean(record.evidence_dir) && record.cost_usd_measured === null;
+      spentUsd += (record.cost_usd_measured ?? 0) + record.cost_usd_estimated;
+      if (unmeasured && !cfg.continueOnUnknownCost) budgetExceeded = true;
       if (spentUsd >= cfg.runBudgetUsd) budgetExceeded = true;
     }
   }
@@ -933,6 +995,19 @@ export async function runPilot(
 ): Promise<RenderReportResult> {
   const deps: RunPilotDeps = { ...defaultRunPilotDeps, ...opts.deps };
   const outDir = opts.outDir ?? path.join(process.cwd(), "report", "out");
+
+  // ENG-393: prune old evidence to the operator's retention setting BEFORE the run, so a
+  // sweep never trips over a full disk mid-flight and so retention is a deliberate act
+  // rather than something the OS does behind our back. Best-effort by design.
+  const evidenceRoot = path.isAbsolute(cfg.evidenceRoot)
+    ? cfg.evidenceRoot
+    : path.join(process.cwd(), cfg.evidenceRoot);
+  const pruned = await pruneEvidenceDirs(evidenceRoot, cfg.evidenceKeepRuns);
+  if (pruned.length > 0) {
+    console.error(
+      `[evidence] pruned ${pruned.length} run dir(s), keeping the ${cfg.evidenceKeepRuns} most recent under ${evidenceRoot}`,
+    );
+  }
 
   const [pythonPool, tsPool] = await Promise.all([
     deps.loadInstances("swe-bench", cfg),
