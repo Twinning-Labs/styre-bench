@@ -90,6 +90,28 @@ jobs:
               print("```json"); print(json.dumps(d, indent=2)); print("```")
           PY
 
+      # A transport failure means scoring never happened, so the job must go RED — otherwise
+      # `continue-on-error` above makes a broken run indistinguishable from a successful one in
+      # the checks list. A genuine `resolved: false` is a real verdict and stays GREEN: the
+      # scoring worked, the answer was no. Job colour therefore means "did we get a verdict",
+      # never "was the verdict good".
+      - name: Fail the job if no verdict was produced
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path("scorer-out.json")
+          if not p.exists() or not p.read_text().strip():
+              sys.exit("no scorer output: scoring did not complete")
+          d = json.loads(p.read_text())
+          if "error" in d:
+              sys.exit(f"transport failure, not a verdict: {d['error']}")
+          if "resolved" not in d:
+              sys.exit(f"scorer returned no `resolved` field: {sorted(d)}")
+          print(f"verdict produced: resolved={d['resolved']}")
+          PY
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
