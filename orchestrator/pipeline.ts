@@ -18,7 +18,7 @@ import { collect as collectPure, extractStrippedDiff } from "./collect";
 import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
-import { evidenceDirName, pruneEvidenceDirs } from "./evidence";
+import { evidenceDirName, persistCandidateDiff, pruneEvidenceDirs } from "./evidence";
 import { addedPaths } from "./firewall";
 import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
@@ -705,6 +705,11 @@ export async function runInstance(
     } else if (stage.record.evidence_dir) {
       taskEstimatedUsd += SETUP_COST_ESTIMATE_USD;
     }
+    // Capture the diff BEFORE the oracle runs and before cleanup deletes the scratch repo.
+    // The diff used to live only in the throwaway PR, so the success path destroyed the one
+    // artifact the oracle needs; capturing it here is what makes a run scoreable afterwards.
+    await persistCandidateDiff(stage.record.evidence_dir, stage.diff);
+
     scoreResult = undefined;
 
     if (!bypassOracle && stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
