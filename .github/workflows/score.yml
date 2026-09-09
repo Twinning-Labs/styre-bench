@@ -1,0 +1,122 @@
+name: score
+
+# Runs the SWE-bench oracle on x86-64 Linux. styre itself runs locally (macOS) and
+# produces a diff; only scoring needs this runner, because the harness requires
+# `sweb.env.py.x86_64.*` images that do not exist for arm64.
+#
+# No secrets: scoring needs no agent key and no GitHub token beyond the default.
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_path:
+        description: "payload.json — instance id + language + candidate diff ONLY, never corpus fields"
+        required: true
+        default: scoring/payload.json
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # SWE-bench environment and instance images are large; the standard runner has
+      # roughly 14 GB free. Removing preinstalled toolchains frees ~25 GB more.
+      - name: Reclaim disk
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install scorer deps
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r scorer/requirements.txt
+
+      - name: Guard — the payload must carry no corpus fields
+        run: |
+          set -euo pipefail
+          python - "${{ inputs.payload_path }}" <<'PY'
+          import json, sys
+          raw = open(sys.argv[1]).read()
+          for forbidden in ("fix_patch", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS"):
+              if forbidden in raw:
+                  sys.exit(f"FIREWALL: payload contains '{forbidden}'; it must carry only "
+                           "an instance id, a language and the candidate diff.")
+          d = json.loads(raw)
+          assert set(d) == {"instance", "candidate_diff"}, f"unexpected payload keys: {sorted(d)}"
+          print(f"payload ok: {d['instance']} diff={len(d['candidate_diff'])} bytes")
+          PY
+
+      # A transport failure is a harness problem to investigate, never `resolved: false`
+      # (scorer/score.py's own contract). Keep going so the summary still renders.
+      - name: Score
+        id: score
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./.venv/bin/python scorer/score.py score \
+            < "${{ inputs.payload_path }}" > scorer-out.json
+          cat scorer-out.json
+
+      - name: Summarise
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("scorer-out.json")
+          if not p.exists() or not p.read_text().strip():
+              print("## Scoring produced no output")
+              print("The scorer failed before writing its JSON. See the Score step log.")
+              raise SystemExit(0)
+          d = json.loads(p.read_text())
+          if "error" in d:
+              print("## Transport failure — not a verdict\n")
+              print(f"`{d['error']}`\n")
+              print("Per `scorer/score.py`, this is a harness/transport failure to investigate. "
+                    "It is explicitly NOT `resolved: false`.")
+          else:
+              print(f"## resolved = `{d.get('resolved')}`\n")
+              print("```json"); print(json.dumps(d, indent=2)); print("```")
+          PY
+
+      # A transport failure means scoring never happened, so the job must go RED — otherwise
+      # `continue-on-error` above makes a broken run indistinguishable from a successful one in
+      # the checks list. A genuine `resolved: false` is a real verdict and stays GREEN: the
+      # scoring worked, the answer was no. Job colour therefore means "did we get a verdict",
+      # never "was the verdict good".
+      - name: Fail the job if no verdict was produced
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path("scorer-out.json")
+          if not p.exists() or not p.read_text().strip():
+              sys.exit("no scorer output: scoring did not complete")
+          d = json.loads(p.read_text())
+          if "error" in d:
+              sys.exit(f"transport failure, not a verdict: {d['error']}")
+          if "resolved" not in d:
+              sys.exit(f"scorer returned no `resolved` field: {sorted(d)}")
+          print(f"verdict produced: resolved={d['resolved']}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scorer-output
+          path: |
+            scorer-out.json
+            logs/run_evaluation/**
+          if-no-files-found: warn
