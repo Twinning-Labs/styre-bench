@@ -35,18 +35,25 @@ workflow that refuses any payload containing a corpus field.
 
 ## Running it
 
-1. **Run styre locally** and keep the diff it produced.
+1. **Run styre locally.** The run writes its candidate diff to
+   `<evidence_dir>/candidate.diff`, where `evidence_dir` is the value on that instance's row in
+   `report/out/report.json`. It is captured before the oracle and before cleanup, so a
+   successful run no longer destroys the artifact the oracle needs.
 
    ```bash
    ONLY=astropy__astropy-12907 bun bin/run-pilot.ts
+   DIFF="$(python3 -c "import json;print(json.load(open('report/out/report.json'))[0]['evidence_dir'])")/candidate.diff"
    ```
 
 2. **Build the payload.**
 
    ```bash
-   bun bin/emit-score-payload.ts astropy__astropy-12907 python /path/to/candidate.diff \
-     > scoring/payload.json
+   bun bin/emit-score-payload.ts astropy__astropy-12907 python "$DIFF" > scoring/payload.json
    ```
+
+   An **empty** `candidate.diff` is a real finding, not a missing file: every attempt so far
+   produced one, because the branch never reached the remote. Score it anyway — the oracle
+   returns `resolved: false` for an empty patch, which is a true verdict about that run.
 
 3. **Commit it and dispatch the workflow.**
 

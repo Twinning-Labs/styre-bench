@@ -87,3 +87,34 @@ export async function pruneEvidenceDirs(root: string, keep: number): Promise<str
   }
   return removed;
 }
+
+/** Filename the candidate diff is written under, inside a run's evidence dir. Fixed by
+ *  convention so a report row's `evidence_dir` is enough to locate it — no extra field. */
+export const CANDIDATE_DIFF_NAME = "candidate.diff";
+
+/**
+ * Persist the candidate diff alongside the run's other evidence.
+ *
+ * WHY: the diff previously existed only in the throwaway pull request, and `cleanup` deletes
+ * that repo on a successful attempt — so the artifact the oracle needs was destroyed by the
+ * success path. Combined with the run dir living in the system temp dir before ENG-393, a
+ * completed run left nothing to score, which is why no scored verdict has ever been produced.
+ *
+ * BEST-EFFORT by design. The diff is evidence and a scoring input, never a run output: a write
+ * failure must not fail a run that otherwise succeeded. Returns the path written, or `null`.
+ */
+export async function persistCandidateDiff(
+  evidenceDir: string | null | undefined,
+  diff: string,
+): Promise<string | null> {
+  if (!evidenceDir) return null;
+  const { writeFile } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const target = path.join(evidenceDir, CANDIDATE_DIFF_NAME);
+  try {
+    await writeFile(target, diff, "utf8");
+    return target;
+  } catch {
+    return null; // evidence capture never fails a run
+  }
+}
