@@ -157,6 +157,7 @@ class SweBenchAdapter(OracleAdapter):
 
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         import docker
+        from swebench.harness.docker_build import build_env_images
         from swebench.harness.run_evaluation import run_instance
         from swebench.harness.test_spec.test_spec import make_test_spec
 
@@ -169,6 +170,16 @@ class SweBenchAdapter(OracleAdapter):
             KEY_PREDICTION: candidate_diff,
         }
         client = docker.from_env()
+        # BUILD THE ENVIRONMENT IMAGE FIRST. `run_instance` -> `build_container` ->
+        # `build_instance_image` RAISES if the env image is absent; it never builds one. In the
+        # harness's own flow that phase is performed by `main()`, which this adapter
+        # deliberately bypasses (see the module docstring: `main()` filters empty patches out
+        # before starting a container, which would break `run_controls`). Bypassing `main()`
+        # skipped the build phase with it, so EVERY scoring attempt failed with "Environment
+        # image sweb.env.* not found" -- on x86-64 Linux as well as arm64, which is why the
+        # architecture was a red herring. `build_env_images` calls `build_base_images` itself,
+        # so this one call covers both layers, and it is a no-op when the images already exist.
+        build_env_images(client, [raw], force_rebuild=False, max_workers=1)
         # Fresh run_id per call: run_instance() short-circuits on an existing
         # report.json, which would otherwise hand back a stale cached verdict
         # (e.g. the gold-patch result) for a later empty-candidate control call.
@@ -214,7 +225,12 @@ class SweBenchAdapter(OracleAdapter):
 
         import docker
         from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
-        from swebench.harness.docker_build import build_container, close_logger, setup_logger
+        from swebench.harness.docker_build import (
+            build_container,
+            build_env_images,
+            close_logger,
+            setup_logger,
+        )
         from swebench.harness.docker_utils import cleanup_container, copy_to_container, exec_run_with_timeout
         from swebench.harness.test_spec.test_spec import make_test_spec
         from pathlib import PurePosixPath
@@ -223,6 +239,9 @@ class SweBenchAdapter(OracleAdapter):
         raw = self._raw_instance(instance_id)
         test_spec = make_test_spec(raw)
         client = docker.from_env()
+        # Same prerequisite as `score`: `build_container` -> `build_instance_image` raises when
+        # the env image is absent and never builds one. No-op once the images exist.
+        build_env_images(client, [raw], force_rebuild=False, max_workers=1)
         run_id = f"styre-bench-selftest-{uuid.uuid4().hex}"
         log_dir = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id
         log_dir.mkdir(parents=True, exist_ok=True)

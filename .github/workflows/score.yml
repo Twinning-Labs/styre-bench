@@ -79,7 +79,14 @@ jobs:
               print("## Scoring produced no output")
               print("The scorer failed before writing its JSON. See the Score step log.")
               raise SystemExit(0)
-          d = json.loads(p.read_text())
+          raw = p.read_text()
+          try:
+              d = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print("## Unparseable scorer output\n")
+              print(f"`{exc}`\n")
+              print("```"); print(raw[:2000]); print("```")
+              raise SystemExit(0)
           if "error" in d:
               print("## Transport failure — not a verdict\n")
               print(f"`{d['error']}`\n")
@@ -104,7 +111,11 @@ jobs:
           p = pathlib.Path("scorer-out.json")
           if not p.exists() or not p.read_text().strip():
               sys.exit("no scorer output: scoring did not complete")
-          d = json.loads(p.read_text())
+          raw = p.read_text()
+          try:
+              d = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              sys.exit(f"scorer output is not JSON ({exc}); first bytes: {raw[:200]!r}")
           if "error" in d:
               sys.exit(f"transport failure, not a verdict: {d['error']}")
           if "resolved" not in d:
