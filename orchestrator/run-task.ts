@@ -335,15 +335,22 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     //                     (swebench/harness/test_spec/python.py). Working tree is clean.
     //   SWE-bench JS      no such commit -- javascript.py has no equivalent block, so setup
     //                     edits can remain uncommitted.
-    //   Multi-SWE-bench   HEAD == base.sha (clone -> reset --hard -> checkout base.sha), but
-    //                     prepare.sh runs npm/bower install and config copies, which dirty
-    //                     tracked files such as package-lock.json.
+    //   Multi-SWE-bench   HEAD == base.sha (clone -> reset --hard -> checkout base.sha), no
+    //                     extra commit. VERIFIED on a pulled image
+    //                     (mswebench/darkreader_m_darkreader:pr-7241): HEAD is exactly the
+    //                     corpus base.sha and the tree is CLEAN -- prepare.sh's `npm install`
+    //                     ran, but node_modules is gitignored, so nothing tracked was dirtied.
+    //                     Neither pollution mode is present there, and the baseline is simply
+    //                     an empty commit. Not asserted for every MSB repo: prepare.sh is
+    //                     per-repo and free to touch tracked files (a config copy, a lockfile
+    //                     rewrite), so the baseline still has to handle it.
     //
-    // So pre-existing state appears BOTH as extra commits and as a dirty tree, depending on the
-    // image. Diffing against the upstream base_commit (which is what the seeded GitHub PR's
-    // merge-base gives) picks up the extra commits; diffing against HEAD alone picks up the
-    // dirty tree. One commit here collapses both: everything already present becomes the
-    // baseline, and the candidate diff is taken against it.
+    // So pre-existing state appears as extra commits on SWE-bench Python, and may appear as a
+    // dirty tree elsewhere. Diffing against the upstream base_commit (which is what the seeded
+    // GitHub PR's merge-base gives) picks up the extra commits; diffing against HEAD alone
+    // would pick up any dirty tree. One commit here collapses both: everything already present
+    // becomes the baseline, and the candidate diff is taken against it. `--allow-empty` is what
+    // makes the already-clean case (MSB) work rather than fail.
     //
     // This is exactly what SWE-bench itself does, one level earlier, and for the same stated
     // reason -- see the comment above their clean_diff_commands: "If the setup modifies the
