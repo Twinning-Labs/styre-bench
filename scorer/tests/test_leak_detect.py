@@ -769,3 +769,70 @@ def test_an_upstream_URL_is_excused_only_when_the_harness_supplied_that_exact_ur
     assert "pr-url-in-transcript" in detect_leak(
         INDEPENDENT_DIFF, FIX_PATCH, transcript, problem_statement="Fixes #555."
     )["reasons"]
+
+
+# -- tooling boilerplate is not agent behaviour (false-positive fix) -----------
+
+
+COMMIT_WITH_TRAILER = (
+    "git commit -m \"$(cat <<'EOF'\\nAdd ENG-406 plan\\n\\n"
+    "\\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)\\n\\n"
+    "Co-Authored-By: Claude <noreply@anthropic.com>\\nEOF\\n)\""
+)
+
+
+def test_the_claude_code_attribution_trailer_is_not_a_leak():
+    """ENG-406 came back suspected on nothing but styre's own commit boilerplate.
+
+    Every `git commit -m` heredoc carries the attribution trailer, which contains a URL. The agent
+    did not go looking for it — the tooling put it there.
+    """
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": COMMIT_WITH_TRAILER}}],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="o__r-1")
+    assert "url-in-transcript" not in result["reasons"]
+    assert result["suspected"] is False
+
+
+def test_a_real_url_alongside_the_trailer_is_still_a_leak():
+    # Stripping boilerplate must not blind the scan to everything else in the same message.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": f"See https://example.invalid/patch\n{COMMIT_WITH_TRAILER}"}
+                ],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="o__r-1")
+    assert "url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_boilerplate_stripping_never_hides_a_web_tool_call():
+    # The strong signal runs against the UNMODIFIED text and tool list.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "WebFetch", "input": {"url": "example.invalid"}},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": COMMIT_WITH_TRAILER}},
+                ],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="o__r-1")
+    assert "web-tool-used" in result["reasons"]
+    assert result["suspected"] is True

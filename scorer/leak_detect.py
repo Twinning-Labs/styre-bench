@@ -207,6 +207,29 @@ def _diff_containment(candidate_diff: str, fix_patch: str) -> float | None:
     return len(fix_changed & candidate_changed) / len(fix_changed)
 
 
+# Text the TOOLING injects into agent-authored content. Same principle as the harness-supplied
+# issue numbers: something styre or the agent CLI puts there is not evidence the agent went
+# looking for it. Observed on darkreader__darkreader-7241 (ENG-406), where the run came back
+# suspected purely because every `git commit -m` heredoc carried the Claude Code attribution
+# trailer, which contains a URL:
+#
+#     🤖 Generated with [Claude Code](https://claude.com/claude-code)
+#     Co-Authored-By: Claude <noreply@anthropic.com>
+#
+# Stripped before the URL scan, never before the web-tool scan — a real WebFetch is still a real
+# WebFetch regardless of what else is in the text.
+_TOOLING_BOILERPLATE = (
+    re.compile(r"Generated with \[Claude Code\]\(https?://[^)\s]+\)", re.IGNORECASE),
+    re.compile(r"Co-Authored-By:[^\n\\]*", re.IGNORECASE),
+)
+
+
+def strip_tooling_boilerplate(text: str) -> str:
+    for pattern in _TOOLING_BOILERPLATE:
+        text = pattern.sub("", text)
+    return text
+
+
 def _agent_authored(transcript: str) -> tuple[str | None, list[str]]:
     """Split a stream-json transcript into what the AGENT wrote vs what it merely OBSERVED.
 
@@ -280,7 +303,9 @@ def _scan_agent_transcript(
         agent_text = transcript
     if any(name in _WEB_TOOLS for name in tool_names) or _NET_CMD_RE.search(agent_text):
         reasons.append("web-tool-used")
-    reasons.extend(_scan_transcript(agent_text, own_numbers, harness_text))
+    # Boilerplate is stripped for the URL/PR scan only; `web-tool-used` above already ran against
+    # the unmodified text and tool list.
+    reasons.extend(_scan_transcript(strip_tooling_boilerplate(agent_text), own_numbers, harness_text))
     return reasons
 
 

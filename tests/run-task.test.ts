@@ -1039,3 +1039,68 @@ describe("webOffProbe: LIVE behavioral web-off check — RUN_LIVE=1 only", () =>
     },
   );
 });
+
+describe("container naming (leak-on-kill guard)", () => {
+  test("buildDockerArgs passes --name so a leftover container is findable", () => {
+    // `--rm` removes a container when it EXITS. A killed pilot never causes that: the docker
+    // client dies and the daemon keeps the container. One was found running four hours after
+    // its pilot was killed. The name is what lets the start-of-run reaper find it.
+    const args = buildDockerArgs({
+      image: "img",
+      binaryPath: "/b",
+      outDir: "/o",
+      entrypointHostPath: "/e",
+      containerName: "styre-bench-abc",
+      creds: {
+        anthropicApiKey: "a",
+        linearApiKey: "l",
+        githubToken: "g",
+        benchGhToken: "b",
+        slackBotToken: "",
+      },
+    });
+    const i = args.indexOf("--name");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("styre-bench-abc");
+    expect(args).toContain("--rm");
+  });
+
+  test("omitting the name still produces a valid argv (legacy/fixture callers)", () => {
+    const args = buildDockerArgs({
+      image: "img",
+      binaryPath: "/b",
+      outDir: "/o",
+      entrypointHostPath: "/e",
+      creds: {
+        anthropicApiKey: "a",
+        linearApiKey: "l",
+        githubToken: "g",
+        benchGhToken: "b",
+        slackBotToken: "",
+      },
+    });
+    expect(args).not.toContain("--name");
+    expect(args[0]).toBe("run");
+  });
+
+  test("runStyre names the container after the run's evidence dir", async () => {
+    let seenName: string | undefined;
+    await runStyre(
+      makeInstance(),
+      makeSeed(),
+      "/host/dist/styre",
+      { outDir: "/host/out/abc123" },
+      {
+        deps: {
+          ensureOutDir: async () => {},
+          writeEntrypoint: async () => {},
+          spawnDocker: async (_args, containerName) => {
+            seenName = containerName;
+            return 0;
+          },
+        },
+      },
+    );
+    expect(seenName).toBe("styre-bench-abc123");
+  });
+});
