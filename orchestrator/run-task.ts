@@ -317,6 +317,34 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `echo ".styre-disposable" >> "${repoDirInImage}/.git/info/exclude"`,
     `touch "${repoDirInImage}/.styre-disposable"`,
     "",
+    // BASELINE THE IMAGE'S PRE-EXISTING DIRTY WORKING TREE.
+    //
+    // SWE-bench instance images ship with UNCOMMITTED environment edits already in the working
+    // tree -- astropy__astropy-12907 arrives with pyproject.toml pinned to setuptools==68.0.0,
+    // which is what makes that image's build work. styre runs --in-place and commits with
+    // `git add -A`, so without this those edits land in styre's fix commit and therefore in the
+    // candidate diff, which is captured against the CLEAN base commit seeded from GitHub.
+    //
+    // In the scoring container that hunk is already applied, so `git apply` (all-or-nothing)
+    // fails, `git apply --reject` exits non-zero, and swebench falls back to
+    // `patch --batch --fuzz=5 -p1`, which reports "Reversed (or previously applied) patch
+    // detected!  Assuming -R." and REVERTS -- taking the real fix in separable.py with it. The
+    // container then runs unmodified source and the instance scores resolved:false. Observed in
+    // run 34432706755, where styre had in fact solved the bug correctly.
+    //
+    // skip-worktree rather than `git checkout -- .` or `git stash`: the edits are load-bearing,
+    // so the file must KEEP its content on disk. skip-worktree only stops git reporting it as
+    // changed, which is exactly enough to keep `git add -A` from picking it up.
+    `git -C "${repoDirInImage}" status --porcelain=v1 > "${CONTAINER_OUT_DIR}/preexisting-dirty.txt" 2>/dev/null || true`,
+    // Unstage first (worktree content untouched): skip-worktree does not suppress an ALREADY
+    // STAGED change, which would otherwise still be committed.
+    `git -C "${repoDirInImage}" reset -q || true`,
+    // `--diff-filter=d` excludes deletions -- skip-worktree on an absent path is meaningless.
+    `git -C "${repoDirInImage}" diff --name-only -z --diff-filter=d | xargs -0 -r git -C "${repoDirInImage}" update-index --skip-worktree -- || true`,
+    // Untracked pre-existing files are invisible to skip-worktree; exclude them locally, the
+    // same way `.styre-disposable` is handled above.
+    `git -C "${repoDirInImage}" ls-files --others --exclude-standard >> "${repoDirInImage}/.git/info/exclude" || true`,
+    "",
     // SWE-bench Python images pre-build the repo's deps into a conda env named `testbed` and
     // activate it via ~/.bashrc — which only runs in a LOGIN/interactive shell. This entrypoint
     // is a non-login script, so testbed is never activated and styre would run against the BASE

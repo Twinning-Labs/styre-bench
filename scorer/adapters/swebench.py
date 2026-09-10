@@ -137,6 +137,62 @@ def parse_report(report: dict[str, Any], instance_id: str) -> dict[str, Any]:
     return {"resolved": resolved, "fail_to_pass": fail_to_pass, "pass_to_pass": pass_to_pass}
 
 
+# swebench applies a candidate patch by trying these in order, logging one line per failure:
+#     git apply --verbose
+#     git apply --verbose --reject
+#     patch --batch --fuzz=5 -p1 -i
+# Only the FIRST is a clean application. `--reject` tolerates dropped hunks, and the `patch`
+# fallback will report
+#     "Reversed (or previously applied) patch detected!  Assuming -R."
+# and REVERT hunks rather than apply them. In either case the container no longer holds the
+# candidate's changes -- yet swebench still records patch_successfully_applied: True, the tests
+# then fail against unmodified source, and the run yields a confident `resolved: false` for a
+# change that was never under test.
+#
+# Observed for real in run 34432706755: the candidate diff carried a pyproject.toml hunk the
+# SWE-bench image had already applied, so `git apply` failed, the fallback reverted the actual
+# fix in separable.py, and a correctly-solved instance scored resolved:false.
+#
+# A false negative corrupts a capability measurement exactly as badly as a false positive, so
+# this is an ERROR, never a verdict. score.py turns it into {"error": ...} and the workflow's
+# verdict gate takes the job red.
+_APPLY_FAILURE_MARKER = "Failed to apply patch to container"
+
+_APPLY_REMEDY = (
+    "The candidate diff must apply cleanly with plain `git apply` against the instance's base "
+    "commit. The usual cause is the diff carrying changes the image already has -- capture the "
+    "candidate diff against the image's own working-tree state, not just the base commit."
+)
+
+
+def _assert_patch_applied_cleanly(run_id: str, instance_id: str, candidate_diff: str) -> None:
+    """Raise unless the candidate patch applied with plain `git apply`.
+
+    An empty candidate diff is exempt: there is nothing to apply, and the empty-patch control
+    run in `run_controls` depends on it staying a legitimate scoring path.
+    """
+    if not candidate_diff.strip():
+        return
+    log_path = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id / "run_instance.log"
+    if not log_path.exists():
+        raise RuntimeError(
+            f"swebench: cannot verify patch application for {instance_id!r} -- expected "
+            f"{log_path} but it does not exist. Refusing to report a verdict that has not been "
+            f"shown to test the candidate diff."
+        )
+    log = log_path.read_text(errors="replace")
+    if _APPLY_FAILURE_MARKER not in log:
+        return
+    detail = [ln.strip() for ln in log.splitlines() if _APPLY_FAILURE_MARKER in ln or "Assuming -R" in ln]
+    raise RuntimeError(
+        f"swebench: the candidate patch for {instance_id!r} did not apply cleanly, so the "
+        f"container did not hold the candidate's changes and any verdict would be fabricated. "
+        f"swebench fell back past `git apply` and may have REVERTED hunks. "
+        f"Evidence from {log_path}: {' | '.join(detail) or '(marker present, no detail lines)'}. "
+        f"{_APPLY_REMEDY}"
+    )
+
+
 class SweBenchAdapter(OracleAdapter):
     def __init__(self, dataset_name: str = "princeton-nlp/SWE-bench_Verified", split: str = "test"):
         self.dataset_name = dataset_name
@@ -210,6 +266,10 @@ class SweBenchAdapter(OracleAdapter):
                 f"swebench: run_instance did not complete for {instance_id!r} "
                 f"(run_id={run_id}) -- see logs/run_evaluation/{run_id}/{_MODEL_NAME}/{instance_id}"
             )
+        # HARD-FAIL ON A DEGRADED APPLY. Must run BEFORE parse_report: a degraded apply still
+        # yields a well-formed report with patch_successfully_applied: True, so the verdict
+        # would look like a real answer.
+        _assert_patch_applied_cleanly(run_id, instance_id, candidate_diff)
         report_path = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id / LOG_REPORT
         if not report_path.exists():
             raise RuntimeError(f"swebench: expected report at {report_path} but it does not exist")

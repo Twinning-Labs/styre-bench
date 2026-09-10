@@ -84,6 +84,41 @@ describe("buildEntrypoint (pure)", () => {
     );
   });
 
+  test("baselines the image's pre-existing dirty tree before styre runs (false-negative guard)", () => {
+    const script = buildEntrypoint({ seed: makeSeed() });
+    // SWE-bench images arrive with uncommitted environment edits (astropy: pyproject.toml
+    // pinned to setuptools==68.0.0). styre commits with `git add -A`, so unfrozen they land in
+    // the candidate diff, `git apply` then fails in the scoring container, and swebench's
+    // `patch` fallback REVERTS the real fix -- scoring a solved instance as resolved:false.
+    // Proven in run 34432706755.
+    const iReset = script.indexOf('git -C "/testbed" reset -q');
+    const iSkip = script.indexOf("--skip-worktree");
+    const iUntracked = script.indexOf("ls-files --others --exclude-standard");
+    const iRun = script.indexOf('run "');
+
+    // unstage first: skip-worktree does not suppress an already-staged change
+    expect(iReset).toBeGreaterThan(-1);
+    expect(iSkip).toBeGreaterThan(iReset);
+    expect(iUntracked).toBeGreaterThan(-1);
+
+    // deletions are excluded -- skip-worktree on an absent path is meaningless
+    expect(script).toContain("--diff-filter=d");
+
+    // the whole baseline must happen BEFORE styre can commit anything
+    expect(iSkip).toBeLessThan(iRun);
+    expect(iUntracked).toBeLessThan(iRun);
+
+    // the frozen state is recorded as evidence, so a surprising diff stays diagnosable
+    expect(script).toContain('status --porcelain=v1 > "/out/preexisting-dirty.txt"');
+  });
+
+  test("the dirty-tree baseline honors a repoDirInImage override", () => {
+    const script = buildEntrypoint({ seed: makeSeed(), repoDirInImage: "/home/darkreader" });
+    expect(script).toContain('git -C "/home/darkreader" reset -q');
+    expect(script).toContain('git -C "/home/darkreader" diff --name-only -z --diff-filter=d');
+    expect(script).not.toContain('git -C "/testbed" reset -q');
+  });
+
   test("the marker + exclude honor a repoDirInImage override (Multi-SWE-bench /home/<repo>)", () => {
     const script = buildEntrypoint({ seed: makeSeed(), repoDirInImage: "/home/darkreader" });
     expect(script).toContain('touch "/home/darkreader/.styre-disposable"');
