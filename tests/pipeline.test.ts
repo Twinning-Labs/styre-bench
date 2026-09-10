@@ -197,10 +197,10 @@ function trackedDeps(overrides: Partial<PipelineDeps> = {}): { deps: PipelineDep
       if (overrides.runSelfTest) return overrides.runSelfTest(inst, diff, addedTestPaths);
       return { passed: true } satisfies SelfTestResult;
     },
-    detectLeak: async (diff, fixPatch, transcript, instanceId) => {
+    detectLeak: async (diff, fixPatch, transcript, instanceId, problemStatement) => {
       calls.detectLeak++;
       return overrides.detectLeak
-        ? overrides.detectLeak(diff, fixPatch, transcript, instanceId)
+        ? overrides.detectLeak(diff, fixPatch, transcript, instanceId, problemStatement)
         : LEAK_CLEAN;
     },
     blindQuality: async (issue, diff) => {

@@ -148,6 +148,7 @@ async function callDetectLeak(
   fixPatch: string,
   transcript: string,
   instanceId: string,
+  problemStatement: string,
 ): Promise<LeakResult> {
   return spawnPythonJson<LeakResult>([PYTHON_BIN, LEAK_DETECT_SCRIPT], {
     candidate_diff: candidateDiff,
@@ -157,6 +158,10 @@ async function callDetectLeak(
     // agent is TOLD the instance number and cites it while working. Passing it lets the scan
     // excuse that self-reference instead of scoring it as a leak.
     instance_id: instanceId,
+    // Same reason, wider source: for Multi-SWE-bench the corpus body IS the upstream PR
+    // description, and darkreader__darkreader-7241's opens "Fixes #7238." — seeded straight
+    // into the ticket, so the agent reads that number from the harness too.
+    problem_statement: problemStatement,
   });
 }
 
@@ -362,6 +367,7 @@ export interface PipelineDeps {
     fixPatch: string,
     transcript: string,
     instanceId: string,
+    problemStatement: string,
   ) => Promise<LeakResult>;
   blindQuality: (issue: string, diff: string) => Promise<{ verdict: string; notes: string }>;
   abReview: (
@@ -605,7 +611,13 @@ async function runJudgmentStages(
   let suspectedLeak = false;
   let leakReasons: string[] = [];
   try {
-    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript, inst.id);
+    const leak = await deps.detectLeak(
+      stage.diff,
+      inst.fix_patch,
+      stage.transcript,
+      inst.id,
+      inst.problem_statement,
+    );
     suspectedLeak = leak.suspected;
     leakReasons = leak.reasons;
   } catch {
