@@ -72,7 +72,23 @@ _MODEL_NAME = "styre-bench-scorer"
 _SELF_TEST_TIMEOUT_S = 300
 
 
-def _status_bucket(tests_status: dict[str, Any], key: str) -> dict[str, bool]:
+def _id_list(value: Any) -> list[str]:
+    """SWE-bench stores FAIL_TO_PASS/PASS_TO_PASS as a JSON-encoded STRING in the HF dataset and
+    as a real list elsewhere. Normalised here so the fail-closed seeding works from either."""
+    if isinstance(value, list):
+        return [t for t in value if isinstance(t, str)]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+        return [t for t in parsed if isinstance(t, str)] if isinstance(parsed, list) else []
+    return []
+
+
+def _status_bucket(
+    tests_status: dict[str, Any], key: str, expected_ids: list[str] | None = None
+) -> dict[str, bool]:
     """Flattens one `tests_status[key]` {"success": [...], "failure": [...]} bucket
     into a `{test_id: bool}` verdict map. Raises on any shape it can't map --
     never silently drops a test id into "passed"."""
@@ -86,6 +102,12 @@ def _status_bucket(tests_status: dict[str, Any], key: str) -> dict[str, bool]:
     if not isinstance(success, list) or not isinstance(failure, list):
         raise ValueError(f"swebench: tests_status[{key!r}]'s success/failure must both be lists")
     out: dict[str, bool] = {}
+    # Seed every EXPECTED id as False first. base.py: "A missing test id in a harness's post-fix
+    # test-status data must never be read as 'passed' -- default such gaps to False, never True."
+    # Deriving the keys solely from the report's own lists let a target test vanish from the
+    # verdict entirely, which a downstream `all(...)` reads as vacuously green.
+    for test_id in expected_ids or []:
+        out[test_id] = False
     for test_id in failure:
         out[test_id] = False
     for test_id in success:
@@ -93,7 +115,12 @@ def _status_bucket(tests_status: dict[str, Any], key: str) -> dict[str, bool]:
     return out
 
 
-def parse_report(report: dict[str, Any], instance_id: str) -> dict[str, Any]:
+def parse_report(
+    report: dict[str, Any],
+    instance_id: str,
+    fail_to_pass_ids: list[str] | None = None,
+    pass_to_pass_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """Pure parser: swebench's report.json -> {"resolved","fail_to_pass","pass_to_pass"}.
 
     FAIL-CLOSED: raises on a missing/malformed report, a missing entry for
@@ -126,13 +153,13 @@ def parse_report(report: dict[str, Any], instance_id: str) -> dict[str, Any]:
         )
 
     if isinstance(tests_status, dict):
-        fail_to_pass = _status_bucket(tests_status, FAIL_TO_PASS)
-        pass_to_pass = _status_bucket(tests_status, PASS_TO_PASS)
+        fail_to_pass = _status_bucket(tests_status, FAIL_TO_PASS, fail_to_pass_ids)
+        pass_to_pass = _status_bucket(tests_status, PASS_TO_PASS, pass_to_pass_ids)
     else:
         # Legitimate: patch was empty/None or failed to apply -- no id-list data,
         # `resolved` is (and must be) False in this branch.
-        fail_to_pass = {}
-        pass_to_pass = {}
+        fail_to_pass = {t: False for t in fail_to_pass_ids or []}
+        pass_to_pass = {t: False for t in pass_to_pass_ids or []}
 
     return {"resolved": resolved, "fail_to_pass": fail_to_pass, "pass_to_pass": pass_to_pass}
 
@@ -274,10 +301,21 @@ class SweBenchAdapter(OracleAdapter):
         if not report_path.exists():
             raise RuntimeError(f"swebench: expected report at {report_path} but it does not exist")
         report = json.loads(report_path.read_text())
-        return parse_report(report, instance_id)
+        # Pass the EXPECTED id lists so a target test missing from the harness report defaults to
+        # False rather than vanishing from the verdict (base.py's fail-closed clause).
+        return parse_report(
+            report,
+            instance_id,
+            _id_list(raw.get(FAIL_TO_PASS)),
+            _id_list(raw.get(PASS_TO_PASS)),
+        )
 
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
-        gold = self.score(instance, instance["fix_patch"])
+        # FIREWALL: the gold patch is never in the payload ({id, language} only), so it comes
+        # from the re-fetched corpus record — the same rule `score` already follows. Reading it
+        # off `instance` made run_controls unusable in CI; it went unnoticed because only
+        # `score` is exercised there.
+        gold = self.score(instance, self._raw_instance(instance["id"])["patch"])
         base_a = self.score(instance, "")
         base_b = self.score(instance, "")
         # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.
