@@ -274,7 +274,8 @@ def test_score_uses_the_FETCHED_record_not_the_payload():
     def fake_run(cmd, **kwargs):
         # capture the dataset the harness was handed
         idx = cmd.index("--dataset_files")
-        seen["dataset"] = json.loads(open(cmd[idx + 1]).read())
+        # JSONL now: one record per line, not an array.
+        seen["dataset"] = [json.loads(l) for l in open(cmd[idx + 1]).read().splitlines() if l.strip()]
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
     with patch("adapters.multiswebench._raw_instance", return_value=raw):
@@ -308,3 +309,32 @@ def test_run_harness_creates_the_dirs_the_harness_REQUIRES_to_exist():
 
     assert seen["--workdir"].is_dir(), "workdir must exist before the harness runs"
     assert seen["--repo_dir"].is_dir(), "repo_dir must exist before the harness runs"
+
+
+def test_dataset_and_patch_files_are_JSONL_not_json_arrays():
+    """The harness reads both files LINE BY LINE (`Dataset.from_json(line)` / `Patch.from_json`).
+
+    A JSON array makes the first line a list, and the harness dies with
+    `AttributeError: 'list' object has no attribute 'items'` — which is exactly how the second
+    live scoring attempt failed.
+    """
+    adapter = MultiSweBenchAdapter()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        for flag in ("--dataset_files", "--patch_files"):
+            seen[flag] = Path(cmd[cmd.index(flag) + 1]).read_text()
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    raw = {"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}}
+    with patch("adapters.multiswebench._raw_instance", return_value=raw):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired):
+                adapter._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+
+    for flag, text in seen.items():
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        assert len(lines) == 1, f"{flag}: expected exactly one JSONL record"
+        parsed = json.loads(lines[0])
+        assert isinstance(parsed, dict), f"{flag}: each line must be an OBJECT, not a list"
+    assert json.loads([l for l in seen["--dataset_files"].splitlines() if l.strip()][0]) == raw

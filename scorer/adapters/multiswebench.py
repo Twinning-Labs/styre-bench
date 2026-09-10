@@ -273,11 +273,18 @@ class MultiSweBenchAdapter(OracleAdapter):
         patch_file = run_dir / "patch.json"
         patch_file.write_text(
             json.dumps({"org": org, "repo": repo, "number": number, "fix_patch": candidate_diff or ""})
+            + "\n"
         )
         dataset_file = run_dir / "dataset.json"
-        # The harness needs the FULL corpus record (base sha, test_patch, test lists);
-        # the firewall payload carries none of it, so the fetched record is what goes here.
-        dataset_file.write_text(json.dumps([raw]))
+        # The harness needs the FULL corpus record (base sha, test_patch, test lists); the
+        # firewall payload carries none of it, so the fetched record is what goes here.
+        #
+        # JSONL, NOT a JSON array. `CliArgs.dataset` reads the file line by line and calls
+        # `Dataset.from_json(line)` on each, so an array makes the first (only) line a list and
+        # the harness dies with `AttributeError: 'list' object has no attribute 'items'`. Same
+        # for `--patch_files`, which `patches` reads the same way -- a single object on one line
+        # is already valid JSONL there.
+        dataset_file.write_text(json.dumps(raw) + "\n")
         output_dir = run_dir / "output"
         output_dir.mkdir()
         # The harness REQUIRES workdir and repo_dir to already exist -- `_check_workdir` and
