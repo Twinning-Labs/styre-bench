@@ -105,6 +105,78 @@ _SELF_TEST_TIMEOUT_S = 300
 HARNESS_TIMEOUT_SEC = 1800
 
 
+MSB_DATASET = "ByteDance-Seed/Multi-SWE-bench"
+_RAW_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def parse_instance_id(instance_id: str) -> tuple[str, str, int]:
+    """`<org>__<repo>-<number>` -> (org, repo, number).
+
+    The FIREWALL payload carries only an instance id and a language, so org/repo/number cannot be
+    read off the instance dict — every other route needs corpus fields the payload is forbidden to
+    contain (`.github/workflows/score.yml` actively rejects them).
+    """
+    head, sep, number_str = instance_id.rpartition("-")
+    if not sep or not number_str.isdigit():
+        raise ValueError(
+            f"multi-swe-bench: instance id {instance_id!r} does not end in '-<number>'"
+        )
+    org, sep2, repo = head.partition("__")
+    if not sep2 or not org or not repo:
+        raise ValueError(
+            f"multi-swe-bench: instance id {instance_id!r} is not '<org>__<repo>-<number>'"
+        )
+    return org, repo, int(number_str)
+
+
+def _raw_instance(instance_id: str) -> dict[str, Any]:
+    """Fetch the corpus record for `instance_id` from the PUBLIC Multi-SWE-bench dataset.
+
+    WHY THIS EXISTS. The adapter previously read `instance["f2p_tests"]`, `instance["fix_patch"]`
+    and friends straight off the dict it was handed, and wrote that dict out as the harness
+    dataset. That cannot work behind the firewall: the payload is `{instance: {id, language},
+    candidate_diff}` and nothing else, so those keys are simply absent and scoring dies with a
+    KeyError before the harness starts. `SweBenchAdapter` already solves this by re-fetching from
+    Hugging Face; this is the same move for MSB.
+
+    Only the ONE repo file is downloaded (`ts/<org>__<repo>_dataset.jsonl`), not the whole
+    multilingual dataset — the instance id names the repo, so there is no reason to pull the rest.
+    """
+    if instance_id in _RAW_CACHE:
+        return _RAW_CACHE[instance_id]
+    from huggingface_hub import hf_hub_download
+
+    org, repo, number = parse_instance_id(instance_id)
+    fname = f"ts/{org}__{repo}_dataset.jsonl"
+    local = hf_hub_download(MSB_DATASET, fname, repo_type="dataset")
+    with open(local, encoding="utf8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if record.get("number") == number:
+                _RAW_CACHE[instance_id] = record
+                return record
+    raise ValueError(
+        f"multi-swe-bench: PR #{number} not found in {fname} of {MSB_DATASET} "
+        f"(instance_id={instance_id!r})"
+    )
+
+
+def test_ids(bucket: Any) -> list[str]:
+    """MSB stores f2p/p2p as a DICT keyed by test id, not a list.
+
+    `parse_report` takes id lists, so passing the dict straight through would iterate its keys by
+    accident in some places and fail in others. Normalised here, once.
+    """
+    if isinstance(bucket, dict):
+        return list(bucket.keys())
+    if isinstance(bucket, list):
+        return [t for t in bucket if isinstance(t, str)]
+    return []
+
+
 def parse_report(report: dict[str, Any], fail_to_pass_ids: list[str], pass_to_pass_ids: list[str]) -> dict[str, Any]:
     """Pure parser: multi-swe-bench's report.json -> {"resolved","fail_to_pass","pass_to_pass"}.
 
@@ -195,14 +267,17 @@ class MultiSweBenchAdapter(OracleAdapter):
         import sys
         import tempfile
 
-        org, repo, number = self._org_repo_number(instance)
+        raw = _raw_instance(instance["id"])
+        org, repo, number = raw["org"], raw["repo"], raw["number"]
         run_dir = Path(tempfile.mkdtemp(prefix="styre-bench-msb-"))
         patch_file = run_dir / "patch.json"
         patch_file.write_text(
             json.dumps({"org": org, "repo": repo, "number": number, "fix_patch": candidate_diff or ""})
         )
         dataset_file = run_dir / "dataset.json"
-        dataset_file.write_text(json.dumps([instance]))
+        # The harness needs the FULL corpus record (base sha, test_patch, test lists);
+        # the firewall payload carries none of it, so the fetched record is what goes here.
+        dataset_file.write_text(json.dumps([raw]))
         output_dir = run_dir / "output"
         output_dir.mkdir()
         cmd = [
@@ -242,13 +317,15 @@ class MultiSweBenchAdapter(OracleAdapter):
                 f"-- harness ran but emitted no report (treat as harness error, not a verdict)"
             )
         report = json.loads(report_candidates[0].read_text())
-        return parse_report(report, instance["fail_to_pass"], instance["pass_to_pass"])
+        return parse_report(report, test_ids(raw.get("f2p_tests")), test_ids(raw.get("p2p_tests")))
 
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         return self._run_harness(instance, candidate_diff)
 
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
-        gold = self.score(instance, instance["fix_patch"])
+        # Same firewall reason as `score`: the gold patch is never in the payload, so it comes
+        # from the fetched corpus record.
+        gold = self.score(instance, _raw_instance(instance["id"])["fix_patch"])
         base_a = self.score(instance, "")
         base_b = self.score(instance, "")
         # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.
