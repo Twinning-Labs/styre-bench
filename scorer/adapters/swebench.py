@@ -137,6 +137,62 @@ def parse_report(report: dict[str, Any], instance_id: str) -> dict[str, Any]:
     return {"resolved": resolved, "fail_to_pass": fail_to_pass, "pass_to_pass": pass_to_pass}
 
 
+# swebench applies a candidate patch by trying these in order, logging one line per failure:
+#     git apply --verbose
+#     git apply --verbose --reject
+#     patch --batch --fuzz=5 -p1 -i
+# Only the FIRST is a clean application. `--reject` tolerates dropped hunks, and the `patch`
+# fallback will report
+#     "Reversed (or previously applied) patch detected!  Assuming -R."
+# and REVERT hunks rather than apply them. In either case the container no longer holds the
+# candidate's changes -- yet swebench still records patch_successfully_applied: True, the tests
+# then fail against unmodified source, and the run yields a confident `resolved: false` for a
+# change that was never under test.
+#
+# Observed for real in run 34432706755: the candidate diff carried a pyproject.toml hunk the
+# SWE-bench image had already applied, so `git apply` failed, the fallback reverted the actual
+# fix in separable.py, and a correctly-solved instance scored resolved:false.
+#
+# A false negative corrupts a capability measurement exactly as badly as a false positive, so
+# this is an ERROR, never a verdict. score.py turns it into {"error": ...} and the workflow's
+# verdict gate takes the job red.
+_APPLY_FAILURE_MARKER = "Failed to apply patch to container"
+
+_APPLY_REMEDY = (
+    "The candidate diff must apply cleanly with plain `git apply` against the instance's base "
+    "commit. The usual cause is the diff carrying changes the image already has -- capture the "
+    "candidate diff against the image's own working-tree state, not just the base commit."
+)
+
+
+def _assert_patch_applied_cleanly(run_id: str, instance_id: str, candidate_diff: str) -> None:
+    """Raise unless the candidate patch applied with plain `git apply`.
+
+    An empty candidate diff is exempt: there is nothing to apply, and the empty-patch control
+    run in `run_controls` depends on it staying a legitimate scoring path.
+    """
+    if not candidate_diff.strip():
+        return
+    log_path = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id / "run_instance.log"
+    if not log_path.exists():
+        raise RuntimeError(
+            f"swebench: cannot verify patch application for {instance_id!r} -- expected "
+            f"{log_path} but it does not exist. Refusing to report a verdict that has not been "
+            f"shown to test the candidate diff."
+        )
+    log = log_path.read_text(errors="replace")
+    if _APPLY_FAILURE_MARKER not in log:
+        return
+    detail = [ln.strip() for ln in log.splitlines() if _APPLY_FAILURE_MARKER in ln or "Assuming -R" in ln]
+    raise RuntimeError(
+        f"swebench: the candidate patch for {instance_id!r} did not apply cleanly, so the "
+        f"container did not hold the candidate's changes and any verdict would be fabricated. "
+        f"swebench fell back past `git apply` and may have REVERTED hunks. "
+        f"Evidence from {log_path}: {' | '.join(detail) or '(marker present, no detail lines)'}. "
+        f"{_APPLY_REMEDY}"
+    )
+
+
 class SweBenchAdapter(OracleAdapter):
     def __init__(self, dataset_name: str = "princeton-nlp/SWE-bench_Verified", split: str = "test"):
         self.dataset_name = dataset_name
@@ -157,6 +213,7 @@ class SweBenchAdapter(OracleAdapter):
 
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         import docker
+        from swebench.harness.docker_build import build_env_images
         from swebench.harness.run_evaluation import run_instance
         from swebench.harness.test_spec.test_spec import make_test_spec
 
@@ -169,6 +226,34 @@ class SweBenchAdapter(OracleAdapter):
             KEY_PREDICTION: candidate_diff,
         }
         client = docker.from_env()
+        # BUILD THE ENVIRONMENT IMAGE FIRST. `run_instance` -> `build_container` ->
+        # `build_instance_image` RAISES if the env image is absent; it never builds one. In the
+        # harness's own flow that phase is performed by `main()`, which this adapter
+        # deliberately bypasses (see the module docstring: `main()` filters empty patches out
+        # before starting a container, which would break `run_controls`). Bypassing `main()`
+        # skipped the build phase with it, so EVERY scoring attempt failed with "Environment
+        # image sweb.env.* not found" -- on x86-64 Linux as well as arm64, which is why the
+        # architecture was a red herring. `build_env_images` calls `build_base_images` itself,
+        # so this one call covers both layers, and it is a no-op when the images already exist.
+        # Tags MUST be passed explicitly. swebench 4.1.0 has a positional-argument mismatch:
+        # `get_test_specs_from_dataset` calls
+        #     make_test_spec(x, namespace, instance_image_tag, env_image_tag)
+        # positionally, while that signature is
+        #     (instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)
+        # -- so the third positional lands in the `base_image_tag` slot. `build_env_images`
+        # defaults its tag arguments to None, so relying on those defaults makes
+        # base_image_tag None and trips `assert base_image_tag is not None`
+        # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
+        # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
+        build_env_images(
+            client,
+            [raw],
+            force_rebuild=False,
+            max_workers=1,
+            namespace=None,
+            instance_image_tag="latest",
+            env_image_tag="latest",
+        )
         # Fresh run_id per call: run_instance() short-circuits on an existing
         # report.json, which would otherwise hand back a stale cached verdict
         # (e.g. the gold-patch result) for a later empty-candidate control call.
@@ -181,6 +266,10 @@ class SweBenchAdapter(OracleAdapter):
                 f"swebench: run_instance did not complete for {instance_id!r} "
                 f"(run_id={run_id}) -- see logs/run_evaluation/{run_id}/{_MODEL_NAME}/{instance_id}"
             )
+        # HARD-FAIL ON A DEGRADED APPLY. Must run BEFORE parse_report: a degraded apply still
+        # yields a well-formed report with patch_successfully_applied: True, so the verdict
+        # would look like a real answer.
+        _assert_patch_applied_cleanly(run_id, instance_id, candidate_diff)
         report_path = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id / LOG_REPORT
         if not report_path.exists():
             raise RuntimeError(f"swebench: expected report at {report_path} but it does not exist")
@@ -214,7 +303,12 @@ class SweBenchAdapter(OracleAdapter):
 
         import docker
         from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
-        from swebench.harness.docker_build import build_container, close_logger, setup_logger
+        from swebench.harness.docker_build import (
+            build_container,
+            build_env_images,
+            close_logger,
+            setup_logger,
+        )
         from swebench.harness.docker_utils import cleanup_container, copy_to_container, exec_run_with_timeout
         from swebench.harness.test_spec.test_spec import make_test_spec
         from pathlib import PurePosixPath
@@ -223,6 +317,27 @@ class SweBenchAdapter(OracleAdapter):
         raw = self._raw_instance(instance_id)
         test_spec = make_test_spec(raw)
         client = docker.from_env()
+        # Same prerequisite as `score`: `build_container` -> `build_instance_image` raises when
+        # the env image is absent and never builds one. No-op once the images exist.
+        # Tags MUST be passed explicitly. swebench 4.1.0 has a positional-argument mismatch:
+        # `get_test_specs_from_dataset` calls
+        #     make_test_spec(x, namespace, instance_image_tag, env_image_tag)
+        # positionally, while that signature is
+        #     (instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)
+        # -- so the third positional lands in the `base_image_tag` slot. `build_env_images`
+        # defaults its tag arguments to None, so relying on those defaults makes
+        # base_image_tag None and trips `assert base_image_tag is not None`
+        # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
+        # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
+        build_env_images(
+            client,
+            [raw],
+            force_rebuild=False,
+            max_workers=1,
+            namespace=None,
+            instance_image_tag="latest",
+            env_image_tag="latest",
+        )
         run_id = f"styre-bench-selftest-{uuid.uuid4().hex}"
         log_dir = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id
         log_dir.mkdir(parents=True, exist_ok=True)

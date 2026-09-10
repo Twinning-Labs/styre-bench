@@ -17,10 +17,16 @@ equivalent), where `<command>` is one of `run_controls` / `score` /
 any exception, writes `{"error": "..."}` to stdout and exits non-zero -- this
 is a TRANSPORT failure to the TS caller (re-dispatch/investigate), never a
 silent "resolved: false".
+
+stdout is the RESULT channel and carries nothing else: the harnesses print
+progress and error text of their own, so adapter execution runs under
+`contextlib.redirect_stdout(sys.stderr)`. A caller redirecting stdout to a file
+gets exactly one parseable JSON object; harness noise lands on stderr.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from typing import Any
@@ -68,7 +74,13 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         payload = json.load(sys.stdin)
-        result = _COMMANDS[argv[0]](payload)
+        # TRANSPORT ISOLATION: the swebench/multi-swe harnesses print progress and error text
+        # to stdout (e.g. "Error building image ...: Environment image ... not found"). stdout
+        # is this process's RESULT channel -- a caller redirecting it to a file must get exactly
+        # one JSON object. Without this, harness noise preceded the JSON and the caller could
+        # not parse its own error report. Noise goes to stderr, where the caller's logs are.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = _COMMANDS[argv[0]](payload)
     except Exception as exc:  # noqa: BLE001 - deliberately catch-all: transport boundary
         # FAIL-CLOSED: a transport/harness failure is reported as an error, never
         # coerced into a false "resolved": false / true result.
