@@ -129,7 +129,7 @@ def parse_instance_id(instance_id: str) -> tuple[str, str, int]:
     return org, repo, int(number_str)
 
 
-def _raw_instance(instance_id: str) -> dict[str, Any]:
+def _raw_instance(instance_id: str, language: str = "ts") -> dict[str, Any]:
     """Fetch the corpus record for `instance_id` from the PUBLIC Multi-SWE-bench dataset.
 
     WHY THIS EXISTS. The adapter previously read `instance["f2p_tests"]`, `instance["fix_patch"]`
@@ -139,16 +139,30 @@ def _raw_instance(instance_id: str) -> dict[str, Any]:
     KeyError before the harness starts. `SweBenchAdapter` already solves this by re-fetching from
     Hugging Face; this is the same move for MSB.
 
-    Only the ONE repo file is downloaded (`ts/<org>__<repo>_dataset.jsonl`), not the whole
+    Only the ONE repo file is downloaded (`<language>/<org>__<repo>_dataset.jsonl`), not the whole
     multilingual dataset — the instance id names the repo, so there is no reason to pull the rest.
+
+    `language` is the dataset's own subdirectory. MSB publishes nine (c, cpp, go, java, js,
+    kotlin, python, rust, ts) and this repo currently only routes `ts` (`corpus.ts` hardcodes it,
+    and `bench.config.ts` pins `tsCorpus` to multi-swe-bench), but taking it as a parameter means
+    adding another language is a corpus change rather than an adapter change. A wrong or
+    unpublished language fails loudly with the list of real ones instead of 404-ing opaquely.
     """
-    if instance_id in _RAW_CACHE:
-        return _RAW_CACHE[instance_id]
+    cache_key = f"{language}/{instance_id}"
+    if cache_key in _RAW_CACHE:
+        return _RAW_CACHE[cache_key]
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
 
     org, repo, number = parse_instance_id(instance_id)
-    fname = f"ts/{org}__{repo}_dataset.jsonl"
-    local = hf_hub_download(MSB_DATASET, fname, repo_type="dataset")
+    fname = f"{language}/{org}__{repo}_dataset.jsonl"
+    try:
+        local = hf_hub_download(MSB_DATASET, fname, repo_type="dataset")
+    except EntryNotFoundError as exc:
+        raise ValueError(
+            f"multi-swe-bench: {fname} not found in {MSB_DATASET}. Either language "
+            f"{language!r} is not one this dataset publishes, or {org}/{repo} is not in it."
+        ) from exc
     with open(local, encoding="utf8") as fh:
         for line in fh:
             line = line.strip()
@@ -156,7 +170,7 @@ def _raw_instance(instance_id: str) -> dict[str, Any]:
                 continue
             record = json.loads(line)
             if record.get("number") == number:
-                _RAW_CACHE[instance_id] = record
+                _RAW_CACHE[cache_key] = record
                 return record
     raise ValueError(
         f"multi-swe-bench: PR #{number} not found in {fname} of {MSB_DATASET} "
@@ -267,7 +281,7 @@ class MultiSweBenchAdapter(OracleAdapter):
         import sys
         import tempfile
 
-        raw = _raw_instance(instance["id"])
+        raw = _raw_instance(instance["id"], instance.get("language") or "ts")
         org, repo, number = raw["org"], raw["repo"], raw["number"]
         run_dir = Path(tempfile.mkdtemp(prefix="styre-bench-msb-"))
         patch_file = run_dir / "patch.json"
@@ -339,7 +353,9 @@ class MultiSweBenchAdapter(OracleAdapter):
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
         # Same firewall reason as `score`: the gold patch is never in the payload, so it comes
         # from the fetched corpus record.
-        gold = self.score(instance, _raw_instance(instance["id"])["fix_patch"])
+        gold = self.score(
+            instance, _raw_instance(instance["id"], instance.get("language") or "ts")["fix_patch"]
+        )
         base_a = self.score(instance, "")
         base_b = self.score(instance, "")
         # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.

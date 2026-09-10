@@ -338,3 +338,49 @@ def test_dataset_and_patch_files_are_JSONL_not_json_arrays():
         parsed = json.loads(lines[0])
         assert isinstance(parsed, dict), f"{flag}: each line must be an OBJECT, not a list"
     assert json.loads([l for l in seen["--dataset_files"].splitlines() if l.strip()][0]) == raw
+
+
+def test_raw_instance_uses_the_language_subdirectory_not_a_hardcoded_ts():
+    """MSB publishes nine languages; the loader must not assume TypeScript.
+
+    Hardcoding `ts/` would make any future non-TS instance fetch the wrong file (or 404) while
+    `score.py` happily routes it here — anything that is not `python` goes to this adapter.
+    """
+    from adapters import multiswebench as mod
+
+    seen: dict = {}
+
+    def fake_dl(repo_id, filename, **kwargs):
+        seen["filename"] = filename
+        raise RuntimeError("stop here — the path is what is under test")
+
+    mod._RAW_CACHE.clear()
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1", "go")
+    assert seen["filename"] == "go/o__r_dataset.jsonl"
+
+    mod._RAW_CACHE.clear()
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1")  # default
+    assert seen["filename"] == "ts/o__r_dataset.jsonl"
+
+
+def test_raw_instance_cache_is_keyed_by_language_too():
+    # Same repo name under two languages must not collide in the cache.
+    from adapters import multiswebench as mod
+
+    mod._RAW_CACHE.clear()
+    mod._RAW_CACHE["ts/o__r-1"] = {"marker": "ts"}
+    calls: dict = {}
+
+    def fake_dl(repo_id, filename, **kwargs):
+        calls["filename"] = filename
+        raise RuntimeError("cache miss reached the network, as expected")
+
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1", "go")
+    assert calls["filename"] == "go/o__r_dataset.jsonl"
+    assert mod._raw_instance("o__r-1", "ts") == {"marker": "ts"}
