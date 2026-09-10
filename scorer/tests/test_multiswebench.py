@@ -143,12 +143,20 @@ def test_run_harness_propagates_subprocess_timeout_not_swallowed():
     into a fake verdict."""
     adapter = MultiSweBenchAdapter()
     inst = _instance()
+    # `_raw_instance` now fetches the corpus record from Hugging Face (the firewall payload cannot
+    # carry it). Stub it so this test stays offline and keeps testing the timeout, not the network.
     with patch(
-        "subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="multi_swe_bench.harness.run_evaluation", timeout=1800),
+        "adapters.multiswebench._raw_instance",
+        return_value={"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}},
     ):
-        with pytest.raises(subprocess.TimeoutExpired):
-            adapter._run_harness(inst, "")
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd="multi_swe_bench.harness.run_evaluation", timeout=1800
+            ),
+        ):
+            with pytest.raises(subprocess.TimeoutExpired):
+                adapter._run_harness(inst, "")
 
 
 # -- run_live tests: real harness + Docker -----------------------------------
@@ -205,3 +213,174 @@ def test_run_self_test_with_passing_added_test():
     inst = _instance()
     result = adapter.run_self_test(inst, inst["fix_patch"], ["test.js::negative odd numbers"])
     assert result == {"passed": True}
+
+
+# -- firewall-payload compatibility -------------------------------------------
+
+
+def test_parse_instance_id_splits_org_repo_number():
+    from adapters.multiswebench import parse_instance_id
+
+    assert parse_instance_id("darkreader__darkreader-7241") == ("darkreader", "darkreader", 7241)
+    assert parse_instance_id("mui__material-ui-39962") == ("mui", "material-ui", 39962)
+
+
+def test_parse_instance_id_rejects_malformed_ids():
+    from adapters.multiswebench import parse_instance_id
+
+    for bad in ["darkreader__darkreader", "darkreader-7241", "no-separator-x", ""]:
+        with pytest.raises(ValueError):
+            parse_instance_id(bad)
+
+
+def test_parse_instance_id_keeps_a_hyphenated_repo_name_intact():
+    # `mui__material-ui-39962` must not split on the FIRST hyphen — the repo name has one.
+    from adapters.multiswebench import parse_instance_id
+
+    org, repo, number = parse_instance_id("mui__material-ui-39962")
+    assert repo == "material-ui"
+    assert number == 39962
+
+
+def test_test_ids_normalises_the_dict_shape_msb_actually_uses():
+    # MSB stores f2p/p2p as a DICT keyed by test id ({"path:name": {"run":..,"test":..,"fix":..}}),
+    # while parse_report takes id LISTS. Passing the dict straight through silently misreads it.
+    from adapters.multiswebench import test_ids
+
+    assert test_ids({"a.ts:x": {"fix": "PASS"}, "b.ts": {"fix": "PASS"}}) == ["a.ts:x", "b.ts"]
+    assert test_ids(["a.ts:x"]) == ["a.ts:x"]
+    assert test_ids(None) == []
+    assert test_ids({}) == []
+
+
+def test_score_uses_the_FETCHED_record_not_the_payload():
+    """The firewall payload is `{id, language}` only — every corpus field must come from the fetch.
+
+    Before this, the adapter read `instance["f2p_tests"]` / `instance["fix_patch"]` off the dict it
+    was handed and wrote that dict out as the harness dataset, so scoring died with a KeyError
+    behind the firewall before the harness even started.
+    """
+    adapter = MultiSweBenchAdapter()
+    raw = {
+        "org": "darkreader",
+        "repo": "darkreader",
+        "number": 7241,
+        "base": {"sha": "abc"},
+        "f2p_tests": {"tests/x.tests.ts:case": {"fix": "PASS"}},
+        "p2p_tests": {"tests/y.tests.ts": {"fix": "PASS"}},
+    }
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        # capture the dataset the harness was handed
+        idx = cmd.index("--dataset_files")
+        # JSONL now: one record per line, not an array.
+        seen["dataset"] = [json.loads(l) for l in open(cmd[idx + 1]).read().splitlines() if l.strip()]
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    with patch("adapters.multiswebench._raw_instance", return_value=raw):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired):
+                # NOTE: only id + language, exactly what the firewall permits
+                adapter._run_harness({"id": "darkreader__darkreader-7241", "language": "ts"}, "d")
+    assert seen["dataset"] == [raw], "the harness must receive the FETCHED record"
+
+
+def test_run_harness_creates_the_dirs_the_harness_REQUIRES_to_exist():
+    """`workdir` and `repo_dir` must pre-exist; the harness raises rather than creating them.
+
+    `_check_output_dir` / `_check_log_dir` mkdir on demand, but `_check_workdir` and
+    `_check_repo_dir` do not -- so creating only `output` killed every invocation with
+    "ValueError: Workdir not found" before the harness started.
+    """
+    adapter = MultiSweBenchAdapter()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        for flag in ("--workdir", "--repo_dir", "--output_dir", "--log_dir"):
+            seen[flag] = Path(cmd[cmd.index(flag) + 1])
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    raw = {"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}}
+    with patch("adapters.multiswebench._raw_instance", return_value=raw):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired):
+                adapter._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+
+    assert seen["--workdir"].is_dir(), "workdir must exist before the harness runs"
+    assert seen["--repo_dir"].is_dir(), "repo_dir must exist before the harness runs"
+
+
+def test_dataset_and_patch_files_are_JSONL_not_json_arrays():
+    """The harness reads both files LINE BY LINE (`Dataset.from_json(line)` / `Patch.from_json`).
+
+    A JSON array makes the first line a list, and the harness dies with
+    `AttributeError: 'list' object has no attribute 'items'` — which is exactly how the second
+    live scoring attempt failed.
+    """
+    adapter = MultiSweBenchAdapter()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        for flag in ("--dataset_files", "--patch_files"):
+            seen[flag] = Path(cmd[cmd.index(flag) + 1]).read_text()
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    raw = {"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}}
+    with patch("adapters.multiswebench._raw_instance", return_value=raw):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired):
+                adapter._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+
+    for flag, text in seen.items():
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        assert len(lines) == 1, f"{flag}: expected exactly one JSONL record"
+        parsed = json.loads(lines[0])
+        assert isinstance(parsed, dict), f"{flag}: each line must be an OBJECT, not a list"
+    assert json.loads([l for l in seen["--dataset_files"].splitlines() if l.strip()][0]) == raw
+
+
+def test_raw_instance_uses_the_language_subdirectory_not_a_hardcoded_ts():
+    """MSB publishes nine languages; the loader must not assume TypeScript.
+
+    Hardcoding `ts/` would make any future non-TS instance fetch the wrong file (or 404) while
+    `score.py` happily routes it here — anything that is not `python` goes to this adapter.
+    """
+    from adapters import multiswebench as mod
+
+    seen: dict = {}
+
+    def fake_dl(repo_id, filename, **kwargs):
+        seen["filename"] = filename
+        raise RuntimeError("stop here — the path is what is under test")
+
+    mod._RAW_CACHE.clear()
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1", "go")
+    assert seen["filename"] == "go/o__r_dataset.jsonl"
+
+    mod._RAW_CACHE.clear()
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1")  # default
+    assert seen["filename"] == "ts/o__r_dataset.jsonl"
+
+
+def test_raw_instance_cache_is_keyed_by_language_too():
+    # Same repo name under two languages must not collide in the cache.
+    from adapters import multiswebench as mod
+
+    mod._RAW_CACHE.clear()
+    mod._RAW_CACHE["ts/o__r-1"] = {"marker": "ts"}
+    calls: dict = {}
+
+    def fake_dl(repo_id, filename, **kwargs):
+        calls["filename"] = filename
+        raise RuntimeError("cache miss reached the network, as expected")
+
+    with patch("huggingface_hub.hf_hub_download", side_effect=fake_dl):
+        with pytest.raises(RuntimeError):
+            mod._raw_instance("o__r-1", "go")
+    assert calls["filename"] == "go/o__r_dataset.jsonl"
+    assert mod._raw_instance("o__r-1", "ts") == {"marker": "ts"}
