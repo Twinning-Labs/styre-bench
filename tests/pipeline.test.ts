@@ -85,6 +85,8 @@ const RUN_RESULT: RunStyreResult = {
   ndjsonPath: "/tmp/run.ndjson",
   transcriptPath: "/tmp/transcript.jsonl",
   profilePath: "/tmp/profile.json",
+  candidateDiffPath: "/tmp/candidate.diff",
+  baselineShaPath: "/tmp/baseline-sha.txt",
   exitCode: 0,
   outDir: "/tmp",
 };
@@ -360,6 +362,8 @@ describe("defaultCollectStage: styre-setup-failure -> probe (not infra)", () => 
       ndjsonPath: "/nonexistent/run.ndjson",
       transcriptPath: "/nonexistent/transcript.jsonl",
       profilePath: "/nonexistent/profile.json",
+      candidateDiffPath: "/nonexistent/candidate.diff",
+      baselineShaPath: "/nonexistent/baseline-sha.txt",
       exitCode: SETUP_FAILED_EXIT,
       outDir: "/nonexistent",
     });
