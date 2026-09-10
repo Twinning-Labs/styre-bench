@@ -118,3 +118,40 @@ export async function persistCandidateDiff(
     return null; // evidence capture never fails a run
   }
 }
+
+export const SEED_MAPPING_NAME = "seed.json";
+
+export interface SeedMapping {
+  instance: string;
+  repo_url: string;
+  ident: string;
+}
+
+/**
+ * Best-effort: record which throwaway repo and ticket a run used, beside that run's artifacts.
+ *
+ * Needed because neither the repo name nor the ticket title names the instance any more — both
+ * used to, and both were readable from INSIDE the container (`git remote -v`, the fetched
+ * ticket), handing the agent the public benchmark instance it was solving. Removing the id from
+ * those two surfaces would otherwise also remove the operator's only way to tie an orphaned
+ * `bench-<uuid>` repo back to a run. This file restores that on the HOST side, where the
+ * container cannot read it.
+ *
+ * Mirrors `persistCandidateDiff`: never throws, and a missing `evidenceDir` is a no-op — losing
+ * a mapping must never fail a run.
+ */
+export async function persistSeedMapping(
+  evidenceDir: string | null | undefined,
+  mapping: SeedMapping,
+): Promise<string | null> {
+  if (!evidenceDir) return null;
+  const { writeFile } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const target = path.join(evidenceDir, SEED_MAPPING_NAME);
+  try {
+    await writeFile(target, `${JSON.stringify(mapping, null, 2)}\n`, "utf8");
+    return target;
+  } catch {
+    return null;
+  }
+}
