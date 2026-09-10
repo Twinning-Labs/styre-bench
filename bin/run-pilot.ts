@@ -8,6 +8,7 @@
  * `bun test` (which stubs every external stage — see `tests/pipeline.test.ts`).
  */
 import { BENCH_CONFIG } from "../config/bench.config";
+import { reapBenchContainers } from "../orchestrator/container-reaper";
 import { runPilot } from "../orchestrator/pipeline";
 
 async function main(): Promise<void> {
@@ -19,6 +20,17 @@ async function main(): Promise<void> {
   // ONLY=<instance_id> -> run exactly that one named SWE / multi-SWE image (skips SMOKE/pilot
   // selection). It ALWAYS bypasses the oracle: the swebench/multi-swe oracle harnesses are
   // Linux-x86_64-only, and ONLY is a fast single-image dev-iteration mode, not a scored run.
+  // Reap first. `--rm` removes a container when it EXITS, which a KILLED pilot never causes: the
+  // docker client dies and the daemon keeps the container. SIGKILL cannot be trapped, so no
+  // handler can cover it — one was found still running four hours after its pilot was killed.
+  // Sweeping at start is the only thing that recovers from that, and it costs a `docker ps`.
+  const reaped = await reapBenchContainers();
+  if (reaped.length > 0) {
+    console.error(
+      `[run-pilot] reaped ${reaped.length} leftover bench container(s) from a previous run: ${reaped.join(", ")}`,
+    );
+  }
+
   const only = process.env.ONLY?.trim() || undefined;
   const smokeEnv = process.env.SMOKE;
   const smoke = smokeEnv === "1" || smokeEnv === "2";
