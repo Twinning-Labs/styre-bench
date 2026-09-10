@@ -260,7 +260,9 @@ def _agent_authored(transcript: str) -> tuple[str | None, list[str]]:
 
 
 def _scan_agent_transcript(
-    transcript: str, own_numbers: frozenset[str] = frozenset()
+    transcript: str,
+    own_numbers: frozenset[str] = frozenset(),
+    harness_text: str = "",
 ) -> list[str]:
     """URL/PR + web-tool reasons drawn from AGENT-AUTHORED text only.
 
@@ -278,32 +280,48 @@ def _scan_agent_transcript(
         agent_text = transcript
     if any(name in _WEB_TOOLS for name in tool_names) or _NET_CMD_RE.search(agent_text):
         reasons.append("web-tool-used")
-    reasons.extend(_scan_transcript(agent_text, own_numbers))
+    reasons.extend(_scan_transcript(agent_text, own_numbers, harness_text))
     return reasons
 
 
-def _own_issue_numbers(instance_id: Any) -> frozenset[str]:
-    """The issue/PR numbers the HARNESS itself handed the agent.
+def _harness_supplied_numbers(
+    instance_id: Any = None, problem_statement: Any = None
+) -> frozenset[str]:
+    """Issue/PR numbers the HARNESS itself put in front of the agent.
 
-    `buildIssueTitle` (orchestrator/seed-linear.ts) puts `inst.id` in the seeded ticket title,
-    so the agent is told it is working `astropy__astropy-12907` and writes "issue #12907" in the
-    ordinary course of doing the job (astropy's changelog convention even requires the number as
-    a filename). Citing a number you were given is not evidence of going to look it up.
+    Repeating an identifier you were handed is not evidence of going to look one up. Two sources,
+    both observed producing false positives on real runs:
 
-    Only the bare `#<n>` shorthand is excused. An explicit `github.com/.../pull/<n>` URL stays a
-    finding even for the instance's own number: constructing the upstream URL is a more
-    deliberate act than repeating the identifier in the ticket title.
+    * `instance_id` — `buildIssueTitle` used to put it in the seeded ticket title, so the agent
+      was told it was working `astropy__astropy-12907` and wrote "issue #12907" while doing the
+      job (astropy's changelog convention requires the number as a filename).
+
+    * `problem_statement` — for Multi-SWE-bench the corpus `body` IS the upstream PR description,
+      and darkreader__darkreader-7241's begins literally "Fixes #7238.". That text is seeded into
+      the ticket, so the agent read #7238 there and repeated it. An earlier version of this
+      module excused only `instance_id`, which did not cover it.
+
+    Only issue-REFERENCE shapes are harvested from the problem statement (`#123`, `issues/123`,
+    `pull/123`) — never every integer in it, which would excuse any number the agent mentioned.
     """
-    if not isinstance(instance_id, str):
-        return frozenset()
-    return frozenset(re.findall(r"\d+", instance_id))
+    numbers: set[str] = set()
+    if isinstance(instance_id, str):
+        numbers.update(re.findall(r"\d+", instance_id))
+    if isinstance(problem_statement, str):
+        numbers.update(re.findall(r"#(\d+)", problem_statement))
+        numbers.update(re.findall(r"(?:issues|pull)/(\d+)", problem_statement, re.IGNORECASE))
+    return frozenset(numbers)
 
 
 def _hash_numbers(match: str) -> list[str]:
     return re.findall(r"#(\d+)", match)
 
 
-def _scan_transcript(transcript: str, own_numbers: frozenset[str] = frozenset()) -> list[str]:
+def _scan_transcript(
+    transcript: str,
+    own_numbers: frozenset[str] = frozenset(),
+    harness_text: str = "",
+) -> list[str]:
     """Return URL/PR-reference reasons found in `transcript` (possibly empty).
 
     Unescapes JSON-style escaped forward slashes (`\\/` -> `/`) first, so a
@@ -311,7 +329,11 @@ def _scan_transcript(transcript: str, own_numbers: frozenset[str] = frozenset())
     github.com\\/o\\/r\\/pull\\/5`) is still detected.
     """
     text = transcript.replace("\\/", "/")
-    if _PR_URL_RE.search(text):
+    supplied = harness_text.replace("\\/", "/") if harness_text else ""
+    for match in _PR_URL_RE.finditer(text):
+        # A full upstream URL stays a finding UNLESS the harness handed over that exact URL.
+        if supplied and match.group(0) in supplied:
+            continue
         return ["pr-url-in-transcript"]
     for match in _PR_HASH_RE.finditer(text):
         numbers = _hash_numbers(match.group(0))
@@ -333,6 +355,7 @@ def detect_leak(
     containment_threshold: float = DEFAULT_CONTAINMENT_THRESHOLD,
     min_fix_changed_lines: int = DEFAULT_MIN_FIX_CHANGED_LINES,
     instance_id: Any = None,
+    problem_statement: Any = None,
 ) -> dict[str, Any]:
     """Flag a styre run whose fix suspiciously resembles the withheld human fix.
 
@@ -384,7 +407,11 @@ def detect_leak(
     if not isinstance(transcript, str) or not transcript:
         reasons.append("transcript-unavailable")
     else:
-        url_reasons = _scan_agent_transcript(transcript, _own_issue_numbers(instance_id))
+        url_reasons = _scan_agent_transcript(
+            transcript,
+            _harness_supplied_numbers(instance_id, problem_statement),
+            problem_statement if isinstance(problem_statement, str) else "",
+        )
         reasons.extend(url_reasons)
         # `transcript-unstructured-scan` reports that the scan degraded, not that a leak was
         # found -- it must never set `suspected` on its own.
@@ -419,6 +446,8 @@ def main(argv: list[str]) -> int:
             kwargs["min_fix_changed_lines"] = payload["min_fix_changed_lines"]
         if "instance_id" in payload:
             kwargs["instance_id"] = payload["instance_id"]
+        if "problem_statement" in payload:
+            kwargs["problem_statement"] = payload["problem_statement"]
         result = detect_leak(
             payload.get("candidate_diff"),
             payload.get("fix_patch"),

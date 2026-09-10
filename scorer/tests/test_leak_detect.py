@@ -659,3 +659,113 @@ def test_without_instance_id_nothing_is_excused():
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
     assert "pr-url-in-transcript" in result["reasons"]
     assert result["suspected"] is True
+
+
+# -- numbers the problem statement itself supplied (false-positive fix) --------
+
+
+PS_WITH_ISSUE_REF = "Fixes #7238.\n\nThe parser treats Base64 == padding as a record delimiter."
+
+
+def test_a_number_from_the_problem_statement_is_not_a_leak():
+    """darkreader__darkreader-7241: the corpus `body` IS the upstream PR description.
+
+    It opens literally "Fixes #7238." and is seeded straight into the ticket, so the agent read
+    that number from the harness and repeated it. Excusing only `instance_id` (7241) left this
+    firing — the third distinct false-positive mechanism in this module.
+    """
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Per the ticket this fixes #7238."}],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF,
+        FIX_PATCH,
+        transcript,
+        instance_id="darkreader__darkreader-7241",
+        problem_statement=PS_WITH_ISSUE_REF,
+    )
+    assert "pr-url-in-transcript" not in result["reasons"]
+    assert result["suspected"] is False
+
+
+def test_a_number_NOT_supplied_anywhere_is_still_a_leak():
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "The upstream fix is in PR #999."}],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF,
+        FIX_PATCH,
+        transcript,
+        instance_id="darkreader__darkreader-7241",
+        problem_statement=PS_WITH_ISSUE_REF,
+    )
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_only_issue_reference_shapes_are_harvested_not_every_integer():
+    # A problem statement mentioning "42 users" must not excuse a later citation of PR #42.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "See PR #42 upstream."}],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF,
+        FIX_PATCH,
+        transcript,
+        instance_id="o__r-1",
+        problem_statement="This affects 42 users on version 42 of the extension.",
+    )
+    assert "pr-url-in-transcript" in result["reasons"]
+
+
+def test_issues_and_pull_url_forms_in_the_problem_statement_are_harvested():
+    for supplied in ("see https://github.com/o/r/issues/555", "see https://github.com/o/r/pull/555"):
+        transcript = _stream(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Addressing issue #555."}],
+                },
+            }
+        )
+        result = detect_leak(
+            INDEPENDENT_DIFF, FIX_PATCH, transcript, problem_statement=supplied
+        )
+        assert "pr-url-in-transcript" not in result["reasons"], supplied
+
+
+def test_an_upstream_URL_is_excused_only_when_the_harness_supplied_that_exact_url():
+    url = "https://github.com/o/r/pull/555"
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": f"See {url}"}]},
+        }
+    )
+    # supplied verbatim -> excused
+    assert "pr-url-in-transcript" not in detect_leak(
+        INDEPENDENT_DIFF, FIX_PATCH, transcript, problem_statement=f"context: {url}"
+    )["reasons"]
+    # number supplied but not the URL -> the URL is still a deliberate act, still a finding
+    assert "pr-url-in-transcript" in detect_leak(
+        INDEPENDENT_DIFF, FIX_PATCH, transcript, problem_statement="Fixes #555."
+    )["reasons"]
