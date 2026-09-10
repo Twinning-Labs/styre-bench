@@ -179,7 +179,25 @@ class SweBenchAdapter(OracleAdapter):
         # image sweb.env.* not found" -- on x86-64 Linux as well as arm64, which is why the
         # architecture was a red herring. `build_env_images` calls `build_base_images` itself,
         # so this one call covers both layers, and it is a no-op when the images already exist.
-        build_env_images(client, [raw], force_rebuild=False, max_workers=1)
+        # Tags MUST be passed explicitly. swebench 4.1.0 has a positional-argument mismatch:
+        # `get_test_specs_from_dataset` calls
+        #     make_test_spec(x, namespace, instance_image_tag, env_image_tag)
+        # positionally, while that signature is
+        #     (instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)
+        # -- so the third positional lands in the `base_image_tag` slot. `build_env_images`
+        # defaults its tag arguments to None, so relying on those defaults makes
+        # base_image_tag None and trips `assert base_image_tag is not None`
+        # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
+        # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
+        build_env_images(
+            client,
+            [raw],
+            force_rebuild=False,
+            max_workers=1,
+            namespace=None,
+            instance_image_tag="latest",
+            env_image_tag="latest",
+        )
         # Fresh run_id per call: run_instance() short-circuits on an existing
         # report.json, which would otherwise hand back a stale cached verdict
         # (e.g. the gold-patch result) for a later empty-candidate control call.
@@ -241,7 +259,25 @@ class SweBenchAdapter(OracleAdapter):
         client = docker.from_env()
         # Same prerequisite as `score`: `build_container` -> `build_instance_image` raises when
         # the env image is absent and never builds one. No-op once the images exist.
-        build_env_images(client, [raw], force_rebuild=False, max_workers=1)
+        # Tags MUST be passed explicitly. swebench 4.1.0 has a positional-argument mismatch:
+        # `get_test_specs_from_dataset` calls
+        #     make_test_spec(x, namespace, instance_image_tag, env_image_tag)
+        # positionally, while that signature is
+        #     (instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)
+        # -- so the third positional lands in the `base_image_tag` slot. `build_env_images`
+        # defaults its tag arguments to None, so relying on those defaults makes
+        # base_image_tag None and trips `assert base_image_tag is not None`
+        # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
+        # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
+        build_env_images(
+            client,
+            [raw],
+            force_rebuild=False,
+            max_workers=1,
+            namespace=None,
+            instance_image_tag="latest",
+            env_image_tag="latest",
+        )
         run_id = f"styre-bench-selftest-{uuid.uuid4().hex}"
         log_dir = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id
         log_dir.mkdir(parents=True, exist_ok=True)

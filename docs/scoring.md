@@ -2,18 +2,41 @@
 
 ## Why this is split across two machines
 
-The SWE-bench harness needs `sweb.env.py.x86_64.*` environment images. They do not exist for
-arm64, so on an Apple Silicon host the oracle fails before it starts:
+**Scoring does not need styre.** `scorer/score.py score` takes
+`{"instance": {...}, "candidate_diff": "..."}` on stdin and returns a verdict, so the
+expensive, credentialed half — running styre — stays local where it already works, and only
+the oracle runs in CI. Two things make CI the better home for the oracle: `styre-bench` is
+public, so Actions minutes are free and scoring needs no secrets, and the runners are x86-64,
+so the SWE-bench images build and run natively instead of under emulation.
+
+### Correction: this is not an architecture constraint
+
+An earlier version of this document claimed the oracle *cannot* run on Apple Silicon because
+`sweb.env.py.x86_64.*` images "do not exist for arm64", citing this error:
 
 ```
 BuildImageError: Environment image sweb.env.py.x86_64.428468730904ff6b4232aa:latest
 not found for astropy__astropy-12907
 ```
 
-That is the only reason a second machine is involved. **Scoring does not need styre.**
-`scorer/score.py score` takes `{"instance": {...}, "candidate_diff": "..."}` on stdin and
-returns a verdict, so the expensive, credentialed half — running styre — stays local where it
-already works, and only the oracle moves to x86-64 Linux.
+That explanation was wrong, and the evidence that disproved it is that **the identical error
+then occurred on an x86-64 Linux runner**. The real cause was in this repo: the adapter called
+`run_instance()` without ever calling `build_env_images()`, so the image it asked for had never
+been built on any host. `make_test_spec` hardcodes `arch="x86_64"` with no host detection, so
+architecture never entered into it.
+
+Two further defects sat behind the same failure and are fixed alongside it:
+
+- The harness writes progress to stdout, which polluted the JSON channel and made the
+  `Summarise` step fail with a `JSONDecodeError` at character 0. `score.py` now redirects
+  command stdout to stderr so the JSON transport carries exactly one object.
+- `build_env_images` must be passed **explicit** image tags. swebench 4.1.0 calls
+  `make_test_spec(x, namespace, instance_image_tag, env_image_tag)` positionally against the
+  signature `(instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)`,
+  so the third positional lands in the `base_image_tag` slot; the `None` defaults then trip
+  `assert base_image_tag is not None`. The harness's own `main()` avoids this only because it
+  passes `"latest"`. `scorer/tests/test_env_image_tags.py` pins every call site to doing the
+  same.
 
 `styre-bench` is public, so GitHub Actions minutes are free and **scoring needs no secrets**:
 no agent key, no GitHub token beyond the default.

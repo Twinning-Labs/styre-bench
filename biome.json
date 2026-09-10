@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "ignore": ["scorer/**", ".venv/**", "dist/**"]
+    "ignore": ["scorer/**", ".venv/**", "dist/**", "scoring/**"]
   },
   "formatter": {
     "enabled": true,
