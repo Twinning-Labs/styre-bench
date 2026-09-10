@@ -45,8 +45,11 @@ const CONTAINER_PROFILE_PATH = `${CONTAINER_OUT_DIR}/profile.json`;
  *  against (see `buildEntrypoint`). Evidence — lets a surprising diff be re-derived later. */
 const CONTAINER_BASELINE_SHA_PATH = `${CONTAINER_OUT_DIR}/baseline-sha.txt`;
 /** Written by the entrypoint: `git diff --cached <baseline>` — styre's changes ONLY, captured
- *  in-container. This, not the GitHub PR diff, is the scoring input. */
-const CONTAINER_CANDIDATE_DIFF_PATH = `${CONTAINER_OUT_DIR}/candidate.diff`;
+ *  in-container. RAW: exactly what styre produced, never rewritten. The pipeline derives the
+ *  scoring input from it (stripping `docs/plans/`) and persists THAT as `candidate.diff`.
+ *  Kept as two files on purpose: the stripped diff used to overwrite the raw capture at the
+ *  same path, so when a malformed diff had to be diagnosed the original was already gone. */
+const CONTAINER_CANDIDATE_DIFF_PATH = `${CONTAINER_OUT_DIR}/candidate.raw.diff`;
 const BASELINE_VAR = "STYRE_BENCH_BASELINE";
 // The ephemeral SoT SQLite, pinned INTO the mounted out dir (via `styre run --db`) instead of a
 // throwaway /tmp path, so it survives the `--rm` container. Many step failures (e.g. a silently
@@ -522,10 +525,11 @@ export interface RunStyreResult {
   /** The HOST evidence dir these paths live under (ENG-393). Returned so the pipeline can
    *  record it on the TaskRecord — a report row must be traceable to its evidence. */
   outDir: string;
-  /** HOST path of the in-container candidate diff: styre's changes taken against the run-start
-   *  baseline. This is the SCORING INPUT — never the GitHub PR diff, whose merge-base is the
-   *  clean upstream base_commit and so re-admits the image's own environment setup. */
-  candidateDiffPath: string;
+  /** HOST path of the RAW in-container candidate diff: styre's changes taken against the
+   *  run-start baseline, exactly as captured. The scoring input is derived from this (never
+   *  from the GitHub PR diff, whose merge-base re-admits the image's environment setup) and is
+   *  persisted separately as `candidate.diff`, so this file stays untouched as evidence. */
+  rawCandidateDiffPath: string;
   /** HOST path of the baseline sha the diff was taken against (evidence). */
   baselineShaPath: string;
 }
@@ -658,7 +662,7 @@ export async function runStyre(
     ndjsonPath: path.join(outDir, "run.ndjson"),
     transcriptPath: path.join(outDir, "transcript.jsonl"),
     profilePath: path.join(outDir, "profile.json"),
-    candidateDiffPath: path.join(outDir, "candidate.diff"),
+    rawCandidateDiffPath: path.join(outDir, "candidate.raw.diff"),
     baselineShaPath: path.join(outDir, "baseline-sha.txt"),
     exitCode,
     outDir,

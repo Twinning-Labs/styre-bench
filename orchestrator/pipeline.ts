@@ -303,7 +303,7 @@ export async function defaultCollectStage(
   // THE scoring input: styre's changes against the run-start baseline, captured in-container.
   // Absent/unreadable reads as empty, which collect already treats as "no work delivered" —
   // never silently fall back to the PR diff, which would reinstate the defect above.
-  const rawDiff = await readFile(result.candidateDiffPath, "utf8").catch(() => "");
+  const rawDiff = await readFile(result.rawCandidateDiffPath, "utf8").catch(() => "");
 
   const ctx: CollectCtx = { language: inst.language, pr_opened };
   const record = collectPure(ndjson, rawDiff, profile, ctx);
