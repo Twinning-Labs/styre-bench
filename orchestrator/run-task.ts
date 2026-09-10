@@ -41,6 +41,13 @@ const CONTAINER_OUT_DIR = "/out";
 const CONTAINER_NDJSON_PATH = `${CONTAINER_OUT_DIR}/run.ndjson`;
 const CONTAINER_TRANSCRIPT_PATH = `${CONTAINER_OUT_DIR}/transcript.jsonl`;
 const CONTAINER_PROFILE_PATH = `${CONTAINER_OUT_DIR}/profile.json`;
+/** Written by the entrypoint: the sha of the baseline commit the candidate diff is taken
+ *  against (see `buildEntrypoint`). Evidence — lets a surprising diff be re-derived later. */
+const CONTAINER_BASELINE_SHA_PATH = `${CONTAINER_OUT_DIR}/baseline-sha.txt`;
+/** Written by the entrypoint: `git diff --cached <baseline>` — styre's changes ONLY, captured
+ *  in-container. This, not the GitHub PR diff, is the scoring input. */
+const CONTAINER_CANDIDATE_DIFF_PATH = `${CONTAINER_OUT_DIR}/candidate.diff`;
+const BASELINE_VAR = "STYRE_BENCH_BASELINE";
 // The ephemeral SoT SQLite, pinned INTO the mounted out dir (via `styre run --db`) instead of a
 // throwaway /tmp path, so it survives the `--rm` container. Many step failures (e.g. a silently
 // swallowed `merge:push`/`pr_create` forge error) are recorded ONLY in the SoT — `workflow_step.error`
@@ -317,33 +324,52 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `echo ".styre-disposable" >> "${repoDirInImage}/.git/info/exclude"`,
     `touch "${repoDirInImage}/.styre-disposable"`,
     "",
-    // BASELINE THE IMAGE'S PRE-EXISTING DIRTY WORKING TREE.
+    // BASELINE THE IMAGE'S PRE-EXISTING STATE, THEN DIFF AGAINST THAT BASELINE.
     //
-    // SWE-bench instance images ship with UNCOMMITTED environment edits already in the working
-    // tree -- astropy__astropy-12907 arrives with pyproject.toml pinned to setuptools==68.0.0,
-    // which is what makes that image's build work. styre runs --in-place and commits with
-    // `git add -A`, so without this those edits land in styre's fix commit and therefore in the
-    // candidate diff, which is captured against the CLEAN base commit seeded from GitHub.
+    // The candidate diff must contain styre's changes and nothing else. Bench images arrive
+    // carrying environment setup that is NOT styre's work, and the two corpora carry it
+    // differently:
     //
-    // In the scoring container that hunk is already applied, so `git apply` (all-or-nothing)
-    // fails, `git apply --reject` exits non-zero, and swebench falls back to
-    // `patch --batch --fuzz=5 -p1`, which reports "Reversed (or previously applied) patch
-    // detected!  Assuming -R." and REVERTS -- taking the real fix in separable.py with it. The
-    // container then runs unmodified source and the instance scores resolved:false. Observed in
-    // run 34432706755, where styre had in fact solved the bug correctly.
+    //   SWE-bench Python  HEAD = base_commit + a "SWE-bench" commit, ALWAYS. The image build
+    //                     ends with `git commit --allow-empty -am SWE-bench`
+    //                     (swebench/harness/test_spec/python.py). Working tree is clean.
+    //   SWE-bench JS      no such commit -- javascript.py has no equivalent block, so setup
+    //                     edits can remain uncommitted.
+    //   Multi-SWE-bench   HEAD == base.sha (clone -> reset --hard -> checkout base.sha), no
+    //                     extra commit. VERIFIED on a pulled image
+    //                     (mswebench/darkreader_m_darkreader:pr-7241): HEAD is exactly the
+    //                     corpus base.sha and the tree is CLEAN -- prepare.sh's `npm install`
+    //                     ran, but node_modules is gitignored, so nothing tracked was dirtied.
+    //                     Neither pollution mode is present there, and the baseline is simply
+    //                     an empty commit. Not asserted for every MSB repo: prepare.sh is
+    //                     per-repo and free to touch tracked files (a config copy, a lockfile
+    //                     rewrite), so the baseline still has to handle it.
     //
-    // skip-worktree rather than `git checkout -- .` or `git stash`: the edits are load-bearing,
-    // so the file must KEEP its content on disk. skip-worktree only stops git reporting it as
-    // changed, which is exactly enough to keep `git add -A` from picking it up.
+    // So pre-existing state appears as extra commits on SWE-bench Python, and may appear as a
+    // dirty tree elsewhere. Diffing against the upstream base_commit (which is what the seeded
+    // GitHub PR's merge-base gives) picks up the extra commits; diffing against HEAD alone
+    // would pick up any dirty tree. One commit here collapses both: everything already present
+    // becomes the baseline, and the candidate diff is taken against it. `--allow-empty` is what
+    // makes the already-clean case (MSB) work rather than fail.
+    //
+    // This is exactly what SWE-bench itself does, one level earlier, and for the same stated
+    // reason -- see the comment above their clean_diff_commands: "If the setup modifies the
+    // repository in any way, it can be difficult to get a clean diff. This ensures that
+    // `git diff` will only reflect the changes from the user". `--allow-empty` for the same
+    // reason they use it: a clean tree must still produce a baseline.
+    //
+    // Not doing this cost a real false negative: run 34432706755 scored a correctly-solved
+    // astropy instance resolved:false because the image's setuptools pin rode along in the
+    // diff, so `git apply` failed in the scoring container and swebench's `patch` fallback
+    // REVERTED the actual fix.
+    //
+    // Recorded for evidence: the tree state we absorbed, and the baseline sha.
     `git -C "${repoDirInImage}" status --porcelain=v1 > "${CONTAINER_OUT_DIR}/preexisting-dirty.txt" 2>/dev/null || true`,
-    // Unstage first (worktree content untouched): skip-worktree does not suppress an ALREADY
-    // STAGED change, which would otherwise still be committed.
-    `git -C "${repoDirInImage}" reset -q || true`,
-    // `--diff-filter=d` excludes deletions -- skip-worktree on an absent path is meaningless.
-    `git -C "${repoDirInImage}" diff --name-only -z --diff-filter=d | xargs -0 -r git -C "${repoDirInImage}" update-index --skip-worktree -- || true`,
-    // Untracked pre-existing files are invisible to skip-worktree; exclude them locally, the
-    // same way `.styre-disposable` is handled above.
-    `git -C "${repoDirInImage}" ls-files --others --exclude-standard >> "${repoDirInImage}/.git/info/exclude" || true`,
+    `git -C "${repoDirInImage}" add -A || true`,
+    `git -C "${repoDirInImage}" commit --allow-empty --no-verify -q -m "styre-bench baseline" || true`,
+    `${BASELINE_VAR}="$(git -C "${repoDirInImage}" rev-parse HEAD)"`,
+    `echo "\${${BASELINE_VAR}}" > "${CONTAINER_BASELINE_SHA_PATH}"`,
+    `echo "styre-bench entrypoint: baseline \${${BASELINE_VAR}}"`,
     "",
     // SWE-bench Python images pre-build the repo's deps into a conda env named `testbed` and
     // activate it via ~/.bashrc — which only runs in a LOGIN/interactive shell. This entrypoint
@@ -403,6 +429,24 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
     `"${CONTAINER_BINARY_PATH}" run "${seed.ident}" --profile "${CONTAINER_PROFILE_PATH}" --in-place --db "${CONTAINER_SOT_DB_PATH}" | tee "${CONTAINER_NDJSON_PATH}"`,
     'run_exit="${PIPESTATUS[0]}"',
     "set -e",
+    "",
+    // CAPTURE THE CANDIDATE DIFF IN-CONTAINER, against the baseline recorded above -- NOT from
+    // the seeded GitHub PR, whose merge-base is the clean upstream base_commit and therefore
+    // re-admits the image's own environment setup (see the baseline comment above).
+    //
+    // `add -A` + `diff --cached <baseline>` is SWE-agent's shape (`git add -A; git diff
+    // --cached`) with an explicit base. It captures committed, staged, unstaged AND untracked
+    // work in one pass, so it does not depend on styre having committed everything. The
+    // `.styre-disposable` marker is already in .git/info/exclude, so `add -A` skips it, and
+    // `.gitignore` is honoured, so node_modules stays out.
+    //
+    // Runs unconditionally, AFTER run_exit is captured and before exiting with it: a failed or
+    // paused run still has evidence worth collecting, and this must never change the exit code
+    // the pipeline routes on.
+    `git -C "${repoDirInImage}" add -A || true`,
+    `git -C "${repoDirInImage}" diff --cached "\${${BASELINE_VAR}}" > "${CONTAINER_CANDIDATE_DIFF_PATH}" || true`,
+    `echo "styre-bench entrypoint: candidate diff $(wc -c < "${CONTAINER_CANDIDATE_DIFF_PATH}" 2>/dev/null || echo 0) bytes"`,
+    "",
     'exit "$run_exit"',
     "",
   ];
@@ -478,6 +522,12 @@ export interface RunStyreResult {
   /** The HOST evidence dir these paths live under (ENG-393). Returned so the pipeline can
    *  record it on the TaskRecord — a report row must be traceable to its evidence. */
   outDir: string;
+  /** HOST path of the in-container candidate diff: styre's changes taken against the run-start
+   *  baseline. This is the SCORING INPUT — never the GitHub PR diff, whose merge-base is the
+   *  clean upstream base_commit and so re-admits the image's own environment setup. */
+  candidateDiffPath: string;
+  /** HOST path of the baseline sha the diff was taken against (evidence). */
+  baselineShaPath: string;
 }
 
 export interface RunStyreConfig {
@@ -608,6 +658,8 @@ export async function runStyre(
     ndjsonPath: path.join(outDir, "run.ndjson"),
     transcriptPath: path.join(outDir, "transcript.jsonl"),
     profilePath: path.join(outDir, "profile.json"),
+    candidateDiffPath: path.join(outDir, "candidate.diff"),
+    baselineShaPath: path.join(outDir, "baseline-sha.txt"),
     exitCode,
     outDir,
   };

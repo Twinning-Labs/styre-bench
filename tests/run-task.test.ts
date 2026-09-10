@@ -84,39 +84,63 @@ describe("buildEntrypoint (pure)", () => {
     );
   });
 
-  test("baselines the image's pre-existing dirty tree before styre runs (false-negative guard)", () => {
+  test("commits a baseline before styre runs, and diffs against it after (false-negative guard)", () => {
     const script = buildEntrypoint({ seed: makeSeed() });
-    // SWE-bench images arrive with uncommitted environment edits (astropy: pyproject.toml
-    // pinned to setuptools==68.0.0). styre commits with `git add -A`, so unfrozen they land in
-    // the candidate diff, `git apply` then fails in the scoring container, and swebench's
-    // `patch` fallback REVERTS the real fix -- scoring a solved instance as resolved:false.
-    // Proven in run 34432706755.
-    const iReset = script.indexOf('git -C "/testbed" reset -q');
-    const iSkip = script.indexOf("--skip-worktree");
-    const iUntracked = script.indexOf("ls-files --others --exclude-standard");
+    // Bench images carry environment setup that is not styre's work, and the corpora carry it
+    // DIFFERENTLY: SWE-bench Python always adds a "SWE-bench" commit on top of base_commit
+    // (python.py ends with `git commit --allow-empty -am SWE-bench`), while Multi-SWE-bench
+    // leaves HEAD == base.sha but dirties the tree via prepare.sh (npm/bower install, config
+    // copies). One baseline commit collapses both cases. Run 34432706755 is what happens
+    // without it: a correctly-solved instance scored resolved:false.
+    const iAdd = script.indexOf('git -C "/testbed" add -A');
+    const iCommit = script.indexOf("commit --allow-empty --no-verify");
+    const iBaseline = script.indexOf("STYRE_BENCH_BASELINE=");
     const iRun = script.indexOf('run "');
+    const iDiff = script.indexOf("diff --cached");
 
-    // unstage first: skip-worktree does not suppress an already-staged change
-    expect(iReset).toBeGreaterThan(-1);
-    expect(iSkip).toBeGreaterThan(iReset);
-    expect(iUntracked).toBeGreaterThan(-1);
+    // baseline is established BEFORE styre can change anything
+    expect(iAdd).toBeGreaterThan(-1);
+    expect(iCommit).toBeGreaterThan(iAdd);
+    expect(iBaseline).toBeGreaterThan(iCommit);
+    expect(iBaseline).toBeLessThan(iRun);
 
-    // deletions are excluded -- skip-worktree on an absent path is meaningless
-    expect(script).toContain("--diff-filter=d");
+    // --allow-empty: a clean tree must still produce a baseline, or the diff has no base
+    expect(script).toContain("--allow-empty");
 
-    // the whole baseline must happen BEFORE styre can commit anything
-    expect(iSkip).toBeLessThan(iRun);
-    expect(iUntracked).toBeLessThan(iRun);
+    // the diff is taken against the baseline, AFTER the run
+    expect(iDiff).toBeGreaterThan(iRun);
+    expect(script).toContain('diff --cached "${STYRE_BENCH_BASELINE}"');
+    expect(script).toContain('> "/out/candidate.diff"');
 
-    // the frozen state is recorded as evidence, so a surprising diff stays diagnosable
+    // capture must not disturb the exit code the pipeline routes on: run_exit is read before
+    // the capture, and the script still exits with it
+    expect(script.indexOf('run_exit="${PIPESTATUS[0]}"')).toBeLessThan(iDiff);
+    expect(script.indexOf('exit "$run_exit"')).toBeGreaterThan(iDiff);
+
+    // evidence: what we absorbed, and the base the diff is relative to
     expect(script).toContain('status --porcelain=v1 > "/out/preexisting-dirty.txt"');
+    expect(script).toContain('> "/out/baseline-sha.txt"');
   });
 
-  test("the dirty-tree baseline honors a repoDirInImage override", () => {
+  test("the baseline + diff capture honor a repoDirInImage override", () => {
     const script = buildEntrypoint({ seed: makeSeed(), repoDirInImage: "/home/darkreader" });
-    expect(script).toContain('git -C "/home/darkreader" reset -q');
-    expect(script).toContain('git -C "/home/darkreader" diff --name-only -z --diff-filter=d');
-    expect(script).not.toContain('git -C "/testbed" reset -q');
+    expect(script).toContain('git -C "/home/darkreader" add -A');
+    expect(script).toContain('git -C "/home/darkreader" commit --allow-empty --no-verify');
+    expect(script).toContain('git -C "/home/darkreader" diff --cached "${STYRE_BENCH_BASELINE}"');
+    expect(script).not.toContain('git -C "/testbed" add -A');
+  });
+
+  test("the candidate diff is never sourced from the GitHub PR", () => {
+    // The PR's merge-base is the CLEAN upstream base_commit, so a PR diff re-admits the image's
+    // environment setup. The PR is still opened and still consulted for pr_opened; its diff is
+    // not the scoring input.
+    const script = buildEntrypoint({ seed: makeSeed() });
+    const iDiff = script.indexOf("diff --cached");
+    expect(iDiff).toBeGreaterThan(-1);
+    // the capture is local to the container: no network, no remote ref in the diff command
+    const diffLine = script.split("\n").find((l) => l.includes("diff --cached"));
+    expect(diffLine).not.toContain("origin");
+    expect(diffLine).not.toContain("github.com");
   });
 
   test("the marker + exclude honor a repoDirInImage override (Multi-SWE-bench /home/<repo>)", () => {
@@ -516,6 +540,8 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
       ndjsonPath: "/host/out/abc123/run.ndjson",
       transcriptPath: "/host/out/abc123/transcript.jsonl",
       profilePath: "/host/out/abc123/profile.json",
+      candidateDiffPath: "/host/out/abc123/candidate.diff",
+      baselineShaPath: "/host/out/abc123/baseline-sha.txt",
       exitCode: 0,
       outDir: "/host/out/abc123",
     });
@@ -700,6 +726,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
+              candidateDiffPath: "/o/candidate.diff",
+              baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
             };
@@ -736,6 +764,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             ndjsonPath: "/o/run.ndjson",
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
+            candidateDiffPath: "/o/candidate.diff",
+            baselineShaPath: "/o/baseline-sha.txt",
             exitCode: 0,
             outDir: "/out",
           }),
@@ -767,6 +797,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
+              candidateDiffPath: "/o/candidate.diff",
+              baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 1,
               outDir: "/out",
             }),
@@ -798,6 +830,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
+              candidateDiffPath: "/o/candidate.diff",
+              baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
             }),
@@ -829,6 +863,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
+              candidateDiffPath: "/o/candidate.diff",
+              baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
             }),
@@ -859,6 +895,8 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             ndjsonPath: "/o/run.ndjson",
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
+            candidateDiffPath: "/o/candidate.diff",
+            baselineShaPath: "/o/baseline-sha.txt",
             exitCode: 0,
             outDir: "/out",
           }),

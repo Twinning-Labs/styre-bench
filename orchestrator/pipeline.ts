@@ -292,9 +292,18 @@ export async function defaultCollectStage(
   }
 
   const githubToken = process.env.GITHUB_TOKEN ?? "";
-  const { diff: rawDiff, pr_opened } = githubToken
-    ? await fetchPrDiff(inst, seed, githubToken).catch(() => ({ diff: "", pr_opened: false }))
-    : { diff: "", pr_opened: false };
+  // The PR is still consulted, but ONLY for `pr_opened`. Its diff is deliberately discarded:
+  // the PR's merge-base is the clean upstream base_commit, so a PR diff re-admits the image's
+  // own environment setup (a "SWE-bench" commit on Python images, npm/bower churn on
+  // Multi-SWE-bench ones). That is what scored a correctly-solved instance resolved:false in
+  // run 34432706755.
+  const { pr_opened } = githubToken
+    ? await fetchPrDiff(inst, seed, githubToken).catch(() => ({ pr_opened: false }))
+    : { pr_opened: false };
+  // THE scoring input: styre's changes against the run-start baseline, captured in-container.
+  // Absent/unreadable reads as empty, which collect already treats as "no work delivered" —
+  // never silently fall back to the PR diff, which would reinstate the defect above.
+  const rawDiff = await readFile(result.candidateDiffPath, "utf8").catch(() => "");
 
   const ctx: CollectCtx = { language: inst.language, pr_opened };
   const record = collectPure(ndjson, rawDiff, profile, ctx);
