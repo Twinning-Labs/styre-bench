@@ -134,6 +134,62 @@ describe("collect: summary parsing", () => {
 });
 
 describe("collect: docs/plans/ stripping + per-language self_authored_test", () => {
+  test("extractStrippedDiff always ends with a newline once a trailing block is stripped", () => {
+    // splitDiffBlocks splits on "\n", so a newline-terminated diff yields a trailing EMPTY
+    // element that lands in the LAST block. styre commits its docs/plans/ doc last, so
+    // stripping it used to take the trailing newline with it, and both `git apply` and
+    // `patch` reject an unterminated patch ("patch unexpectedly ends in middle of line").
+    const diff = [
+      "diff --git a/src/a.py b/src/a.py",
+      "--- a/src/a.py",
+      "+++ b/src/a.py",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "diff --git a/docs/plans/2026-01-01-plan.md b/docs/plans/2026-01-01-plan.md",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/docs/plans/2026-01-01-plan.md",
+      "@@ -0,0 +1 @@",
+      "+the plan",
+      "",
+    ].join("\n");
+    expect(diff.endsWith("\n")).toBe(true);
+
+    const stripped = extractStrippedDiff(diff);
+    expect(stripped).not.toContain("docs/plans/");
+    expect(stripped.endsWith("\n")).toBe(true);
+    // exactly one terminator, not a blank line appended on every pass
+    expect(stripped.endsWith("\n\n")).toBe(false);
+  });
+
+  test("extractStrippedDiff does not double-terminate an already-terminated kept block", () => {
+    const diff = [
+      "diff --git a/docs/plans/p.md b/docs/plans/p.md",
+      "--- /dev/null",
+      "+++ b/docs/plans/p.md",
+      "@@ -0,0 +1 @@",
+      "+plan",
+      "diff --git a/src/a.py b/src/a.py",
+      "--- a/src/a.py",
+      "+++ b/src/a.py",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "",
+    ].join("\n");
+    const stripped = extractStrippedDiff(diff);
+    expect(stripped).toContain("src/a.py");
+    expect(stripped.endsWith("\n")).toBe(true);
+    expect(stripped.endsWith("\n\n")).toBe(false);
+  });
+
+  test("extractStrippedDiff leaves an all-stripped diff empty, not a lone newline", () => {
+    const diff =
+      "diff --git a/docs/plans/p.md b/docs/plans/p.md\n--- /dev/null\n+++ b/docs/plans/p.md\n@@ -0,0 +1 @@\n+plan\n";
+    expect(extractStrippedDiff(diff)).toBe("");
+  });
+
   test("extractStrippedDiff removes the docs/plans/ hunk, keeps src + test hunks", () => {
     const stripped = extractStrippedDiff(PR_DIFF);
     expect(stripped).not.toContain("docs/plans/1.md");

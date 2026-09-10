@@ -112,7 +112,21 @@ export function extractStrippedDiff(prDiff: string): string {
     const paths = touchedPaths(block);
     return !paths.some((p) => p.startsWith(PLAN_DOC_PREFIX));
   });
-  return kept.join("\n");
+  const joined = kept.join("\n");
+  // A patch MUST end with a newline. `git apply` and `patch` both reject one that does not:
+  //   patch: **** malformed patch at line 125
+  //   patch unexpectedly ends in middle of line
+  //
+  // `splitDiffBlocks` splits on "\n", so a diff that ends with a newline yields a trailing
+  // EMPTY element, and that element lands in the LAST block. When the last block is the one
+  // stripped here — which is the normal case, because styre commits its `docs/plans/` doc last —
+  // the trailing newline leaves with it and the result is unterminated.
+  //
+  // This stayed invisible while candidate diffs were already failing to apply for an unrelated
+  // reason (the image's environment hunk, fixed by the run-start baseline). It surfaced on the
+  // first diff that was otherwise clean, and cost a $6.64 run's verdict.
+  if (joined.length === 0) return "";
+  return joined.endsWith("\n") ? joined : `${joined}\n`;
 }
 
 /** PURE. Per-language test-file path matcher. Extension-anchored on purpose: a directory

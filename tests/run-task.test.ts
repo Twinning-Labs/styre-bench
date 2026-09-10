@@ -110,7 +110,7 @@ describe("buildEntrypoint (pure)", () => {
     // the diff is taken against the baseline, AFTER the run
     expect(iDiff).toBeGreaterThan(iRun);
     expect(script).toContain('diff --cached "${STYRE_BENCH_BASELINE}"');
-    expect(script).toContain('> "/out/candidate.diff"');
+    expect(script).toContain('> "/out/candidate.raw.diff"');
 
     // capture must not disturb the exit code the pipeline routes on: run_exit is read before
     // the capture, and the script still exits with it
@@ -540,7 +540,7 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
       ndjsonPath: "/host/out/abc123/run.ndjson",
       transcriptPath: "/host/out/abc123/transcript.jsonl",
       profilePath: "/host/out/abc123/profile.json",
-      candidateDiffPath: "/host/out/abc123/candidate.diff",
+      rawCandidateDiffPath: "/host/out/abc123/candidate.raw.diff",
       baselineShaPath: "/host/out/abc123/baseline-sha.txt",
       exitCode: 0,
       outDir: "/host/out/abc123",
@@ -726,7 +726,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
-              candidateDiffPath: "/o/candidate.diff",
+              rawCandidateDiffPath: "/o/candidate.diff",
               baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
@@ -764,7 +764,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             ndjsonPath: "/o/run.ndjson",
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
-            candidateDiffPath: "/o/candidate.diff",
+            rawCandidateDiffPath: "/o/candidate.diff",
             baselineShaPath: "/o/baseline-sha.txt",
             exitCode: 0,
             outDir: "/out",
@@ -797,7 +797,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
-              candidateDiffPath: "/o/candidate.diff",
+              rawCandidateDiffPath: "/o/candidate.diff",
               baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 1,
               outDir: "/out",
@@ -830,7 +830,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
-              candidateDiffPath: "/o/candidate.diff",
+              rawCandidateDiffPath: "/o/candidate.diff",
               baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
@@ -863,7 +863,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
               ndjsonPath: "/o/run.ndjson",
               transcriptPath: "/o/transcript.jsonl",
               profilePath: "/o/profile.json",
-              candidateDiffPath: "/o/candidate.diff",
+              rawCandidateDiffPath: "/o/candidate.diff",
               baselineShaPath: "/o/baseline-sha.txt",
               exitCode: 0,
               outDir: "/out",
@@ -895,7 +895,7 @@ describe("webOffProbe (wiring — deps stubbed)", () => {
             ndjsonPath: "/o/run.ndjson",
             transcriptPath: "/o/transcript.jsonl",
             profilePath: "/o/profile.json",
-            candidateDiffPath: "/o/candidate.diff",
+            rawCandidateDiffPath: "/o/candidate.diff",
             baselineShaPath: "/o/baseline-sha.txt",
             exitCode: 0,
             outDir: "/out",
