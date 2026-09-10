@@ -36,6 +36,58 @@ FIX_PATCH = """--- a/foo.py
 +    return a + b
 """
 
+# A gold patch big enough for containment to MEAN something. FIX_PATCH has 2 changed lines, so
+# any correct candidate scores containment 1.0 against it -- the degenerate case the
+# `containment-uninformative` gate exists for. 13 distinct changed lines here.
+BIG_FIX_PATCH = """--- a/calc.py
++++ b/calc.py
+@@ -1,9 +1,17 @@
+ def normalize(values, scale):
+-    total = sum(values)
+-    if total == 0:
+-        return values
+-    return [v / total for v in values]
+-
+-def clamp(v, lo, hi):
+-    return min(max(v, lo), hi)
++    if scale <= 0:
++        raise ValueError("scale must be positive")
++    total = sum(values)
++    if total == 0:
++        return [0.0 for _ in values]
++    factor = scale / total
++    return [v * factor for v in values]
++
++def clamp(v, lo, hi):
++    if lo > hi:
++        raise ValueError("lo must not exceed hi")
++    return min(max(v, lo), hi)
+"""
+
+# BIG_FIX_PATCH pasted verbatim into a much larger candidate that also makes unrelated edits.
+BIG_CANDIDATE_WITH_EMBEDDED_FIX = (
+    """diff --git a/unrelated.py b/unrelated.py
+--- a/unrelated.py
++++ b/unrelated.py
+@@ -1,4 +1,6 @@
+ def helper(x):
+-    return x
++    if x is None:
++        return 0
++    return x + 1
+diff --git a/calc.py b/calc.py
+"""
+    + BIG_FIX_PATCH
+    + """diff --git a/other.py b/other.py
+--- a/other.py
++++ b/other.py
+@@ -1,3 +1,4 @@
+ def spare(y):
+-    return y
++    return y * 2
+"""
+)
+
 # Same content as FIX_PATCH, but produced with different diff formatting:
 # a `diff --git`/`index` preamble, trailing whitespace on the context line,
 # and blob-hash noise -- none of which should affect the normalized compare.
@@ -180,7 +232,7 @@ def test_embedded_fix_in_larger_candidate_flags_high_containment():
     # The silent-miss case: exact fix + unrelated noise. Symmetric
     # similarity is low, but containment (fix-lines-found-in-candidate)
     # is 1.0 -- this must be caught.
-    result = detect_leak(LARGE_CANDIDATE_WITH_EMBEDDED_FIX, FIX_PATCH, CLEAN_TRANSCRIPT)
+    result = detect_leak(BIG_CANDIDATE_WITH_EMBEDDED_FIX, BIG_FIX_PATCH, CLEAN_TRANSCRIPT)
     assert result["suspected"] is True
     assert "high-containment" in result["reasons"]
     assert result["containment"] == 1.0
@@ -318,10 +370,12 @@ def test_custom_similarity_threshold_is_honored():
 
 
 def test_custom_containment_threshold_is_honored():
-    containment = _diff_containment(LARGE_INDEPENDENT_DIFF_SHARING_FEW_LINES, FIX_PATCH)
+    # BIG_FIX_PATCH, not FIX_PATCH: containment is only ASSESSED above the
+    # min_fix_changed_lines gate, so a 2-line gold patch can never raise the reason.
+    containment = _diff_containment(LARGE_INDEPENDENT_DIFF_SHARING_FEW_LINES, BIG_FIX_PATCH)
     result = detect_leak(
         LARGE_INDEPENDENT_DIFF_SHARING_FEW_LINES,
-        FIX_PATCH,
+        BIG_FIX_PATCH,
         CLEAN_TRANSCRIPT,
         containment_threshold=containment,
     )
@@ -363,5 +417,245 @@ def test_real_pr_url_flagged():
     result = detect_leak(
         INDEPENDENT_DIFF, FIX_PATCH, "See https://github.com/org/repo/pull/42."
     )
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+# -- containment size gate (false-positive fix) --------------------------------
+
+
+def test_small_gold_patch_reports_uninformative_not_high_containment():
+    """A 2-line gold fix has ONE correct form, so any correct candidate scores 1.0.
+
+    Measured on SWE-bench Verified: 25.8% of gold patches have <= 2 changed lines and 53.4%
+    have <= 6. Ungated, `high-containment` therefore fires on most SUCCESSFUL runs -- observed
+    on astropy__astropy-12907 (2-line gold, containment 1.0, similarity 0.133, zero web tools).
+    """
+    result = detect_leak(LARGE_CANDIDATE_WITH_EMBEDDED_FIX, FIX_PATCH, CLEAN_TRANSCRIPT)
+    assert result["containment"] == 1.0, "the score is still reported"
+    assert result["fix_changed_lines"] == 2
+    assert "containment-uninformative" in result["reasons"]
+    assert "high-containment" not in result["reasons"]
+    assert result["suspected"] is False, "an uninformative signal must not conclude a leak"
+
+
+def test_large_gold_patch_still_flags_high_containment():
+    # The gate must not disarm the signal where it is meaningful.
+    result = detect_leak(BIG_CANDIDATE_WITH_EMBEDDED_FIX, BIG_FIX_PATCH, CLEAN_TRANSCRIPT)
+    assert result["fix_changed_lines"] >= 10
+    assert "high-containment" in result["reasons"]
+    assert "containment-uninformative" not in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_min_fix_changed_lines_is_configurable():
+    result = detect_leak(
+        LARGE_CANDIDATE_WITH_EMBEDDED_FIX,
+        FIX_PATCH,
+        CLEAN_TRANSCRIPT,
+        min_fix_changed_lines=1,
+    )
+    assert "high-containment" in result["reasons"]
+    assert result["suspected"] is True
+
+
+# -- transcript scan scoped to agent-authored text (false-positive fix) --------
+
+
+def _stream(*blocks: dict) -> str:
+    """Build a stream-json transcript from assistant/user message blocks."""
+    import json as _json
+
+    return "\n".join(_json.dumps(b) for b in blocks)
+
+
+def test_url_in_a_file_the_agent_READ_is_not_a_leak():
+    """The astropy case: a GitHub URL sitting in the repo's own CI config.
+
+        # MacOS X wheels - as noted in https://github.com/astropy/astropy/pull/12379 ...
+
+    That arrives as tool_result content -- something the agent observed, not sought.
+    """
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "ci.yml"}}],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": "# as noted in https://github.com/astropy/astropy/pull/12379 we do not build",
+                    }
+                ],
+            },
+        },
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
+    assert "pr-url-in-transcript" not in result["reasons"]
+    assert "url-in-transcript" not in result["reasons"]
+    assert result["suspected"] is False
+
+
+def test_url_the_agent_WROTE_is_still_a_leak():
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check https://github.com/o/r/pull/5 for the fix."}
+                ],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_web_tool_use_is_flagged_even_with_no_url_text():
+    # The strongest signal: a tool_use entry cannot be repo content.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "WebFetch", "input": {"url": "example.invalid"}}
+                ],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
+    assert "web-tool-used" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_curl_in_a_bash_input_is_flagged():
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "curl -s https://example.invalid/patch"},
+                    }
+                ],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
+    assert "web-tool-used" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_unparseable_transcript_falls_back_and_says_so():
+    # A plain-text transcript still gets scanned -- reporting a clean bill of health on input
+    # the scanner could not structure would be the silent-miss this module exists to avoid --
+    # but the degraded scan is named, because it re-admits the repo-content false positive.
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, "saw https://github.com/o/r/pull/5")
+    assert "transcript-unstructured-scan" in result["reasons"]
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_unstructured_scan_alone_does_not_suspect():
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, "no urls here at all")
+    assert "transcript-unstructured-scan" in result["reasons"]
+    assert result["suspected"] is False
+
+
+# -- harness-supplied issue numbers (false-positive fix) -----------------------
+
+
+def test_own_instance_number_is_not_a_leak():
+    """`buildIssueTitle` puts `inst.id` in the seeded ticket, so the agent is TOLD the number.
+
+    On astropy__astropy-12907 the agent wrote "issue #12907" and "PR #12907" while doing the
+    job -- astropy's changelog convention requires the number as a filename
+    (`docs/changes/modeling/12907.bugfix.rst`). Repeating an identifier you were handed is not
+    evidence of looking it up.
+    """
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Per issue #12907 I will add docs/changes/12907.bugfix.rst"}
+                ],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="astropy__astropy-12907"
+    )
+    assert "pr-url-in-transcript" not in result["reasons"]
+    assert result["suspected"] is False
+
+
+def test_a_DIFFERENT_issue_number_is_still_a_leak():
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "The fix landed in PR #99999 upstream."}],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="astropy__astropy-12907"
+    )
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_explicit_upstream_url_is_a_leak_even_for_the_own_number():
+    # Constructing the upstream URL is a more deliberate act than repeating the identifier
+    # the ticket title handed over, so the excusal does not extend to it.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "See https://github.com/astropy/astropy/pull/12907 for the fix.",
+                    }
+                ],
+            },
+        }
+    )
+    result = detect_leak(
+        INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="astropy__astropy-12907"
+    )
+    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is True
+
+
+def test_without_instance_id_nothing_is_excused():
+    # Callers that do not pass instance_id keep the old, stricter behaviour.
+    transcript = _stream(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Per issue #12907 ..."}],
+            },
+        }
+    )
+    result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
     assert "pr-url-in-transcript" in result["reasons"]
     assert result["suspected"] is True

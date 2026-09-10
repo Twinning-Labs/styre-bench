@@ -628,7 +628,13 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
         makeSeed(),
         "/host/dist/styre",
         { outDir: "/host/out/y" },
-        { deps: { ensureOutDir: async () => {}, writeEntrypoint: async () => {}, spawnDocker: async () => 0 } },
+        {
+          deps: {
+            ensureOutDir: async () => {},
+            writeEntrypoint: async () => {},
+            spawnDocker: async () => 0,
+          },
+        },
       ).then(
         () => null,
         (e: unknown) => e as Error,
@@ -665,7 +671,13 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
         makeSeed(),
         "/host/dist/styre",
         { outDir: "/host/out/y" },
-        { deps: { ensureOutDir: async () => {}, writeEntrypoint: async () => {}, spawnDocker: async () => 0 } },
+        {
+          deps: {
+            ensureOutDir: async () => {},
+            writeEntrypoint: async () => {},
+            spawnDocker: async () => 0,
+          },
+        },
       );
       expect(result.exitCode).toBe(0);
     } finally {
