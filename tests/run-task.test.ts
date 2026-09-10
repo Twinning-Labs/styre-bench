@@ -570,12 +570,19 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
   });
 
   test("throws when a required cred is missing from both cfg.creds and the environment", async () => {
-    const prevAnthropic = process.env.ANTHROPIC_API_KEY;
-    const prevLinear = process.env.LINEAR_API_KEY;
-    const prevGithub = process.env.GITHUB_TOKEN;
-    process.env.ANTHROPIC_API_KEY = undefined;
-    process.env.LINEAR_API_KEY = undefined;
-    process.env.GITHUB_TOKEN = undefined;
+    // `process.env.X = undefined` does NOT clear a variable -- it assigns the STRING
+    // "undefined", which is truthy, so resolveCreds saw a value and never threw. This test
+    // passed vacuously for as long as it existed. `delete` is the only way to unset.
+    const REQUIRED = [
+      "ANTHROPIC_API_KEY",
+      "LINEAR_API_KEY",
+      "GITHUB_TOKEN",
+      "BENCH_GH_TOKEN",
+    ] as const;
+    const saved = new Map<string, string | undefined>(
+      REQUIRED.map((k) => [k, process.env[k]] as const),
+    );
+    for (const k of REQUIRED) delete process.env[k];
     try {
       await expect(
         runStyre(
@@ -593,9 +600,80 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
         ),
       ).rejects.toThrow(/ANTHROPIC_API_KEY/);
     } finally {
-      if (prevAnthropic !== undefined) process.env.ANTHROPIC_API_KEY = prevAnthropic;
-      if (prevLinear !== undefined) process.env.LINEAR_API_KEY = prevLinear;
-      if (prevGithub !== undefined) process.env.GITHUB_TOKEN = prevGithub;
+      // Restore symmetrically: a var that was ABSENT must be deleted, not left holding a
+      // stale value. The old `if (prev !== undefined)` guard leaked the string "undefined"
+      // into every later test whenever the var started unset (i.e. in CI).
+      for (const k of REQUIRED) {
+        const prev = saved.get(k);
+        if (prev === undefined) delete process.env[k];
+        else process.env[k] = prev;
+      }
+    }
+  });
+
+  test("names EVERY missing cred, not just the first", async () => {
+    const REQUIRED = [
+      "ANTHROPIC_API_KEY",
+      "LINEAR_API_KEY",
+      "GITHUB_TOKEN",
+      "BENCH_GH_TOKEN",
+    ] as const;
+    const saved = new Map<string, string | undefined>(
+      REQUIRED.map((k) => [k, process.env[k]] as const),
+    );
+    for (const k of REQUIRED) delete process.env[k];
+    try {
+      const err = await runStyre(
+        makeInstance(),
+        makeSeed(),
+        "/host/dist/styre",
+        { outDir: "/host/out/y" },
+        { deps: { ensureOutDir: async () => {}, writeEntrypoint: async () => {}, spawnDocker: async () => 0 } },
+      ).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err).not.toBeNull();
+      // Fail-loud must list all four, so one run surfaces the whole gap rather than making
+      // the operator rediscover it one credential at a time.
+      for (const k of REQUIRED) expect(err?.message).toContain(k);
+    } finally {
+      for (const k of REQUIRED) {
+        const prev = saved.get(k);
+        if (prev === undefined) delete process.env[k];
+        else process.env[k] = prev;
+      }
+    }
+  });
+
+  test("an env-supplied cred satisfies the requirement (the guard is not unconditional)", async () => {
+    // Guards the opposite error: a check that always throws would pass the tests above while
+    // making runStyre unusable.
+    const REQUIRED = [
+      "ANTHROPIC_API_KEY",
+      "LINEAR_API_KEY",
+      "GITHUB_TOKEN",
+      "BENCH_GH_TOKEN",
+    ] as const;
+    const saved = new Map<string, string | undefined>(
+      REQUIRED.map((k) => [k, process.env[k]] as const),
+    );
+    for (const k of REQUIRED) process.env[k] = `env-${k}`;
+    try {
+      const result = await runStyre(
+        makeInstance(),
+        makeSeed(),
+        "/host/dist/styre",
+        { outDir: "/host/out/y" },
+        { deps: { ensureOutDir: async () => {}, writeEntrypoint: async () => {}, spawnDocker: async () => 0 } },
+      );
+      expect(result.exitCode).toBe(0);
+    } finally {
+      for (const k of REQUIRED) {
+        const prev = saved.get(k);
+        if (prev === undefined) delete process.env[k];
+        else process.env[k] = prev;
+      }
     }
   });
 });
