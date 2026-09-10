@@ -283,3 +283,28 @@ def test_score_uses_the_FETCHED_record_not_the_payload():
                 # NOTE: only id + language, exactly what the firewall permits
                 adapter._run_harness({"id": "darkreader__darkreader-7241", "language": "ts"}, "d")
     assert seen["dataset"] == [raw], "the harness must receive the FETCHED record"
+
+
+def test_run_harness_creates_the_dirs_the_harness_REQUIRES_to_exist():
+    """`workdir` and `repo_dir` must pre-exist; the harness raises rather than creating them.
+
+    `_check_output_dir` / `_check_log_dir` mkdir on demand, but `_check_workdir` and
+    `_check_repo_dir` do not -- so creating only `output` killed every invocation with
+    "ValueError: Workdir not found" before the harness started.
+    """
+    adapter = MultiSweBenchAdapter()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        for flag in ("--workdir", "--repo_dir", "--output_dir", "--log_dir"):
+            seen[flag] = Path(cmd[cmd.index(flag) + 1])
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    raw = {"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}}
+    with patch("adapters.multiswebench._raw_instance", return_value=raw):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired):
+                adapter._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+
+    assert seen["--workdir"].is_dir(), "workdir must exist before the harness runs"
+    assert seen["--repo_dir"].is_dir(), "repo_dir must exist before the harness runs"

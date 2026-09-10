@@ -280,6 +280,13 @@ class MultiSweBenchAdapter(OracleAdapter):
         dataset_file.write_text(json.dumps([raw]))
         output_dir = run_dir / "output"
         output_dir.mkdir()
+        # The harness REQUIRES workdir and repo_dir to already exist -- `_check_workdir` and
+        # `_check_repo_dir` raise `ValueError: ... not found` rather than creating them, unlike
+        # `_check_output_dir` / `_check_log_dir` which mkdir on demand. Creating only `output`
+        # meant every invocation died before the harness started:
+        #     ValueError: Workdir not found: /tmp/styre-bench-msb-.../work
+        (run_dir / "work").mkdir(parents=True, exist_ok=True)
+        (run_dir / "repo").mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable,
             "-m",
