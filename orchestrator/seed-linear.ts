@@ -89,9 +89,25 @@ function firstLine(text: string, maxLen: number): string {
   return line.length > maxLen ? `${line.slice(0, maxLen)}…` : line;
 }
 
-/** PURE. Builds the issue title from `inst.id` + the first line of `problem_statement`. */
+/**
+ * PURE. Builds the issue title from the first line of `problem_statement` ONLY.
+ *
+ * `inst.id` is deliberately ABSENT. It used to lead the title (`[bench] astropy__astropy-12907:
+ * ...`), which handed the agent the exact public benchmark instance it was solving — the repo,
+ * and the upstream issue/PR number that the gold fix landed under. That is a lookup key for a
+ * model that memorised the issue, and it is measurably load-bearing: on
+ * astropy__astropy-12907 the number 12907 appears NOWHERE in `problem_statement`, yet the agent
+ * wrote "use the upstream issue/PR number 12907" and named its changelog fragment
+ * `docs/changes/modeling/12907.bugfix.rst`. It could only have come from the identifier the
+ * harness supplied.
+ *
+ * Host-side correlation is unaffected: the run's evidence dir is still named for the instance,
+ * `TaskRecord.instance` still carries the id, and `persistSeedMapping` records the ticket ident
+ * and throwaway repo URL beside the run's artifacts. Nothing the CONTAINER can read names the
+ * instance. See `repoNameFor` for the same change to the other leak path.
+ */
 export function buildIssueTitle(inst: Instance): string {
-  return `[bench] ${inst.id}: ${firstLine(inst.problem_statement, 100)}`;
+  return `[bench] ${firstLine(inst.problem_statement, 120)}`;
 }
 
 /**

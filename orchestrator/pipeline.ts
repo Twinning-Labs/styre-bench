@@ -18,7 +18,12 @@ import { collect as collectPure, extractStrippedDiff } from "./collect";
 import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
-import { evidenceDirName, persistCandidateDiff, pruneEvidenceDirs } from "./evidence";
+import {
+  evidenceDirName,
+  persistCandidateDiff,
+  persistSeedMapping,
+  pruneEvidenceDirs,
+} from "./evidence";
 import { addedPaths } from "./firewall";
 import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
@@ -728,6 +733,16 @@ export async function runInstance(
     // The diff used to live only in the throwaway PR, so the success path destroyed the one
     // artifact the oracle needs; capturing it here is what makes a run scoreable afterwards.
     await persistCandidateDiff(stage.record.evidence_dir, stage.diff);
+    // Neither the throwaway repo name nor the ticket title names the instance any more (both
+    // used to, and both were readable from inside the container). This is the host-side record
+    // that ties an orphaned `bench-<uuid>` repo back to its run.
+    if (attempt.seed) {
+      await persistSeedMapping(stage.record.evidence_dir, {
+        instance: inst.id,
+        repo_url: attempt.seed.repoUrl,
+        ident: attempt.seed.ident,
+      });
+    }
 
     scoreResult = undefined;
 

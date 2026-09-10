@@ -191,13 +191,21 @@ export interface SeedGithubOpts {
  * exists" and both masks the real post-seed error and fails the retry. `cleanup` deletes by
  * the returned `repoUrl`, so the random suffix costs nothing at cleanup time.
  */
-export function repoNameFor(inst: Instance): string {
-  const slug = inst.id
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const suffix = crypto.randomUUID().slice(0, 8);
-  return `bench-${slug || "instance"}-${suffix}`;
+export function repoNameFor(_inst: Instance): string {
+  // OPAQUE ON PURPOSE — the instance id must not appear here.
+  //
+  // This name becomes the throwaway repo's URL, which the entrypoint sets as `origin` inside
+  // the container. The old name embedded the instance slug, so it read
+  //     styre-bench-scratch/bench-astropy__astropy-12907-e2bddaff.git
+  // and any `git remote -v` told the agent exactly which public benchmark instance it was
+  // solving, including the upstream issue/PR number the gold fix landed under. That is the same
+  // leak `buildIssueTitle` carried, through a second path, so fixing only the ticket title would
+  // have been cosmetic.
+  //
+  // Correlation stays host-side: the evidence dir is named for the instance, `TaskRecord`
+  // carries it, and `persistSeedMapping` writes {instance, repo_url, ident} beside the run's
+  // artifacts — so an orphaned throwaway repo is still traceable to its run.
+  return `bench-${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 /**

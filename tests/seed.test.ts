@@ -10,7 +10,7 @@ import {
   touchedPaths,
 } from "../orchestrator/firewall";
 import { repoNameFor, seedGithub } from "../orchestrator/seed-github";
-import { buildIssueBody, seedLinear } from "../orchestrator/seed-linear";
+import { buildIssueBody, buildIssueTitle, seedLinear } from "../orchestrator/seed-linear";
 import type { Instance } from "../orchestrator/types";
 
 const SENTINEL_FIX_LINE =
@@ -188,13 +188,26 @@ describe("assertNoHeldOut (pure, content-level firewall)", () => {
 });
 
 describe("repoNameFor (pure)", () => {
-  test("appends a unique 8-hex-char suffix so repeat calls for the same instance never collide", () => {
+  test("is unique per call so a retry never collides on an existing repo name", () => {
     const inst = makeInstance({ id: "org__repo-123" });
     const first = repoNameFor(inst);
     const second = repoNameFor(inst);
     expect(first).not.toBe(second);
-    expect(first).toMatch(/^bench-org__repo-123-[0-9a-f]{8}$/);
-    expect(second).toMatch(/^bench-org__repo-123-[0-9a-f]{8}$/);
+    expect(first).toMatch(/^bench-[0-9a-f]{32}$/);
+    expect(second).toMatch(/^bench-[0-9a-f]{32}$/);
+  });
+
+  test("NEVER encodes the instance id — it becomes origin inside the container", () => {
+    // The name lands in the throwaway repo URL, which the entrypoint sets as `origin`. When it
+    // embedded the slug it read
+    //     styre-bench-scratch/bench-astropy__astropy-12907-e2bddaff.git
+    // so `git remote -v` told the agent exactly which public benchmark instance it was solving,
+    // including the upstream issue/PR number the gold fix landed under.
+    const inst = makeInstance({ id: "astropy__astropy-12907" });
+    const name = repoNameFor(inst);
+    expect(name).not.toContain("astropy");
+    expect(name).not.toContain("12907");
+    expect(name).not.toContain("org__repo");
   });
 });
 
@@ -640,5 +653,32 @@ describe("pushBaseRef", () => {
     expect(head).toBe(baseSha); // no .claude/ present → no strip commit → tip stays exactly baseSha
     await rm(dir, { recursive: true, force: true });
     await rm(remote, { recursive: true, force: true });
+  });
+});
+
+describe("buildIssueTitle (pure)", () => {
+  test("NEVER names the instance — the agent must not learn which benchmark case this is", () => {
+    // The title used to lead with `inst.id`, handing the agent the repo and the upstream
+    // issue/PR number the gold fix landed under. On astropy__astropy-12907 the number 12907
+    // appears NOWHERE in problem_statement, yet the agent wrote "use the upstream issue/PR
+    // number 12907" — it could only have come from the identifier the harness supplied.
+    const inst = makeInstance({
+      id: "astropy__astropy-12907",
+      problem_statement: "separability_matrix is wrong for nested CompoundModels\n\nmore detail",
+    });
+    const title = buildIssueTitle(inst);
+    expect(title).not.toContain("astropy__astropy-12907");
+    expect(title).not.toContain("12907");
+    expect(title).toContain("separability_matrix is wrong for nested CompoundModels");
+  });
+
+  test("uses only the FIRST line of the problem statement, truncated", () => {
+    const inst = makeInstance({
+      id: "org__repo-1",
+      problem_statement: `${"x".repeat(200)}\nsecond line`,
+    });
+    const title = buildIssueTitle(inst);
+    expect(title).not.toContain("second line");
+    expect(title.length).toBeLessThanOrEqual("[bench] ".length + 121);
   });
 });
