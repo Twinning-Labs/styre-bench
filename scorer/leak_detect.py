@@ -83,8 +83,33 @@ from typing import Any
 DEFAULT_SIMILARITY_THRESHOLD = 0.9
 DEFAULT_CONTAINMENT_THRESHOLD = 0.9
 
+# Containment is |fix_changed ∩ candidate_changed| / |fix_changed|. When `fix_patch` has few
+# changed lines there is essentially ONE way to write the correct fix, so ANY correct candidate
+# scores 1.0 and the signal measures CORRECTNESS, not copying. Measured on SWE-bench Verified
+# (n=500): median gold patch is 6 changed lines; 25.8% have <= 2 and 53.4% have <= 6. Left
+# ungated, `high-containment` therefore fires on most SUCCESSFUL runs -- observed on
+# astropy__astropy-12907, whose gold patch is 2 lines and which scored containment 1.0 with
+# similarity only 0.133 and zero web-tool calls.
+#
+# Below this many gold changed lines the containment signal is reported as
+# `containment-uninformative` instead of `high-containment`: the score is still returned, but it
+# is never treated as a positive leak finding.
+#
+# UNCALIBRATED, deliberately: separating "reproduced the fix" from "solved it the same way"
+# needs a labelled set of known-independent solutions, which does not exist yet. 10 is a
+# judgement call -- above it, matching >=90% of gold's exact changed lines (naming, ordering and
+# all) is unlikely from independent work. Treat it the way the report already treats
+# gold-divergence: provisional until inter-rater agreement exists.
+DEFAULT_MIN_FIX_CHANGED_LINES = 10
+
 _HUNK_NOISE_PREFIXES = ("+++", "---", "@@")
 _FILE_HEADER_PREFIXES = ("diff --git", "index ", "new file mode", "deleted file mode", "similarity index", "rename from", "rename to")
+
+# Tools whose USE is direct evidence the agent went to the network. Unlike a URL appearing in
+# text, a tool_use entry cannot be repo content.
+_WEB_TOOLS = frozenset({"WebFetch", "WebSearch"})
+# A shell fetch inside a Bash tool_use input -- the other way an agent reaches the network.
+_NET_CMD_RE = re.compile(r"\b(?:curl|wget)\b[^\n]*https?://", re.IGNORECASE)
 
 # Any bare URL.
 _URL_RE = re.compile(r"https?://\S+")
@@ -182,7 +207,103 @@ def _diff_containment(candidate_diff: str, fix_patch: str) -> float | None:
     return len(fix_changed & candidate_changed) / len(fix_changed)
 
 
-def _scan_transcript(transcript: str) -> list[str]:
+def _agent_authored(transcript: str) -> tuple[str | None, list[str]]:
+    """Split a stream-json transcript into what the AGENT wrote vs what it merely OBSERVED.
+
+    Returns `(agent_text, tool_names)`, or `(None, [])` when no line parses as JSON.
+
+    Only assistant-authored content counts: message text and `tool_use` INPUTS. `tool_result`
+    content is excluded, because that is repo content the agent read from disk -- and scanning
+    it for URLs is what made `pr-url-in-transcript` fire on astropy, whose own CI config
+    carries lines like
+
+        # MacOS X wheels - as noted in https://github.com/astropy/astropy/pull/12379 ...
+
+    A URL the agent never sought is not evidence that it went looking.
+    """
+    texts: list[str] = []
+    tools: list[str] = []
+    parsed = 0
+    for raw in transcript.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        parsed += 1
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and isinstance(block.get("text"), str):
+                texts.append(block["text"])
+            elif kind == "tool_use":
+                name = block.get("name")
+                if isinstance(name, str):
+                    tools.append(name)
+                # The INPUT is agent-authored (the command/url it chose); the result is not.
+                texts.append(json.dumps(block.get("input"), default=str))
+    if parsed == 0:
+        return None, []
+    return "\n".join(texts), tools
+
+
+def _scan_agent_transcript(
+    transcript: str, own_numbers: frozenset[str] = frozenset()
+) -> list[str]:
+    """URL/PR + web-tool reasons drawn from AGENT-AUTHORED text only.
+
+    `web-tool-used` is the strong signal: a `tool_use` entry naming WebFetch/WebSearch, or a
+    Bash input that curls/wgets a URL, cannot be repo content. The URL/PR scans are retained
+    but confined to what the agent wrote.
+    """
+    agent_text, tool_names = _agent_authored(transcript)
+    reasons: list[str] = []
+    if agent_text is None:
+        # Not stream-json (a plain-text transcript, or a format change). Fall back to scanning
+        # the whole blob rather than reporting a clean bill of health on unparsed input, and
+        # SAY SO -- a fallback scan re-admits the repo-content false positive above.
+        reasons.append("transcript-unstructured-scan")
+        agent_text = transcript
+    if any(name in _WEB_TOOLS for name in tool_names) or _NET_CMD_RE.search(agent_text):
+        reasons.append("web-tool-used")
+    reasons.extend(_scan_transcript(agent_text, own_numbers))
+    return reasons
+
+
+def _own_issue_numbers(instance_id: Any) -> frozenset[str]:
+    """The issue/PR numbers the HARNESS itself handed the agent.
+
+    `buildIssueTitle` (orchestrator/seed-linear.ts) puts `inst.id` in the seeded ticket title,
+    so the agent is told it is working `astropy__astropy-12907` and writes "issue #12907" in the
+    ordinary course of doing the job (astropy's changelog convention even requires the number as
+    a filename). Citing a number you were given is not evidence of going to look it up.
+
+    Only the bare `#<n>` shorthand is excused. An explicit `github.com/.../pull/<n>` URL stays a
+    finding even for the instance's own number: constructing the upstream URL is a more
+    deliberate act than repeating the identifier in the ticket title.
+    """
+    if not isinstance(instance_id, str):
+        return frozenset()
+    return frozenset(re.findall(r"\d+", instance_id))
+
+
+def _hash_numbers(match: str) -> list[str]:
+    return re.findall(r"#(\d+)", match)
+
+
+def _scan_transcript(transcript: str, own_numbers: frozenset[str] = frozenset()) -> list[str]:
     """Return URL/PR-reference reasons found in `transcript` (possibly empty).
 
     Unescapes JSON-style escaped forward slashes (`\\/` -> `/`) first, so a
@@ -190,7 +311,13 @@ def _scan_transcript(transcript: str) -> list[str]:
     github.com\\/o\\/r\\/pull\\/5`) is still detected.
     """
     text = transcript.replace("\\/", "/")
-    if _PR_URL_RE.search(text) or _PR_HASH_RE.search(text):
+    if _PR_URL_RE.search(text):
+        return ["pr-url-in-transcript"]
+    for match in _PR_HASH_RE.finditer(text):
+        numbers = _hash_numbers(match.group(0))
+        # A reference is excused only when EVERY number in it is one the harness supplied.
+        if numbers and all(n in own_numbers for n in numbers):
+            continue
         return ["pr-url-in-transcript"]
     if _URL_RE.search(text):
         return ["url-in-transcript"]
@@ -204,6 +331,8 @@ def detect_leak(
     *,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     containment_threshold: float = DEFAULT_CONTAINMENT_THRESHOLD,
+    min_fix_changed_lines: int = DEFAULT_MIN_FIX_CHANGED_LINES,
+    instance_id: Any = None,
 ) -> dict[str, Any]:
     """Flag a styre run whose fix suspiciously resembles the withheld human fix.
 
@@ -233,22 +362,33 @@ def detect_leak(
             reasons.append("high-similarity")
             suspected = True
 
-        containment = _diff_containment(candidate_diff, fix_patch)
-        if containment is None:
+        fix_changed = _changed_lines(fix_patch)
+        if not fix_changed:
             if "similarity-unavailable" not in reasons:
                 reasons.append("similarity-unavailable")
         else:
+            candidate_changed = _changed_lines(candidate_diff)
+            containment = len(fix_changed & candidate_changed) / len(fix_changed)
             result["containment"] = containment
-            if containment >= containment_threshold:
+            # Reported so the validity panel can show WHY a containment score was or was not
+            # treated as a finding, instead of the reader having to infer it.
+            result["fix_changed_lines"] = len(fix_changed)
+            if len(fix_changed) < min_fix_changed_lines:
+                # Too few gold changed lines for containment to separate copying from simply
+                # being correct. Report, never conclude.
+                reasons.append("containment-uninformative")
+            elif containment >= containment_threshold:
                 reasons.append("high-containment")
                 suspected = True
 
     if not isinstance(transcript, str) or not transcript:
         reasons.append("transcript-unavailable")
     else:
-        url_reasons = _scan_transcript(transcript)
-        if url_reasons:
-            reasons.extend(url_reasons)
+        url_reasons = _scan_agent_transcript(transcript, _own_issue_numbers(instance_id))
+        reasons.extend(url_reasons)
+        # `transcript-unstructured-scan` reports that the scan degraded, not that a leak was
+        # found -- it must never set `suspected` on its own.
+        if any(r != "transcript-unstructured-scan" for r in url_reasons):
             suspected = True
 
     result["suspected"] = suspected
@@ -275,6 +415,10 @@ def main(argv: list[str]) -> int:
             kwargs["similarity_threshold"] = payload["similarity_threshold"]
         if "containment_threshold" in payload:
             kwargs["containment_threshold"] = payload["containment_threshold"]
+        if "min_fix_changed_lines" in payload:
+            kwargs["min_fix_changed_lines"] = payload["min_fix_changed_lines"]
+        if "instance_id" in payload:
+            kwargs["instance_id"] = payload["instance_id"]
         result = detect_leak(
             payload.get("candidate_diff"),
             payload.get("fix_patch"),

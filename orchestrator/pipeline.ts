@@ -142,11 +142,16 @@ async function callDetectLeak(
   candidateDiff: string,
   fixPatch: string,
   transcript: string,
+  instanceId: string,
 ): Promise<LeakResult> {
   return spawnPythonJson<LeakResult>([PYTHON_BIN, LEAK_DETECT_SCRIPT], {
     candidate_diff: candidateDiff,
     fix_patch: fixPatch,
     transcript,
+    // The harness itself puts `inst.id` in the seeded ticket title (`buildIssueTitle`), so the
+    // agent is TOLD the instance number and cites it while working. Passing it lets the scan
+    // excuse that self-reference instead of scoring it as a leak.
+    instance_id: instanceId,
   });
 }
 
@@ -347,7 +352,12 @@ export interface PipelineDeps {
   collect: (inst: Instance, seed: RunSeed, result: RunStyreResult) => Promise<CollectStageResult>;
   score: (inst: Instance, diff: string) => Promise<ScoreResult>;
   runSelfTest: (inst: Instance, diff: string, addedTestPaths: string[]) => Promise<SelfTestResult>;
-  detectLeak: (diff: string, fixPatch: string, transcript: string) => Promise<LeakResult>;
+  detectLeak: (
+    diff: string,
+    fixPatch: string,
+    transcript: string,
+    instanceId: string,
+  ) => Promise<LeakResult>;
   blindQuality: (issue: string, diff: string) => Promise<{ verdict: string; notes: string }>;
   abReview: (
     issue: string,
@@ -590,7 +600,7 @@ async function runJudgmentStages(
   let suspectedLeak = false;
   let leakReasons: string[] = [];
   try {
-    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript);
+    const leak = await deps.detectLeak(stage.diff, inst.fix_patch, stage.transcript, inst.id);
     suspectedLeak = leak.suspected;
     leakReasons = leak.reasons;
   } catch {
