@@ -21,6 +21,7 @@ than remove them. What was missing was enforcement of the shared CONTRACT, which
 from __future__ import annotations
 
 import ast
+import builtins
 import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -92,7 +93,7 @@ IDS = [c.name for c in CASES]
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 def test_is_an_oracle_adapter(case: Case) -> None:
     assert isinstance(case.adapter, OracleAdapter)
-    for method in ("score", "run_controls", "run_self_test"):
+    for method in ("score", "run_controls", "run_self_test", "preflight"):
         assert callable(getattr(case.adapter, method))
 
 
@@ -226,3 +227,53 @@ def test_the_adapter_can_fetch_its_corpus_record_by_id_alone(case: Case) -> None
         f"{case.name} exposes no by-id corpus loader; without one the firewall payload "
         f"({{id, language}}) cannot be turned into a scoreable instance"
     )
+
+
+# -- ENG-410: a harness that cannot run here must say so at second zero ---------
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_preflight_raises_when_the_harness_is_unimportable(
+    case: Case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken harness must RAISE out of preflight, never return quietly.
+
+    Preflight's only job is to convert "this host cannot produce a verdict" from a 90-minute
+    discovery into a millisecond one. An adapter whose preflight swallows its own ImportError
+    reinstates exactly the failure it exists to prevent, and would still satisfy the abstract
+    signature. So: sabotage the import machinery and require the raise.
+    """
+    real_import = builtins.__import__
+
+    def boom(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.startswith(("swebench", "multi_swe_bench")):
+            raise ModuleNotFoundError(f"sabotaged: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    with pytest.raises(Exception) as excinfo:
+        case.adapter.preflight()
+    # And the message must name a fix, not just the symptom -- the operator acts on this text.
+    assert "sabotaged" in str(excinfo.value)
+    assert len(str(excinfo.value)) > len("sabotaged: x"), (
+        f"{case.name}.preflight re-raised the bare import error; wrap it with what to DO"
+    )
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_preflight_is_cheap_and_passes_on_a_healthy_host(case: Case) -> None:
+    """With the harness importable, preflight returns None and touches no Docker/network.
+
+    Guarded on the EXACT module preflight needs, not the top-level package: `multi_swe_bench`
+    imports fine on macOS and only its `harness.run_evaluation` submodule hits the
+    `Qiskit/`-vs-`qiskit/` case collision, so guarding on the package would make this test fail
+    on precisely the host the whole ticket is about. The half of this suite with teeth
+    everywhere is the sabotage test above; this half has teeth on Linux and in CI.
+    """
+    pytest.importorskip(
+        "swebench.harness.run_evaluation"
+        if case.name == "swe-bench"
+        else "multi_swe_bench.harness.run_evaluation",
+        reason=f"{case.name} harness is not runnable on this host (expected on macOS for MSB)",
+    )
+    assert case.adapter.preflight() is None

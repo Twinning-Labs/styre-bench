@@ -241,13 +241,34 @@ def parse_report(report: dict[str, Any], fail_to_pass_ids: list[str], pass_to_pa
 class MultiSweBenchAdapter(OracleAdapter):
     """Wraps the `multi_swe_bench.harness.run_evaluation` CLI (mode=evaluation).
 
-    See the module docstring's ASSUMPTION block: the instance-id mapping and
-    exact output-path resolution below are NOT yet confirmed against a live
-    Multi-SWE-bench dataset/run -- this is architecturally sound scaffolding
-    for the operator's live pass, not a validated implementation. Every
-    Docker-touching method here is unit-tested only via `parse_report` above;
-    the methods themselves are exercised solely by the `RUN_LIVE`-gated tests.
+    Confirmed end-to-end against a live image on 2026-09-11
+    (`mswebench/darkreader_m_darkreader:pr-7241`: 2/2 FAIL_TO_PASS, 45/45 PASS_TO_PASS),
+    so the instance-id mapping and output-path resolution below are measured, not assumed.
+    In-process unit coverage is still `parse_report` plus the shared conformance suite; the
+    Docker-touching methods run only under the `RUN_LIVE` gate.
     """
+
+    def preflight(self) -> None:
+        """Import the harness this adapter otherwise only ever runs as a subprocess.
+
+        This is the whole reason `preflight` exists. `run_controls` shells out to
+        `python -m multi_swe_bench.harness.run_evaluation`, so an unrunnable harness is
+        invisible to this process until that subprocess dies -- which on macOS it always does:
+        the `multi_swe_bench` wheel ships BOTH `repos/python/Qiskit/` and `repos/python/qiskit/`,
+        and a case-insensitive filesystem collapses them into one directory, so
+        `Qiskit/qiskit/` never exists and the import fails outright. Linux is case-sensitive
+        and the problem does not arise. Hence: run the matrix on Linux.
+        """
+        try:
+            import multi_swe_bench.harness.run_evaluation  # noqa: F401
+        except Exception as exc:  # noqa: BLE001 - report the cause, whatever it is
+            raise RuntimeError(
+                f"the multi-swe-bench harness is not runnable on this host "
+                f"({type(exc).__name__}: {exc}). On macOS this is expected and unfixable here: "
+                f"the wheel ships case-colliding `Qiskit/` and `qiskit/` directories that a "
+                f"case-insensitive filesystem merges. Run the matrix on Linux — "
+                f"`./infra/provision-bench-host.sh create` provisions a host that can."
+            ) from exc
 
     def _org_repo_number(self, instance: dict[str, Any]) -> tuple[str, str, int]:
         # PREFERRED PATH: `orchestrator/corpus.ts`'s `normalizeMultiSweBench` now populates

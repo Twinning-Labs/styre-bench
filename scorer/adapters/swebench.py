@@ -225,6 +225,24 @@ class SweBenchAdapter(OracleAdapter):
         self.dataset_name = dataset_name
         self.split = split
 
+    def preflight(self) -> None:
+        """Import the harness entrypoints `run_controls`/`score` reach for lazily.
+
+        `swebench.harness.constants` is imported at this module's top, so a missing package
+        already fails at import. The lazy ones below are not covered by that, and a partial
+        install (wrong version, absent `run_evaluation`) reaches the first instance instead.
+        """
+        try:
+            import swebench.harness.docker_build  # noqa: F401
+            import swebench.harness.run_evaluation  # noqa: F401
+            import swebench.harness.test_spec.test_spec  # noqa: F401
+            import swebench.harness.utils  # noqa: F401
+        except Exception as exc:  # noqa: BLE001 - report the cause, whatever it is
+            raise RuntimeError(
+                f"the swebench harness is not runnable on this host ({type(exc).__name__}: {exc}). "
+                f"Install it with `pip install -r scorer/requirements.txt`."
+            ) from exc
+
     # -- live (Docker + HF) path -------------------------------------------------
 
     def _raw_instance(self, instance_id: str) -> dict[str, Any]:
