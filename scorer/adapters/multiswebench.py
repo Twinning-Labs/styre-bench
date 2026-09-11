@@ -99,12 +99,27 @@ from .nix_swe import ensure_nix_swe, nix_swe_failure_hint
 
 _SELF_TEST_TIMEOUT_S = 300
 
-# Ceiling for one `run_evaluation` harness invocation (subprocess). Without a
-# timeout, a hung/wedged harness (stuck container, deadlocked build, etc.)
-# blocks the whole scorer run forever. 1800s (30min) roughly matches styre's
-# verify-step budget ballpark. On expiry, subprocess.TimeoutExpired propagates
-# unmodified (fail-closed): the instance is dropped, never scored.
-HARNESS_TIMEOUT_SEC = 1800
+# TWO BUDGETS, NOT ONE (ENG-431).
+#
+# The harness builds images and then evaluates, in a single invocation, and both used to share
+# one 1800s ceiling. On `mui__material-ui-39108` the build ran 04:05:09 -> 04:21:52 -- 15m43s,
+# more than half the budget -- leaving ~13 minutes for a suite that takes 11-18. It timed out,
+# and the cell was recorded as infra with nothing measured. The evaluation was never the problem:
+# a warm-image run of the same repo evaluated in 11 minutes inside the same ceiling.
+#
+# A budget shared between a one-time setup cost and the measurement itself is really a budget for
+# neither. Images are now built by a separate `--mode image` invocation with its own ceiling, so
+# the evaluation ceiling covers only evaluation.
+#
+# On expiry, subprocess.TimeoutExpired propagates unmodified from either phase (fail-closed): the
+# instance is dropped, never scored. The phase is identifiable from the raised `cmd`.
+IMAGE_BUILD_TIMEOUT_SEC = 3600
+EVAL_TIMEOUT_SEC = 1800
+
+#: Images already built in THIS process, keyed by instance id. The second gold run of
+#: `run_controls` (ENG-430) would otherwise pay the build invocation again -- a no-op that still
+#: costs ~60s of harness startup per call.
+_IMAGES_BUILT: set[str] = set()
 
 
 MSB_DATASET = "ByteDance-Seed/Multi-SWE-bench"
@@ -420,6 +435,9 @@ class MultiSweBenchAdapter(OracleAdapter):
         #     ValueError: Workdir not found: /tmp/styre-bench-msb-.../work
         (run_dir / "work").mkdir(parents=True, exist_ok=True)
         (run_dir / "repo").mkdir(parents=True, exist_ok=True)
+        # ENG-431: build FIRST, on its own clock. Once the images exist the evaluation
+        # invocation's own build phase is a no-op, so `EVAL_TIMEOUT_SEC` is spent on evaluating.
+        self._build_images_or_raise(instance["id"], run_dir, dataset_file)
         cmd = [
             sys.executable,
             "-m",
@@ -450,7 +468,7 @@ class MultiSweBenchAdapter(OracleAdapter):
 
         # No except around this: subprocess.TimeoutExpired must propagate
         # unmodified (fail-closed) -- never swallow a hang into a fake verdict.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=HARNESS_TIMEOUT_SEC)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EVAL_TIMEOUT_SEC)
         if result.returncode != 0:
             hint = nix_swe_failure_hint(result.stdout, result.stderr)
             raise RuntimeError(
@@ -473,6 +491,51 @@ class MultiSweBenchAdapter(OracleAdapter):
 
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         return self._run_harness(instance, candidate_diff)
+
+    def _build_images_or_raise(self, instance_id: str, run_dir: Any, dataset_file: Any) -> None:
+        """Build this instance's images in their own invocation, on their own clock (ENG-431).
+
+        `--mode image` is the harness's own build-only entrypoint. Running it first means the
+        evaluation invocation finds its images present and spends `EVAL_TIMEOUT_SEC` evaluating
+        rather than sharing it with a 15-minute build.
+
+        Skipped for an instance already built in this process: `run_controls` scores gold twice
+        (ENG-430), and the second call would otherwise pay ~60s of harness startup to be told the
+        images are there.
+        """
+        import subprocess
+
+        if instance_id in _IMAGES_BUILT:
+            return
+        cmd = [
+            sys.executable,
+            "-m",
+            "multi_swe_bench.harness.run_evaluation",
+            "--mode",
+            "image",
+            "--workdir",
+            str(run_dir / "work"),
+            "--dataset_files",
+            str(dataset_file),
+            "--repo_dir",
+            str(run_dir / "repo"),
+            "--output_dir",
+            str(run_dir / "output"),
+            "--log_dir",
+            str(run_dir / "logs"),
+        ]
+        # Same fail-closed contract as the evaluation phase: a TimeoutExpired here propagates
+        # unmodified rather than being folded into a verdict.
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=IMAGE_BUILD_TIMEOUT_SEC
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"multi-swe-bench: image build failed (exit {result.returncode}) for "
+                f"{instance_id!r} -- no evaluation was attempted, so this is a build failure and "
+                f"not a verdict.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+        _IMAGES_BUILT.add(instance_id)
 
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
         """MSB's controls, re-derived (ENG-430).
