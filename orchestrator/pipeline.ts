@@ -24,7 +24,8 @@ import {
   persistSeedMapping,
   pruneEvidenceDirs,
 } from "./evidence";
-import { addedPaths } from "./firewall";
+import { addedPaths, measureTicketOverlap } from "./firewall";
+import type { TicketFixOverlap } from "./firewall";
 import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
 import { SETUP_FAILED_EXIT, runStyre } from "./run-task";
@@ -535,8 +536,27 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     suspected_leak: false,
     leak_reasons: [],
     taxonomy: "",
+    ticket_fix_overlap: ticketFixOverlapOf(inst),
     infra_retries: 0,
   };
+}
+
+/**
+ * ENG-411. A pure property of the INSTANCE, so it is measured here on the blank record and
+ * inherited by every outcome — including `infra`/`probe`/`parked`, where it is still a true
+ * fact about the ticket even though the record is excluded from the resolve denominator.
+ *
+ * Returns `null` — "not measured" — only when the measurement itself could not be made
+ * (an unparseable corpus patch, which `measureTicketOverlap` fails closed on). That is a
+ * different claim from "measured zero", and the report must not fold it into the clean
+ * subset: a ticket we failed to read is not a ticket we proved clean.
+ */
+function ticketFixOverlapOf(inst: Instance): TicketFixOverlap | null {
+  try {
+    return measureTicketOverlap(inst.problem_statement, inst);
+  } catch {
+    return null;
+  }
 }
 
 function infraStageFromError(err: unknown, where: string): CollectStageResult {

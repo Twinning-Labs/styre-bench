@@ -154,3 +154,67 @@ export function assertNoHeldOut(
     }
   }
 }
+
+/**
+ * What the CORPUS's own issue text already gave away about the accepted fix (ENG-411).
+ *
+ * Counts, never gates. `sample` carries at most `OVERLAP_SAMPLE_LIMIT` excerpts, truncated
+ * the same way `assertNoHeldOut`'s error message truncates — enough to judge a record by,
+ * never a reconstructable patch. It reaches `report/out/` (gitignored) and nothing else; it
+ * is NEVER placed in front of styre.
+ */
+export interface TicketFixOverlap {
+  /** Distinct non-trivial lines of the accepted fix the ticket already contained. */
+  fix_lines: number;
+  /** Same, for the held-out regression tests. */
+  test_lines: number;
+  /** Up to 3 offending lines, each truncated to 80 chars — evidence, not a patch. */
+  sample: string[];
+}
+
+const OVERLAP_SAMPLE_LIMIT = 3;
+
+/**
+ * PURE. MEASUREMENT, not a gate (ENG-411): reports how much of `inst.fix_patch` /
+ * `inst.test_patch` the corpus's OWN `problem_statement` already contains.
+ *
+ * WHY THIS IS NOT `assertNoHeldOut`. That function exists to catch a BENCH BUG — did we
+ * compose held-out content into a ticket we wrote? It must stay fail-closed, and it does.
+ * But wired over the whole issue body it also fired on 30.8% of SWE-bench Verified, because
+ * real GitHub issues routinely contain the fix: in `astropy__astropy-13398` the reporter
+ * says "I have put together the makings of a pull request" and pastes the code that was
+ * ultimately merged. Nothing leaked there; the corpus is simply built from public issues,
+ * and every harness that scores SWE-bench Verified feeds exactly that text. Refusing to run
+ * cannot un-write a 2022 issue — it only discards a fifth of the corpus and makes the
+ * resolve rate incomparable with published numbers. So: run it, and record what the ticket
+ * gave away, so the report can state the rate both ways.
+ *
+ * Shares `heldOutLines` with `assertNoHeldOut` deliberately — "what counts as a held-out
+ * line" must have exactly one definition, or the gate and the measurement drift apart and
+ * the clean subset stops meaning what it says.
+ */
+export function measureTicketOverlap(
+  text: string,
+  inst: Instance,
+  minLineLength = DEFAULT_MIN_SENTINEL_LEN,
+): TicketFixOverlap {
+  // Fail CLOSED on an unparseable patch for the same reason the gate does: a patch we cannot
+  // read yields zero matches, which would render as a reassuring "clean ticket" when the
+  // truth is that we did not look. "Not measured" and "measured zero" are different claims.
+  assertParseable(inst.fix_patch, "fix_patch", inst);
+  assertParseable(inst.test_patch, "test_patch", inst);
+
+  const hits = (patch: string): string[] => [
+    ...new Set(heldOutLines(patch, minLineLength).filter((line) => text.includes(line))),
+  ];
+  const fixHits = hits(inst.fix_patch);
+  const testHits = hits(inst.test_patch);
+
+  return {
+    fix_lines: fixHits.length,
+    test_lines: testHits.length,
+    sample: [...fixHits, ...testHits]
+      .slice(0, OVERLAP_SAMPLE_LIMIT)
+      .map((line) => (line.length > 80 ? `${line.slice(0, 80)}…` : line)),
+  };
+}

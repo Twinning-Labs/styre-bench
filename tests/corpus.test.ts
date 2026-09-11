@@ -14,11 +14,14 @@ describe("normalizeInstance: swe-bench", () => {
     expect(inst.fix_patch).toContain("Decimal");
   });
 
-  test("maps id, test_patch, hints, merge_date verbatim", () => {
+  test("maps id, test_patch, merge_date verbatim — and NEVER carries hints_text (ENG-411)", () => {
     const inst = normalizeInstance(sweRaw, "swe-bench");
     expect(inst.id).toBe(sweRaw.instance_id);
     expect(inst.test_patch).toBe(sweRaw.test_patch);
-    expect(inst.hints).toBe(sweRaw.hints_text);
+    // hints_text is the issue's comment thread up to the fix commit and routinely contains the
+    // maintainer pasting the accepted patch. SWE-bench's own prompt builders never use it.
+    // Asserting on the serialized instance catches it under ANY key, not just `hints`.
+    expect(JSON.stringify(inst)).not.toContain(sweRaw.hints_text);
     expect(inst.merge_date).toBe(sweRaw.created_at);
     expect(inst.repo).toBe(sweRaw.repo);
     expect(inst.base_commit).toBe(sweRaw.base_commit);

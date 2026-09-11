@@ -527,3 +527,79 @@ test("all three drop reasons stay OUT of the resolve denominator", () => {
   expect(markdown).toContain("1/1");
   expect(markdown).not.toContain("1/4");
 });
+
+describe("ENG-411: the clean-ticket resolve rate sits under the headline, never replaces it", () => {
+  const clean = { fix_lines: 0, test_lines: 0, sample: [] };
+  const dirty = { fix_lines: 3, test_lines: 0, sample: ["return really_specific_thing(x)"] };
+
+  const meta: ReportMeta = {
+    styreRef: "x",
+    dataset: "d",
+    seed: 1,
+    runDate: "2026-09-11",
+    budgetUsd: 100,
+  };
+
+  /** 4 records in the resolve denominator: 2 clean (1 resolved), 2 dirty (both resolved). */
+  const records: TaskRecord[] = [
+    makeRecord({ instance: "c1", resolved: true, taxonomy: "resolved", ticket_fix_overlap: clean }),
+    makeRecord({
+      instance: "c2",
+      resolved: false,
+      taxonomy: "opened-but-unresolved",
+      ticket_fix_overlap: clean,
+    }),
+    makeRecord({ instance: "d1", resolved: true, taxonomy: "resolved", ticket_fix_overlap: dirty }),
+    makeRecord({ instance: "d2", resolved: true, taxonomy: "resolved", ticket_fix_overlap: dirty }),
+  ];
+
+  function headlineOf(rs: TaskRecord[]): string {
+    return renderReport(rs, meta).markdown;
+  }
+
+  test("headline stays the FULL rate; the clean row reports the narrower one", () => {
+    const md = headlineOf(records);
+    // Overall: 3 of 4 resolved. Clean only: 1 of 2. The operator asked for overall to lead.
+    expect(md).toContain("| Resolve rate (oracle) | 75% (3/4) |");
+    expect(md).toContain("clean tickets only (no fix in the ticket) | 50% (1/2) |");
+  });
+
+  test("the headline row is printed ABOVE the clean row", () => {
+    const md = headlineOf(records);
+    expect(md.indexOf("| Resolve rate (oracle) |")).toBeLessThan(md.indexOf("clean tickets only"));
+  });
+
+  test("an UNMEASURED record is excluded from the clean subset entirely, not counted as clean", () => {
+    // The dangerous failure: treating "we never measured it" as "we proved it clean" would
+    // silently inflate the one number whose whole job is to be the conservative one.
+    const withUnmeasured = [
+      ...records,
+      makeRecord({ instance: "u1", resolved: true, taxonomy: "resolved" }),
+    ];
+    const md = headlineOf(withUnmeasured);
+    expect(md).toContain("| Resolve rate (oracle) | 80% (4/5) |"); // u1 DOES count overall
+    expect(md).toContain("clean tickets only (no fix in the ticket) | 50% (1/2) |"); // but not here
+  });
+
+  test("a record excluded from the resolve denominator is excluded from the clean subset too", () => {
+    // Denominator hygiene must not be weakened by the new row: a dropped instance has no
+    // trustworthy verdict, clean ticket or not.
+    const withDropped = [
+      ...records,
+      makeRecord({
+        instance: "x1",
+        resolved: false,
+        taxonomy: "dropped-base-passes",
+        ticket_fix_overlap: clean,
+      }),
+    ];
+    expect(headlineOf(withDropped)).toContain(
+      "clean tickets only (no fix in the ticket) | 50% (1/2) |",
+    );
+  });
+
+  test("renders n/a rather than a NaN artifact when nothing was measured at all", () => {
+    const none = [makeRecord({ instance: "n1", resolved: true, taxonomy: "resolved" })];
+    expect(headlineOf(none)).toContain("clean tickets only (no fix in the ticket) | n/a (0/0) |");
+  });
+});

@@ -48,12 +48,29 @@ const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
   "unscored",
 ]);
 
+/** ENG-411. Named once so the report and its tests cannot drift on what this row claims. */
+const CLEAN_TICKET_LABEL = "Resolve rate — clean tickets only (no fix in the ticket)";
+
 function inResolveDenom(r: TaskRecord): boolean {
   return !EXCLUDED_FROM_RESOLVE_DENOM.has(r.taxonomy);
 }
 
 function resolvedCount(rs: TaskRecord[]): number {
   return rs.filter((r) => r.resolved).length;
+}
+
+/**
+ * ENG-411: true iff the corpus's own issue text contained NO line of the accepted fix or the
+ * held-out tests — i.e. styre had to derive the fix rather than read it off the ticket.
+ *
+ * A record whose overlap is `null`/absent was never measured (an unparseable corpus patch, or
+ * a pre-ENG-411 fixture). It is excluded from the clean subset entirely — numerator AND
+ * denominator. "We did not look" must never render as "we proved it clean"; folding it in
+ * would inflate exactly the number this subset exists to keep honest.
+ */
+function isCleanTicket(r: TaskRecord): boolean {
+  const o = r.ticket_fix_overlap;
+  return o != null && o.fix_lines === 0 && o.test_lines === 0;
 }
 
 /** true iff `r` counts toward the "self-report gap": styre opened a PR (self-reported
@@ -137,6 +154,17 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   const resolvedOn = resolvedCount(webOn);
   const resolvedPost = resolvedCount(postCutoff);
 
+  // ENG-411: the SAME denominator hygiene, further narrowed to tickets that gave nothing away.
+  // The headline row above stays the full rate, so it remains comparable with published
+  // SWE-bench numbers; this row sits under it and says what the rate is when styre could not
+  // have read the fix off its own ticket.
+  const cleanOff = webOff.filter(isCleanTicket);
+  const cleanOn = webOn.filter(isCleanTicket);
+  const cleanPost = postCutoff.filter(isCleanTicket);
+  const resolvedCleanOff = resolvedCount(cleanOff);
+  const resolvedCleanOn = resolvedCount(cleanOn);
+  const resolvedCleanPost = resolvedCount(cleanPost);
+
   const gapOff = webOff.filter(isSelfReportGap).length;
   const gapOn = webOn.filter(isSelfReportGap).length;
   const gapPost = postCutoff.filter(isSelfReportGap).length;
@@ -170,6 +198,9 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   lines.push("|---|---|---|---|");
   lines.push(
     `| Resolve rate (oracle) | ${absCell(resolvedOff, webOff.length)} | ${deltaCell(resolvedOff, webOff.length, resolvedOn, webOn.length)} | ${absCell(resolvedPost, postCutoff.length)} |`,
+  );
+  lines.push(
+    `| ${CLEAN_TICKET_LABEL} | ${absCell(resolvedCleanOff, cleanOff.length)} | ${deltaCell(resolvedCleanOff, cleanOff.length, resolvedCleanOn, cleanOn.length)} | ${absCell(resolvedCleanPost, cleanPost.length)} |`,
   );
   lines.push(
     `| Self-report gap (opened-unresolved) | ${absCell(gapOff, webOff.length)} | ${deltaCell(gapOff, webOff.length, gapOn, webOn.length)} | ${absCell(gapPost, postCutoff.length)} |`,

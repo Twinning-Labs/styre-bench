@@ -7,6 +7,7 @@ import {
   addedPaths,
   assertNoHeldOut,
   assertNoHeldOutPaths,
+  measureTicketOverlap,
   touchedPaths,
 } from "../orchestrator/firewall";
 import { repoNameFor, seedGithub } from "../orchestrator/seed-github";
@@ -27,7 +28,6 @@ function makeInstance(overrides: Partial<Instance> = {}): Instance {
     base_commit: "deadbeefcafe",
     problem_statement:
       "Calling widget.compute() with a negative offset raises an unhandled KeyError.",
-    hints: "The bug is likely in widget/core.py around the offset-normalization branch.",
     image: "sweb.eval.x86_64.org__repo-123",
     fail_to_pass: ["tests/test_widget.py::test_negative_offset"],
     pass_to_pass: ["tests/test_widget.py::test_basic"],
@@ -452,28 +452,37 @@ describe("seedGithub / seedLinear: fail CLOSED on an unparseable patch (integrat
 });
 
 describe("buildIssueBody (pure)", () => {
-  test("includes the problem_statement and hints, never fix_patch/test_patch content", () => {
+  test("includes the problem_statement, never fix_patch/test_patch content", () => {
     const inst = makeInstance();
-    const body = buildIssueBody(inst);
+    const { body } = buildIssueBody(inst);
     expect(body).toContain(inst.problem_statement);
-    expect(body).toContain(inst.hints ?? "");
     expect(body).not.toContain(SENTINEL_FIX_LINE.slice(1));
     expect(body).not.toContain(SENTINEL_TEST_LINE.slice(1));
   });
 
-  test("has What/Why/Scope/Acceptance criteria/Refs sections", () => {
+  test("has What/Why/Scope/Acceptance criteria sections, and NO Refs section (ENG-411)", () => {
     const inst = makeInstance();
-    const body = buildIssueBody(inst);
+    const { body } = buildIssueBody(inst);
     expect(body).toContain("## What");
     expect(body).toContain("## Why");
     expect(body).toContain("## Scope");
     expect(body).toContain("## Acceptance criteria");
-    expect(body).toContain("## Refs");
+    // `## Refs` carried hints_text and nothing else; the section goes with the field.
+    expect(body).not.toContain("## Refs");
+  });
+
+  test("benchAuthored is every line the bench wrote and NONE of the corpus issue text", () => {
+    const inst = makeInstance();
+    const { body, benchAuthored } = buildIssueBody(inst);
+    expect(benchAuthored).toContain("## Acceptance criteria");
+    expect(benchAuthored).not.toContain(inst.problem_statement);
+    // Splitting must not drop anything: every bench-authored line is still in the real body.
+    for (const line of benchAuthored.split("\n")) expect(body).toContain(line);
   });
 
   test("exactly ONE gated acceptance criterion — the behavioral bug criterion (styre M1–M6: 1 AC → 1 RED-first scoped check)", () => {
     const inst = makeInstance();
-    const body = buildIssueBody(inst);
+    const { body } = buildIssueBody(inst);
     // styre derives one AC per GFM `- [ ]` line; each must yield a RED-first scoped check or
     // checks:dispatch escalates. Only the bug-behavior criterion maps to such a check.
     const checkboxes = body.split("\n").filter((l) => /^- \[ \]/.test(l));
@@ -481,6 +490,71 @@ describe("buildIssueBody (pure)", () => {
     // The former meta-criteria must NOT be gated ACs (non-regression rides styre's advisory sweep).
     expect(body).not.toContain("- [ ] Existing tests still pass");
     expect(body).not.toContain("- [ ] A regression test covering this bug is added");
+  });
+});
+
+describe("measureTicketOverlap (pure, ENG-411): counts what the ticket gave away", () => {
+  test("a clean ticket measures zero on both patches", () => {
+    const inst = makeInstance();
+    expect(measureTicketOverlap("nothing incriminating here at all", inst)).toEqual({
+      fix_lines: 0,
+      test_lines: 0,
+      sample: [],
+    });
+  });
+
+  test("counts fix_patch and test_patch lines SEPARATELY", () => {
+    const inst = makeInstance();
+    const fixOnly = measureTicketOverlap(SENTINEL_FIX_LINE.slice(1).trim(), inst);
+    expect(fixOnly.fix_lines).toBe(1);
+    expect(fixOnly.test_lines).toBe(0);
+
+    const testOnly = measureTicketOverlap(SENTINEL_TEST_LINE.slice(1).trim(), inst);
+    expect(testOnly.fix_lines).toBe(0);
+    expect(testOnly.test_lines).toBe(1);
+  });
+
+  test("counts DISTINCT lines — a ticket quoting the same line twice is not twice as leaky", () => {
+    const inst = makeInstance();
+    const line = SENTINEL_FIX_LINE.slice(1).trim();
+    expect(measureTicketOverlap(`${line}\n${line}\n${line}`, inst).fix_lines).toBe(1);
+  });
+
+  test("shares its held-out-line definition with the gate: what one sees, the other sees", () => {
+    // If these two ever disagree, "clean subset" stops meaning "the gate would have blocked
+    // this", and the report's second number quietly becomes a different claim.
+    const inst = makeInstance();
+    const text = SENTINEL_FIX_LINE.slice(1).trim();
+    expect(measureTicketOverlap(text, inst).fix_lines).toBeGreaterThan(0);
+    expect(() => assertNoHeldOut(text, inst)).toThrow(/FIREWALL VIOLATION/);
+  });
+
+  test("sample is capped at 3 and truncated to 80 chars — evidence, never a reconstructable patch", () => {
+    const longLine = `x_${"y".repeat(200)}`;
+    const lines = [
+      longLine,
+      "aaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbb",
+      "cccccccccccccccccccccccc",
+      "dddddddddddddddddddddddd",
+    ];
+    const inst = makeInstance({
+      fix_patch: [
+        "diff --git a/w/c.py b/w/c.py",
+        "--- a/w/c.py",
+        "+++ b/w/c.py",
+        ...lines.map((l) => `+${l}`),
+      ].join("\n"),
+    });
+    const got = measureTicketOverlap(lines.join("\n"), inst);
+    expect(got.fix_lines).toBe(5);
+    expect(got.sample).toHaveLength(3);
+    for (const sampled of got.sample) expect(sampled.length).toBeLessThanOrEqual(81);
+  });
+
+  test("FAILS CLOSED on an unparseable patch — 'not measured' must never render as 'clean'", () => {
+    const inst = makeInstance({ fix_patch: "this is not a diff at all, just prose" });
+    expect(() => measureTicketOverlap("anything", inst)).toThrow(/unparseable patch/);
   });
 });
 
@@ -526,11 +600,21 @@ describe("seedLinear (mocked deps — no network)", () => {
     expect(result.ident).toBe("BENCH-2");
   });
 
-  test("rejects before calling createIssue if the description somehow carried held-out content (defense-in-depth on a corrupted body builder)", async () => {
-    // Simulates a future regression in buildIssueBody by injecting a deps.createIssue that
-    // would only be reached AFTER the firewall check — asserts the firewall runs first by
-    // making createIssue itself detect it was never called with tainted content.
-    const inst = makeInstance({ problem_statement: SENTINEL_FIX_LINE.slice(1) });
+  test("rejects before calling createIssue when BENCH-AUTHORED text carries held-out content", async () => {
+    // The gate's real job: catch a bench bug where something we WROTE contains the patch.
+    // Simulated from the other side — a fix_patch that adds a line the scaffolding already
+    // contains — because the scaffolding is static, so this is the only way the overlap can
+    // arise without hand-editing the builder. createIssue records whether it was reached, so
+    // this asserts ORDERING (gate first), not merely that something threw.
+    const acLine = "- [ ] The reported bug no longer reproduces";
+    const inst = makeInstance({
+      fix_patch: [
+        "diff --git a/w/c.py b/w/c.py",
+        "--- a/w/c.py",
+        "+++ b/w/c.py",
+        `+${acLine}`,
+      ].join("\n"),
+    });
     let called = false;
     await expect(
       seedLinear(
@@ -547,6 +631,30 @@ describe("seedLinear (mocked deps — no network)", () => {
       ),
     ).rejects.toThrow(/FIREWALL VIOLATION/);
     expect(called).toBe(false);
+  });
+
+  test("ENG-411: a problem_statement that quotes the accepted fix SEEDS ANYWAY — it is measured, not blocked", async () => {
+    // The 30.8% case. A real GitHub issue where the reporter proposed the code that was
+    // ultimately merged is not a bench leak, and refusing to run it cannot un-write the issue.
+    const inst = makeInstance({ problem_statement: SENTINEL_FIX_LINE.slice(1) });
+    let descriptionSeen = "";
+    const result = await seedLinear(
+      inst,
+      { linearProjectId: "proj-123" },
+      {
+        deps: {
+          createIssue: async (input) => {
+            descriptionSeen = input.description;
+            return { ident: "BENCH-4" } as { ident: string };
+          },
+        },
+      },
+    );
+    expect(result.ident).toBe("BENCH-4");
+    expect(descriptionSeen).toContain(SENTINEL_FIX_LINE.slice(1).trim());
+    // ...and the overlap is recorded rather than discarded.
+    const overlap = measureTicketOverlap(inst.problem_statement, inst);
+    expect(overlap.fix_lines).toBeGreaterThan(0);
   });
 });
 

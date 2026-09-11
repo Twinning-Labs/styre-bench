@@ -110,13 +110,28 @@ export function buildIssueTitle(inst: Instance): string {
   return `[bench] ${firstLine(inst.problem_statement, 120)}`;
 }
 
+/** The two halves of a seeded ticket: what the BENCH wrote, and that plus the corpus's own
+ *  issue text. Separated so the firewall gate and the overlap measurement each get exactly
+ *  the text they are about — see `buildIssueBody`. */
+export interface BuiltIssueBody {
+  body: string;
+  benchAuthored: string;
+}
+
 /**
- * PURE. Builds the Linear issue description as What/Why/Scope(IN/OUT)/Acceptance
- * criteria/Refs (mirrors the repo's own Linear ticket convention) from ONLY
- * `inst.problem_statement` (+ `inst.hints`). Contains ONLY issue text — `fix_patch`/
- * `test_patch` are never referenced here. The caller (`seedLinear`) additionally runs
- * `assertNoHeldOut` over the result as a defense-in-depth firewall check before it is
- * ever sent to Linear.
+ * PURE. Builds the Linear issue description as What/Why/Scope(IN/OUT)/Acceptance criteria
+ * (mirrors the repo's own Linear ticket convention) from ONLY `inst.problem_statement`.
+ * `fix_patch`/`test_patch` are never referenced here.
+ *
+ * Returns the two halves separately (ENG-411). `benchAuthored` is every line the BENCH wrote;
+ * `body` is that plus the corpus's verbatim issue text. `seedLinear` hard-gates the former
+ * with `assertNoHeldOut` — that check exists to catch a bench bug ("did we compose the patch
+ * into a ticket?") and stays fail-closed — and MEASURES the latter with
+ * `measureTicketOverlap`, because a real GitHub issue that happens to contain the accepted
+ * fix is not a bench bug and cannot be fixed by refusing to run it.
+ *
+ * NO `## Refs` SECTION. It carried `hints_text` and nothing else; see `corpus.ts` for why
+ * that field is no longer read at all.
  *
  * ACCEPTANCE CRITERIA — exactly ONE `- [ ]` item, by design (styre main #67, verify
  * M1–M6). styre derives one AC per GFM `- [ ]` line and, at design time, `checks:dispatch`
@@ -129,12 +144,10 @@ export function buildIssueTitle(inst: Instance): string {
  * stated as Scope-IN guidance below; a regression test is what `checks:dispatch` authors
  * anyway. So the gate is the single behavioral criterion; the rest is guidance, not a gate.
  */
-export function buildIssueBody(inst: Instance): string {
-  const hints = inst.hints?.trim();
-  return [
-    "## What",
-    inst.problem_statement.trim(),
-    "",
+export function buildIssueBody(inst: Instance): BuiltIssueBody {
+  // Everything the BENCH writes. Kept as its own array so the firewall can be pointed at it
+  // exactly, with no string surgery to separate it from the corpus text below.
+  const benchAuthored = [
     "## Why",
     "A bug reported against the seeded repo at its pre-fix commit; styre should design, " +
       "implement, and verify a fix end to end.",
@@ -147,20 +160,23 @@ export function buildIssueBody(inst: Instance): string {
     "",
     "## Acceptance criteria",
     "- [ ] The reported bug no longer reproduces",
-    "",
-    "## Refs",
-    hints && hints.length > 0 ? hints : "(none)",
-  ].join("\n");
+  ];
+  return {
+    body: ["## What", inst.problem_statement.trim(), "", ...benchAuthored].join("\n"),
+    benchAuthored: benchAuthored.join("\n"),
+  };
 }
 
 /**
- * Creates a Linear issue in `cfg.linearProjectId` from `inst.problem_statement`(+`hints`),
- * labeled `Bug`.
+ * Creates a Linear issue in `cfg.linearProjectId` from `inst.problem_statement`, labeled `Bug`.
  *
- * FIREWALL: `assertNoHeldOut` runs over the built description BEFORE `deps.createIssue` is
- * ever called — the description must contain ONLY issue text, never a line from
- * `inst.fix_patch`/`inst.test_patch` (this also catches the edge case where
- * `problem_statement` itself happens to quote held-out content verbatim).
+ * FIREWALL: `assertNoHeldOut` runs over the BENCH-AUTHORED half of the description BEFORE
+ * `deps.createIssue` is ever called — nothing the bench writes may contain a line from
+ * `inst.fix_patch`/`inst.test_patch`. It no longer covers the corpus's verbatim
+ * `problem_statement`: that text is a public GitHub issue written before any fix existed, so
+ * an overlap there is a property of the instance, not a leak by the bench. ENG-411 replaced
+ * that block (30.8% of SWE-bench Verified) with `measureTicketOverlap`, recorded per record
+ * and reported as a clean-subset resolve rate alongside the headline.
  */
 export async function seedLinear(
   inst: Instance,
@@ -170,8 +186,11 @@ export async function seedLinear(
   const deps: SeedLinearDeps = { ...defaultDeps, ...opts.deps };
 
   const title = buildIssueTitle(inst);
-  const description = buildIssueBody(inst);
-  assertNoHeldOut(description, inst);
+  const { body: description, benchAuthored } = buildIssueBody(inst);
+  // ENG-411: the GATE covers what the bench wrote — a held-out line here is a bench bug and
+  // must stop the seed. The corpus's own `problem_statement` is measured instead, by
+  // `measureTicketOverlap` in the pipeline, and never blocks: see that function's doc.
+  assertNoHeldOut(benchAuthored, inst);
 
   return deps.createIssue({
     projectId: cfg.linearProjectId,
