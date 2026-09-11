@@ -30,6 +30,8 @@ function makeRecord(overrides: Partial<TaskRecord> & { instance: string }): Task
     cohort: "web-off",
     post_cutoff: false,
     resolved: false,
+    pr_self_reported: false,
+    pr_lookup_error: null,
     pr_opened: false,
     self_authored_test: null,
     self_test_passed: null,

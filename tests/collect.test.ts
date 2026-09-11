@@ -454,3 +454,56 @@ describe("collect: vocabulary drift guard", () => {
     expect(rec.taxonomy).toBe("infra");
   });
 });
+
+describe("pr_self_reported: styre's OWN claim, kept beside the forge's ground truth", () => {
+  /**
+   * The self-report half of the `pr_opened` tri-state. It exists so the report can say out
+   * loud when the forge and styre's telemetry disagree -- the disagreement that WAS present
+   * in matrix #1 and #2 (outcome `pr-ready`, `pr_opened` false) and that nothing surfaced,
+   * which is why a broken forge lookup went unnoticed for two full runs.
+   */
+  const ctx = { language: "ts" as const, pr_opened: null };
+
+  test("outcome pr-ready -> styre claims a PR", () => {
+    const rec = collect(summaryLine({ outcome: "pr-ready" }), PR_DIFF, RUNNABLE_PROFILE, ctx);
+    expect(rec.pr_self_reported).toBe(true);
+  });
+
+  test("outcome done -> styre claims a PR", () => {
+    const rec = collect(summaryLine({ outcome: "done" }), PR_DIFF, RUNNABLE_PROFILE, ctx);
+    expect(rec.pr_self_reported).toBe(true);
+  });
+
+  test("outcome paused -> styre claims no PR", () => {
+    const rec = collect(
+      summaryLine({ outcome: "paused", reason: "budget" }),
+      PR_DIFF,
+      RUNNABLE_PROFILE,
+      ctx,
+    );
+    expect(rec.pr_self_reported).toBe(false);
+  });
+
+  test("outcome abandoned -> styre claims no PR", () => {
+    const rec = collect(summaryLine({ outcome: "abandoned" }), PR_DIFF, RUNNABLE_PROFILE, ctx);
+    expect(rec.pr_self_reported).toBe(false);
+  });
+
+  test("no summary at all -> null: styre made no claim either way", () => {
+    // Distinct from `false`. Only a record where styre actually SAID something can disagree
+    // with the forge, so a no-summary crash must stay out of the disagreement check.
+    const rec = collect("", PR_DIFF, RUNNABLE_PROFILE, ctx);
+    expect(rec.pr_self_reported).toBeNull();
+  });
+});
+
+describe("self_test_passed: an undetermined PR lookup never reads as a failure", () => {
+  test("pr_opened:null -> self_test_passed:null, not false", () => {
+    const rec = collect(summaryLine({ outcome: "pr-ready" }), PR_DIFF, RUNNABLE_PROFILE, {
+      language: "ts",
+      pr_opened: null,
+    });
+    expect(rec.self_authored_test).toBe(true);
+    expect(rec.self_test_passed).toBeNull();
+  });
+});

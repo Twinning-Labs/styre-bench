@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { $ } from "bun";
 import { Octokit } from "octokit";
 import type { BENCH_CONFIG } from "../config/bench.config";
 import { renderReport } from "../report/render";
@@ -228,10 +226,17 @@ export interface CollectStageResult {
    *  source. Empty string if unavailable (not `null`) — matches `detect_leak`'s own
    *  "transcript-unavailable" handling of falsy input. */
   transcript: string;
-  /** Whether styre actually opened a PR (determined by the same PR lookup that produced
-   *  `diff` — see `fetchPrDiff` below), independent of `record.self_test_passed`'s
-   *  approximation. */
-  pr_opened: boolean;
+  /** GROUND TRUTH: whether styre actually opened a PR, read from the forge (see
+   *  `lookupPrOpened`). `null` iff the lookup could not find out — NEVER collapsed to
+   *  `false`, which would render an unobservable metric as a measured zero. */
+  pr_opened: boolean | null;
+  /** SELF-REPORT: whether styre's own terminal `outcome` claims a PR (`pr-ready`/`done`).
+   *  Recorded alongside the ground truth so the two disagreeing is a visible finding rather
+   *  than something an operator has to notice by hand — which is how the `pr_opened` defect
+   *  survived two matrices. */
+  pr_self_reported: boolean | null;
+  /** Why `pr_opened` is `null`. `null` when the lookup succeeded. */
+  pr_lookup_error: string | null;
 }
 
 function parseOwnerRepoFromUrl(repoUrl: string): { owner: string; repo: string } {
@@ -242,67 +247,72 @@ function parseOwnerRepoFromUrl(repoUrl: string): { owner: string; repo: string }
   return { owner: match[1], repo: match[2] };
 }
 
-/**
- * Finds the (by convention, at most one) PR styre opened against `seed.defaultBranch` on the
- * seeded throwaway repo, and computes the BARE TREE DIFF between `inst.base_commit` and the
- * PR's head sha via `git diff <base>..<head>` — never `git log`/a formatted-patch source, so
- * the result structurally cannot carry a commit message or a `Co-Authored-By`/
- * `Claude-Session` trailer (Global Constraint, Task-9 crux).
- *
- * KNOWN-BROKEN-UNTIL-LIVE (no live container/PR was exercised in this session — matching
- * `run-task.ts`'s/`seed-github.ts`'s own KNOWN-BROKEN-UNTIL-LIVE notes on unverified live
- * assumptions): the exact PR shape styre's own github tool produces (feature-branch name;
- * whether it targets `seed.defaultBranch` directly) is unverified against a real run — this
- * reads the MOST RECENT PR (open or closed) with base `seed.defaultBranch`, the natural
- * reading of styre's CL-COMMIT ownership model (CLAUDE.md: "the runner holds creds and
- * commits"), but not yet confirmed live. `runInstance`'s default `collect` dep only calls
- * this when `GITHUB_TOKEN` is set; any failure (network, no PR found, git error) degrades to
- * `{ diff: "", pr_opened: false }` rather than crashing `collect` — this stage's caller
- * (`attemptOnce`) MUST still treat a genuinely no-summary run as `taxonomy: "infra"` via
- * `collectPure` itself, so a diff-lookup failure never masquerades as a false "resolved".
- */
-async function fetchPrDiff(
-  inst: Instance,
-  seed: RunSeed,
-  githubToken: string,
-): Promise<{ diff: string; pr_opened: boolean }> {
-  const { owner, repo } = parseOwnerRepoFromUrl(seed.repoUrl);
-  const octokit = new Octokit({ auth: githubToken });
-  const prs = await octokit.rest.pulls.list({
-    owner,
-    repo,
-    state: "all",
-    base: seed.defaultBranch,
-    sort: "created",
-    direction: "desc",
-    per_page: 1,
-  });
-  const pr = prs.data[0];
-  if (!pr) return { diff: "", pr_opened: false };
+/** The one field of a pull request this pipeline reads: its existence. */
+export interface PrSummary {
+  number: number;
+}
 
-  const headSha = pr.head.sha;
-  const scratch = await mkdtemp(path.join(tmpdir(), "styre-bench-pipeline-diff-"));
+/** Injected seam for `lookupPrOpened` — the real one calls the GitHub API; tests pass a stub.
+ *  Separated so the lookup is testable WITHOUT a network or a live repo, which is precisely
+ *  what the un-injected `fetchPrDiff` it replaces never was. */
+export type PrLister = (owner: string, repo: string) => Promise<PrSummary[]>;
+
+/** Tri-state. `pr_opened: null` means THE LOOKUP FAILED — we did not find out — and is a
+ *  different claim from `false` ("we looked; styre opened no PR"). `error` carries why. */
+export interface PrLookupResult {
+  pr_opened: boolean | null;
+  error: string | null;
+}
+
+/**
+ * Did styre open a pull request on the seeded throwaway repo? GROUND TRUTH — read from the
+ * forge, not from styre's own summary (CLAUDE.md move 5). The self-reported half is recorded
+ * separately as `pr_self_reported`, and the two disagreeing is itself a finding.
+ *
+ * THIS FUNCTION DOES NOT TOUCH GIT, AND MUST NOT. Its predecessor (`fetchPrDiff`) found the
+ * PR and then cloned the repo to build a diff, returning `pr_opened: true` only after the
+ * clone succeeded. The clone could never succeed: the scratch repos are created
+ * `private: true` (`seed-github.ts`) and the orchestrator process has no git credential
+ * helper — the helper in `run-task.ts` is configured INSIDE the container. So every call
+ * threw, every throw was swallowed into `pr_opened: false`, and two headline metrics read a
+ * measured zero for two consecutive matrices. The caller discards the diff anyway (see
+ * `defaultCollectStage`), so the clone was pure downside. `tests/pr-lookup.test.ts` pins its
+ * absence with a source-level invariant.
+ *
+ * No `base` filter: filtering on `seed.defaultBranch` would silently return zero — an
+ * indistinguishable "false" — if styre ever targeted a different base. The scratch repo is
+ * created fresh per instance and only this run touches it, so ANY pull request on it is
+ * styre's.
+ */
+export async function lookupPrOpened(seed: RunSeed, listPulls: PrLister): Promise<PrLookupResult> {
   try {
-    await $`git clone --quiet ${seed.repoUrl} ${scratch}`.quiet();
-    await $`git -C ${scratch} fetch --quiet origin ${inst.base_commit} ${headSha}`
-      .quiet()
-      .nothrow();
-    // Two-dot (`base..head`), per the Global Constraint (docs/plans/2026-07-02-styre-bench-pilot-rig.md
-    // Task-9 crux) — the unambiguous "changes styre made" diff. Three-dot (`base...head`, the
-    // merge-base diff) happens to equal this ONLY because `base` is an ancestor of `head` here;
-    // that's fragile (rebases/force-pushes on the throwaway branch could break the equivalence),
-    // so use the literal two-dot form rather than relying on the coincidence.
-    const diff = await $`git -C ${scratch} diff ${inst.base_commit}..${headSha}`.quiet().text();
-    return { diff, pr_opened: true };
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
+    const { owner, repo } = parseOwnerRepoFromUrl(seed.repoUrl);
+    const prs = await listPulls(owner, repo);
+    return { pr_opened: prs.length > 0, error: null };
+  } catch (err) {
+    return { pr_opened: null, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** The production `PrLister`: every PR on the repo, open or closed. */
+function octokitPrLister(githubToken: string): PrLister {
+  const octokit = new Octokit({ auth: githubToken });
+  return async (owner, repo) => {
+    const prs = await octokit.rest.pulls.list({ owner, repo, state: "all", per_page: 1 });
+    return prs.data.map((pr) => ({ number: pr.number }));
+  };
 }
 
 export async function defaultCollectStage(
   inst: Instance,
   seed: RunSeed,
   result: RunStyreResult,
+  /** Injected so the PR lookup is testable without a network or a live repo. Defaults to the
+   *  real GitHub read; `null` when no token is configured, which is a genuine "could not find
+   *  out", not a "no PR". */
+  listPulls: PrLister | null = process.env.GITHUB_TOKEN
+    ? octokitPrLister(process.env.GITHUB_TOKEN)
+    : null,
 ): Promise<CollectStageResult> {
   // styre setup failed (distinct exit code from the entrypoint): no usable profile was
   // produced, so styre run never happened and there is nothing to collect. This is a
@@ -327,7 +337,11 @@ export async function defaultCollectStage(
       diff: "",
       addedTestPaths: [],
       transcript,
+      // styre setup failed, so `styre run` never started: there was no PR to open and no
+      // claim to make. Both are MEASURED false here, not unknown.
       pr_opened: false,
+      pr_self_reported: false,
+      pr_lookup_error: null,
     };
   }
 
@@ -343,15 +357,21 @@ export async function defaultCollectStage(
     profile = {};
   }
 
-  const githubToken = process.env.GITHUB_TOKEN ?? "";
-  // The PR is still consulted, but ONLY for `pr_opened`. Its diff is deliberately discarded:
-  // the PR's merge-base is the clean upstream base_commit, so a PR diff re-admits the image's
-  // own environment setup (a "SWE-bench" commit on Python images, npm/bower churn on
+  // The forge is consulted ONLY for `pr_opened`. Its diff is deliberately NOT fetched: the
+  // PR's merge-base is the clean upstream base_commit, so a PR diff re-admits the image's own
+  // environment setup (a "SWE-bench" commit on Python images, npm/bower churn on
   // Multi-SWE-bench ones). That is what scored a correctly-solved instance resolved:false in
   // run 34432706755.
-  const { pr_opened } = githubToken
-    ? await fetchPrDiff(inst, seed, githubToken).catch(() => ({ pr_opened: false }))
-    : { pr_opened: false };
+  const { pr_opened, error: pr_lookup_error } = listPulls
+    ? await lookupPrOpened(seed, listPulls)
+    : { pr_opened: null, error: "GITHUB_TOKEN is not set — the PR lookup could not run" };
+  if (pr_lookup_error !== null) {
+    // Never silent. The predecessor swallowed this into `false` and the report published the
+    // resulting zero as if it had been measured.
+    console.error(
+      `[collect] ${inst.id}: PR lookup did not determine pr_opened: ${pr_lookup_error}`,
+    );
+  }
   // THE scoring input: styre's changes against the run-start baseline, captured in-container.
   // Absent/unreadable reads as empty, which collect already treats as "no work delivered" —
   // never silently fall back to the PR diff, which would reinstate the defect above.
@@ -380,6 +400,8 @@ export async function defaultCollectStage(
     addedTestPaths,
     transcript,
     pr_opened,
+    pr_self_reported: record.pr_self_reported ?? null,
+    pr_lookup_error,
   };
 }
 
@@ -514,7 +536,12 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     cohort: cfg.cohort,
     post_cutoff: tagCutoff(inst, cfg.modelCutoff),
     resolved: false,
+    // styre never ran for a record that keeps these defaults (a control drop, a seed
+    // failure), so "no PR, and no claim of one" is MEASURED here, not assumed. A record that
+    // did reach collect has all three overwritten from the `CollectStageResult`.
     pr_opened: false,
+    pr_self_reported: false,
+    pr_lookup_error: null,
     self_authored_test: null,
     self_test_passed: null,
     ticks: 0,
@@ -566,7 +593,12 @@ function infraStageFromError(err: unknown, where: string): CollectStageResult {
     diff: "",
     addedTestPaths: [],
     transcript: "",
-    pr_opened: false,
+    // The container may well have run and opened a PR before collect threw. We did not get
+    // far enough to look, so this is UNKNOWN — reporting `false` here would be a guess
+    // dressed as a measurement.
+    pr_opened: null,
+    pr_self_reported: null,
+    pr_lookup_error: `collect did not reach the PR lookup: ${message}`,
   };
 }
 
@@ -878,6 +910,8 @@ export async function runInstance(
       ...stage.record,
       taxonomy: "infra",
       pr_opened: stage.pr_opened,
+      pr_self_reported: stage.pr_self_reported,
+      pr_lookup_error: stage.pr_lookup_error,
       infra_retries: infraRetries,
       cost_usd_measured: taskMeasuredUsd,
       cost_usd_estimated: taskEstimatedUsd,
@@ -888,6 +922,8 @@ export async function runInstance(
     ...base,
     ...stage.record,
     pr_opened: stage.pr_opened,
+    pr_self_reported: stage.pr_self_reported,
+    pr_lookup_error: stage.pr_lookup_error,
     infra_retries: infraRetries,
     taxonomy: stage.record.taxonomy ?? base.taxonomy,
     cost_usd_measured: taskMeasuredUsd,
