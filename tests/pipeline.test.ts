@@ -10,6 +10,7 @@ import {
   type ScoreResult,
   type SelfTestResult,
   defaultCollectStage,
+  dropTaxonomyFor,
   resolvePythonBin,
   runInstance,
   runPilot,
@@ -241,21 +242,21 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     expect(calls.cleanup).toBe(0);
   });
 
-  test("gold_resolved:false -> dropped-flaky, styre never invoked", async () => {
+  test("gold_resolved:false -> dropped-gold-unresolved (NOT flaky), styre never invoked", async () => {
     const { deps, calls } = trackedDeps({
       runControls: async () => ({ gold_resolved: false, base_fails: true, deterministic: true }),
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
-    expect(rec.taxonomy).toBe("dropped-flaky");
+    expect(rec.taxonomy).toBe("dropped-gold-unresolved");
     expect(calls.seed).toBe(0);
   });
 
-  test("base_fails:false -> dropped-flaky, styre never invoked", async () => {
+  test("base_fails:false -> dropped-base-passes (NOT flaky), styre never invoked", async () => {
     const { deps, calls } = trackedDeps({
       runControls: async () => ({ gold_resolved: true, base_fails: false, deterministic: true }),
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
-    expect(rec.taxonomy).toBe("dropped-flaky");
+    expect(rec.taxonomy).toBe("dropped-base-passes");
     expect(calls.seed).toBe(0);
   });
 
@@ -1034,5 +1035,53 @@ describe("resolvePythonBin: scorer uses the .venv interpreter, not bare python3"
   });
   test("falls back to python3 only when no venv is present", () => {
     expect(resolvePythonBin({}, "/repo/.venv/bin/python", () => false)).toBe("python3");
+  });
+});
+
+// -- ENG-413: name the control that failed, and keep the evidence -------------------------
+
+describe("ENG-413: drop reasons are distinct and recorded", () => {
+  test("dropTaxonomyFor names the failing control", () => {
+    expect(dropTaxonomyFor({ gold_resolved: false, base_fails: true, deterministic: true })).toBe(
+      "dropped-gold-unresolved",
+    );
+    expect(dropTaxonomyFor({ gold_resolved: true, base_fails: false, deterministic: true })).toBe(
+      "dropped-base-passes",
+    );
+    expect(dropTaxonomyFor({ gold_resolved: true, base_fails: true, deterministic: false })).toBe(
+      "dropped-flaky",
+    );
+  });
+
+  test("gold_resolved:false wins even when determinism ALSO failed", () => {
+    // sphinx-doc__sphinx-7590 was reported flaky when its determinism control had PASSED. An
+    // instance whose gold fix does not resolve cannot be meaningfully judged on the other
+    // controls, so that reason is reported first rather than masked by a second failure.
+    expect(dropTaxonomyFor({ gold_resolved: false, base_fails: false, deterministic: false })).toBe(
+      "dropped-gold-unresolved",
+    );
+  });
+
+  test("the dropped record carries the three control booleans", async () => {
+    // Recovering these after the fact cost a full image build, because they were tested and
+    // then discarded.
+    const { deps } = trackedDeps({
+      runControls: async () => ({ gold_resolved: false, base_fails: true, deterministic: true }),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.controls).toEqual({
+      gold_resolved: false,
+      base_fails: true,
+      deterministic: true,
+    });
+  });
+
+  test("the gate itself is unchanged — all three true still proceeds", async () => {
+    const { deps, calls } = trackedDeps({
+      runControls: async () => ({ gold_resolved: true, base_fails: true, deterministic: true }),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.taxonomy).not.toContain("dropped");
+    expect(calls.seed).toBeGreaterThan(0);
   });
 });

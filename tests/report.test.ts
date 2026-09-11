@@ -493,3 +493,37 @@ describe("renderReport", () => {
     });
   });
 });
+
+// -- ENG-413: the validity panel states WHY instances were dropped -------------------------
+
+test("the validity panel names each drop reason instead of calling them all flaky", () => {
+  const { markdown } = renderReport(
+    [
+      makeRecord({ instance: "a", taxonomy: "dropped-gold-unresolved" }),
+      makeRecord({ instance: "b", taxonomy: "dropped-base-passes" }),
+      makeRecord({ instance: "c", taxonomy: "dropped-flaky" }),
+    ],
+    META,
+  );
+  expect(markdown).toContain("dropped by oracle controls before scoring: 3");
+  expect(markdown).toContain("gold fix does not resolve: 1");
+  expect(markdown).toContain("FAIL_TO_PASS already passes on base: 1");
+  expect(markdown).toContain("flaky: 1");
+});
+
+test("all three drop reasons stay OUT of the resolve denominator", () => {
+  // Splitting the label must not change what counts. A dropped instance was never scored, so
+  // letting any of them into the denominator would understate the resolve rate.
+  const { markdown } = renderReport(
+    [
+      makeRecord({ instance: "a", taxonomy: "resolved", resolved: true }),
+      makeRecord({ instance: "b", taxonomy: "dropped-gold-unresolved" }),
+      makeRecord({ instance: "c", taxonomy: "dropped-base-passes" }),
+      makeRecord({ instance: "d", taxonomy: "dropped-flaky" }),
+    ],
+    META,
+  );
+  // one scored instance, resolved -> 1/1, never 1/4
+  expect(markdown).toContain("1/1");
+  expect(markdown).not.toContain("1/4");
+});

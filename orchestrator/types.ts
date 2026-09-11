@@ -83,9 +83,19 @@ export interface TaskRecord {
   /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
    *  `EXCLUDED_FROM_RESOLVE_DENOM` for the canonical known values: "resolved" |
    *  "opened-but-unresolved" | "loop-exhausted" | "probe" | "parked" | "infra" |
-   *  "dropped-flaky" | "unscored" (SMOKE=2 Option-B oracle-bypass — a successful bypass run
-   *  with no oracle verdict; `resolved` is `null` on these records). */
+   *  "dropped-gold-unresolved" | "dropped-base-passes" | "dropped-flaky" | "unscored"
+   *  (SMOKE=2 Option-B oracle-bypass — a successful bypass run with no oracle verdict;
+   *  `resolved` is `null` on these records).
+   *
+   *  ENG-413: the three `dropped-*` values were one `dropped-flaky`. The controls answer three
+   *  unrelated questions and only ONE of them is flakiness, so collapsing them put a false
+   *  statement in the record: sphinx-doc__sphinx-7590 was reported flaky when its determinism
+   *  control PASSED and the human's own fix simply did not resolve the instance. */
   taxonomy: string;
+  /** ENG-413: the oracle controls as measured, present only on a `dropped-*` record.
+   *  Recovering these after the fact cost a full image build and a re-run, because the
+   *  booleans were tested and then discarded. */
+  controls?: { gold_resolved: boolean; base_fails: boolean; deterministic: boolean };
   /** Task 11: count of whole-instance infra-retries consumed before this record was
    *  finalized (0 if none). Optional/additive — pre-Task-11 code (e.g. report.test.ts's
    *  hand-built fixtures) never sets this and remains valid; `renderReport` does not read

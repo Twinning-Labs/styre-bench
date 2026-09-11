@@ -695,6 +695,29 @@ async function runJudgmentStages(
  * just the last attempt's cost alone. This is what `runPool`'s `runBudgetUsd` kill-switch
  * and the report's cost stats sum over, so it must reflect true cumulative spend.
  */
+/**
+ * Which control failed, as a taxonomy value (ENG-413).
+ *
+ * The three controls answer unrelated questions and only `deterministic` is about flakiness:
+ *   - `gold_resolved: false` — the instance or its image is unusable; the HUMAN's fix does not
+ *     resolve it. Says nothing about styre.
+ *   - `base_fails: false` — the instance is corrupt; its FAIL_TO_PASS tests already pass on base.
+ *   - `deterministic: false` — genuinely flaky tests.
+ *
+ * Reporting the first two as "flaky" was a false statement in the record and in the validity
+ * panel. Checked in this order because an instance whose gold fix does not resolve cannot be
+ * meaningfully judged on the other two.
+ */
+export function dropTaxonomyFor(c: {
+  gold_resolved: boolean;
+  base_fails: boolean;
+  deterministic: boolean;
+}): string {
+  if (!c.gold_resolved) return "dropped-gold-unresolved";
+  if (!c.base_fails) return "dropped-base-passes";
+  return "dropped-flaky";
+}
+
 export async function runInstance(
   inst: Instance,
   binaries: StyreBinaries,
@@ -711,7 +734,9 @@ export async function runInstance(
   if (!bypassOracle) {
     const controls = await deps.runControls(inst);
     if (!(controls.gold_resolved && controls.base_fails && controls.deterministic)) {
-      return { ...base, taxonomy: "dropped-flaky" };
+      // ENG-413: name the control that actually failed, and keep the booleans. The gate itself
+      // is unchanged — any false control still drops the instance.
+      return { ...base, taxonomy: dropTaxonomyFor(controls), controls };
     }
   }
 
