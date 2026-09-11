@@ -76,6 +76,42 @@ The host now also carries an 8 GiB swapfile, because Multi-SWE-bench builds its 
 own harness subprocess where that lock cannot reach. `infra/provision-bench-host.sh` records the
 measured 3.6 GB peak next to the disk sizing it previously reasoned about alone.
 
+### The `nix_swe` race (ENG-419)
+
+Multi-SWE-bench's harness creates a container with the **hardcoded name `nix_swe`**, in
+`run_evaluation.py`'s `__main__`, before it parses a single argument:
+
+```python
+try:    client.containers.get("nix_swe")
+except docker.errors.NotFound:
+        client.containers.run("mswebench/nix_swe:v1.0", "true", name="nix_swe")
+except Exception as e:
+    print(f"Error starting nix_swe container: {e}"); sys.exit(1)
+```
+
+Check-then-act. At `concurrency: 3` two of three instances lost the race, got a 409, and exited
+before evaluating anything; the third timed out behind them. It killed every TypeScript cell of
+the 2026-09-11 matrix. The block lives in the wheel and is duplicated in `build_dataset.py`, so
+it is not patchable from here — but it is avoidable, because the container runs `true`, exits
+immediately, and thereafter `containers.get` finds it in any state.
+
+`scorer/adapters/nix_swe.py` pre-creates it before any harness invocation. Two things make that
+correct, and **the lock is not one of them**: pre-creation means the harness never takes its
+`NotFound` branch, and a lost race (409) is treated as success because the container exists,
+which is all we wanted. Both hold unserialized. The lock exists for a narrower reason —
+`containers.run` pulls a 1.5 GB image when absent, and three concurrent pulls on a cold host is
+exactly what the ENG-420 OOM host does not need.
+
+Measured on the droplet with the container removed:
+
+| | outcomes | elapsed |
+|---|---|---|
+| cold (image absent) | `created`, `present`, `present` | 25.7s — one pull |
+| warm | `present` × 3 | 0.2s |
+
+Lowering `concurrency` was rejected: it trades throughput for a race it narrows rather than
+removes.
+
 `styre-bench` is public, so GitHub Actions minutes are free and **scoring needs no secrets**:
 no agent key, no GitHub token beyond the default.
 

@@ -94,6 +94,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import OracleAdapter
+from .nix_swe import ensure_nix_swe, nix_swe_failure_hint
 
 _SELF_TEST_TIMEOUT_S = 300
 
@@ -348,13 +349,25 @@ class MultiSweBenchAdapter(OracleAdapter):
             "--log_dir",
             str(run_dir / "logs"),
         ]
+        # ENG-419: create the harness's fixed-name `nix_swe` container BEFORE invoking it. The
+        # harness does this itself with a check-then-act that is not concurrency-safe, and under
+        # `concurrency: 3` two of three instances lost the race and exited 1 before evaluating
+        # anything. Best-effort by contract -- see `ensure_nix_swe`; it never raises, so a Docker
+        # problem still surfaces from the harness's own attempt rather than from here.
+        outcome = ensure_nix_swe()
+        if outcome.startswith("unavailable"):
+            print(f"multi-swe-bench: could not pre-create nix_swe ({outcome})", file=sys.stderr)
+
         # No except around this: subprocess.TimeoutExpired must propagate
         # unmodified (fail-closed) -- never swallow a hang into a fake verdict.
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=HARNESS_TIMEOUT_SEC)
         if result.returncode != 0:
+            hint = nix_swe_failure_hint(result.stdout, result.stderr)
             raise RuntimeError(
                 f"multi-swe-bench: harness invocation failed (exit {result.returncode}) for "
-                f"{instance['id']!r}:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                f"{instance['id']!r}:"
+                + (f"\n{hint}" if hint else "")
+                + f"\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
 
         # ASSUMPTION (see module docstring): exact per-instance report.json path
