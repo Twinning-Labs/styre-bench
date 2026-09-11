@@ -89,6 +89,7 @@ ASSUMPTION (verify at live pass, genuinely unconfirmed from static reading):
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -192,13 +193,78 @@ def test_ids(bucket: Any) -> list[str]:
     return []
 
 
+def _stage_counts(stage: Any) -> str:
+    """`(passed, failed, skipped)` for a stage result, for error text. Never raises."""
+    if not isinstance(stage, dict):
+        return "no fix_patch_result at all"
+    return (
+        f"passed={stage.get('passed_count')}, failed={stage.get('failed_count')}, "
+        f"skipped={stage.get('skipped_count')}"
+    )
+
+
+def _measured_nothing(stage: dict[str, Any]) -> bool:
+    """True iff this stage captured zero test results (ENG-430).
+
+    Reads the COUNTS first — that is what a real harness report carries, and what the
+    `fix = (0, 0, 0)` summary is printed from. Falls back to the id-list lengths when no counts
+    are present: a stage listing ten passed tests has plainly measured something, whatever it
+    did or did not choose to count, and raising there would turn a legible verdict into an infra
+    error over a missing field.
+
+    Both empty means nothing ran. That is the only case this returns True for.
+    """
+    total = 0
+    saw_count = False
+    for key in ("passed_count", "failed_count", "skipped_count"):
+        value = stage.get(key)
+        if isinstance(value, int):
+            saw_count = True
+            total += value
+    if saw_count:
+        return total == 0
+    listed = sum(
+        len(stage.get(key) or [])
+        for key in ("passed_tests", "failed_tests", "skipped_tests")
+        if isinstance(stage.get(key), list)
+    )
+    return listed == 0
+
+
+def f2p_fails_before_fix(raw: dict[str, Any]) -> bool:
+    """Do the FAIL_TO_PASS tests genuinely fail with the test patch applied and no fix? (ENG-430)
+
+    Read from the corpus's `test_patch_result` rather than measured here, because the harness
+    will not measure it for us: it is handed `run_result`/`test_patch_result` in `dataset.json`
+    and executes only the fix stage. This checks the corpus's own claim for coherence — every
+    FAIL_TO_PASS test must be absent from the pre-fix passed set — which is a real check, just
+    not an independent one.
+
+    Fail-closed: an instance with no FAIL_TO_PASS tests, or no `test_patch_result` to check
+    against, returns False and is dropped upstream. An unverifiable claim is not a passed control.
+    """
+    f2p = test_ids(raw.get("f2p_tests"))
+    if not f2p:
+        return False
+    stage = raw.get("test_patch_result")
+    if not isinstance(stage, dict):
+        return False
+    passed = stage.get("passed_tests")
+    if not isinstance(passed, list):
+        return False
+    passed_set = set(passed)
+    return all(t not in passed_set for t in f2p)
+
+
 def parse_report(report: dict[str, Any], fail_to_pass_ids: list[str], pass_to_pass_ids: list[str]) -> dict[str, Any]:
     """Pure parser: multi-swe-bench's report.json -> {"resolved","fail_to_pass","pass_to_pass"}.
 
     FAIL-CLOSED: raises on a missing/malformed report or a missing/non-bool
     `valid` key. A `valid: True` claim with no `fix_patch_result` evidence also
-    raises. A target test id absent from the post-fix result defaults to
-    `False`, never silently `True`.
+    raises, as does a fix stage that captured NO test results at all (ENG-430) --
+    "the harness could not measure this" is not a `resolved: False` verdict. A
+    target test id absent from the post-fix result defaults to `False`, never
+    silently `True`.
     """
     if not isinstance(report, dict):
         raise ValueError(f"multi-swe-bench: report is not a dict (got {type(report).__name__})")
@@ -216,9 +282,33 @@ def parse_report(report: dict[str, Any], fail_to_pass_ids: list[str], pass_to_pa
             "multi-swe-bench: report claims valid=True but has no 'fix_patch_result' evidence "
             "-- refusing to trust an unsupported resolved claim"
         )
-    if not isinstance(fix_result, dict):
-        # Legitimate on an invalid/errored run: no id-list data, resolved must be False.
-        fix_result = {}
+    # ENG-430: NOTHING MEASURED IS NOT A VERDICT.
+    #
+    # `valid: False` covers two completely different things, and the adapter used to record both
+    # as `resolved: False`:
+    #
+    #   GOLD on mui-33777:  fix = (5828, 12, 754)   "Before applying the fix patch, the test
+    #                                                passed; however, after ..."
+    #   EMPTY candidate:    fix = (0, 0, 0)         "After applying the fix patch, no test
+    #                                                results were captured when executing the
+    #                                                test command."
+    #
+    # The first is a real verdict: 5,828 tests ran and a PASS_TO_PASS regressed. The second is
+    # the harness telling us the test command produced no output at all — an infra failure
+    # wearing a verdict's clothes. Scoring it `resolved: False` is exactly the fail-closed
+    # violation `base.py` forbids, and it is how a candidate diff that breaks the build would be
+    # recorded as "ran and did not resolve".
+    #
+    # Keyed on the COUNTS, not on `error_msg`: the counts are structural, the message is upstream
+    # prose that can be reworded. The message is quoted in the error because it is the most
+    # useful thing an operator can read.
+    if not isinstance(fix_result, dict) or _measured_nothing(fix_result):
+        raise ValueError(
+            "multi-swe-bench: the fix stage captured NO test results "
+            f"({_stage_counts(fix_result)}) -- the harness could not measure this candidate, "
+            "which is a harness error and not a `resolved: False` verdict"
+            + (f". Harness said: {report['error_msg'].splitlines()[0]}" if report.get("error_msg") else "")
+        )
 
     passed_tests = fix_result.get("passed_tests", [])
     failed_tests = fix_result.get("failed_tests", [])
@@ -385,22 +475,50 @@ class MultiSweBenchAdapter(OracleAdapter):
         return self._run_harness(instance, candidate_diff)
 
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
-        # Same firewall reason as `score`: the gold patch is never in the payload, so it comes
-        # from the fetched corpus record.
-        gold = self.score(
-            instance, _raw_instance(instance["id"], instance.get("language") or "ts")["fix_patch"]
-        )
-        base_a = self.score(instance, "")
-        base_b = self.score(instance, "")
-        # NOTE: 2 base-only runs is a weak flake guard -- revisit N at the live pass.
+        """MSB's controls, re-derived (ENG-430).
+
+        THE EMPTY-CANDIDATE CONTROL DOES NOT WORK HERE, and the 2026-09-11 matrix proved it. The
+        old implementation scored `""` twice and read `base_fails` and `deterministic` off the
+        results. Both were vacuously true, for two compounding reasons:
+
+          1. The harness only EXECUTES the fix stage. We hand it `dataset.json` built from the
+             corpus record, which already carries `run_result` and `test_patch_result`; it reads
+             those and runs only the third stage. So an empty candidate never exercises the base
+             at all — it finished in ~60 seconds against gold's ~20 minutes.
+          2. An empty patch therefore produces `fix = (0, 0, 0)` — no test results captured. Two
+             such runs agree with each other trivially, which is what `deterministic` was
+             reading. Since ENG-430 that is a raise, not a False, so the old code would now blow
+             up rather than quietly report nothing.
+
+        `base_fails` is now computed from the corpus's own `test_patch_result`: the FAIL_TO_PASS
+        tests must NOT be passing with the test patch applied and no fix. That is a real check of
+        a real claim — it is just the corpus's measurement rather than ours, and it is the only
+        one available, because the harness will not re-run that stage for us. Said out loud below
+        rather than left for a reader to infer from a `True`.
+
+        `deterministic` is now GOLD run twice. That measures the thing that actually threatens
+        these instances — mui's `preset-safe` codemod tests, which failed at gold on two
+        unrelated instances — where two empty runs measured nothing. It costs a second gold run
+        (~20 minutes on mui) and removes two ~60-second runs that told us nothing.
+        """
+        raw = _raw_instance(instance["id"], instance.get("language") or "ts")
+        gold_a = self.score(instance, raw["fix_patch"])
+        gold_b = self.score(instance, raw["fix_patch"])
         deterministic = (
-            base_a["resolved"] == base_b["resolved"]
-            and base_a["fail_to_pass"] == base_b["fail_to_pass"]
-            and base_a["pass_to_pass"] == base_b["pass_to_pass"]
+            gold_a["resolved"] == gold_b["resolved"]
+            and gold_a["fail_to_pass"] == gold_b["fail_to_pass"]
+            and gold_a["pass_to_pass"] == gold_b["pass_to_pass"]
+        )
+        base_fails = f2p_fails_before_fix(raw)
+        print(
+            f"[controls] multi-swe-bench {instance['id']}: base_fails={base_fails} is read from "
+            "the corpus's own test_patch_result -- the harness executes only the fix stage, so it "
+            "is not re-measured here",
+            file=sys.stderr,
         )
         return {
-            "gold_resolved": gold["resolved"] is True,
-            "base_fails": base_a["resolved"] is False,
+            "gold_resolved": gold_a["resolved"] is True and gold_b["resolved"] is True,
+            "base_fails": base_fails,
             "deterministic": deterministic,
         }
 
