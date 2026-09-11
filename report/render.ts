@@ -37,6 +37,10 @@ export interface RenderReportResult {
  * gated on a `resolved` verdict (see `renderJudgmentQuality`'s `reviewed`/`abEligible`).
  */
 const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
+  // ENG-413: all three control drops are excluded from the resolve denominator, exactly as the
+  // single `dropped-flaky` was. Splitting the label must not change what counts.
+  "dropped-gold-unresolved",
+  "dropped-base-passes",
   "dropped-flaky",
   "probe",
   "infra",
@@ -365,6 +369,8 @@ const TAXONOMY_ORDER = [
   "probe",
   "parked",
   "infra",
+  "dropped-gold-unresolved",
+  "dropped-base-passes",
   "dropped-flaky",
   "unscored",
 ];
@@ -398,7 +404,11 @@ function renderValidityPanel(records: TaskRecord[]): string {
   const preRate = pctStr(resolvedCount(preCutoff), preCutoff.length);
   const postRate = pctStr(resolvedCount(postCutoff), postCutoff.length);
 
+  // ENG-413: report WHY instances were dropped, not one number that calls them all flaky.
+  const goldUnresolved = records.filter((r) => r.taxonomy === "dropped-gold-unresolved").length;
+  const basePasses = records.filter((r) => r.taxonomy === "dropped-base-passes").length;
   const flakyDropped = records.filter((r) => r.taxonomy === "dropped-flaky").length;
+  const totalDropped = goldUnresolved + basePasses + flakyDropped;
 
   const scanNotRun = records.filter((r) => r.leak_reasons.includes("transcript-unavailable"));
 
@@ -414,7 +424,14 @@ function renderValidityPanel(records: TaskRecord[]): string {
   lines.push(
     `- pre-cutoff ${preRate} vs post-cutoff ${postRate} resolve (n=${preCutoff.length}/${postCutoff.length})`,
   );
-  lines.push(`- flaky instances dropped by oracle controls before scoring: ${flakyDropped}`);
+  if (totalDropped === 0) {
+    lines.push("- instances dropped by oracle controls before scoring: 0");
+  } else {
+    lines.push(
+      `- instances dropped by oracle controls before scoring: ${totalDropped} ` +
+        `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · flaky: ${flakyDropped})`,
+    );
+  }
   if (scanNotRun.length > 0) {
     lines.push(
       `- URL-scan: did NOT run for ${scanNotRun.length} instance(s) (transcript-unavailable) — leak status for these is UNKNOWN, not assumed clean.`,
