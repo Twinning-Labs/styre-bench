@@ -27,6 +27,23 @@ class OracleAdapter(ABC):
     """Wraps one corpus family's eval harness as ground truth."""
 
     @abstractmethod
+    def preflight(self) -> None:
+        """Raise if this adapter's harness cannot run on THIS host. Cheap: no Docker, no network.
+
+        Exists because the two adapters fail at opposite ends of a run. `SweBenchAdapter`
+        imports `swebench.harness.constants` at module scope, so a broken install is a
+        collection-time ImportError. `MultiSweBenchAdapter` drives its harness as a
+        `python -m multi_swe_bench.harness.run_evaluation` SUBPROCESS, so nothing in this
+        process ever imports it -- a host that cannot run MSB at all looks perfectly healthy
+        until the first `run_controls`, ~90 minutes and three container builds into a matrix.
+        That is how the 2026-09-11 macOS matrix burned every TypeScript cell.
+
+        Raise `RuntimeError` with text naming the fix, not just the symptom -- this message is
+        what the operator acts on. Returning normally asserts the harness is runnable here.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
         """Positive + negative + determinism control for one instance.
 

@@ -16,6 +16,7 @@ import {
   runPilot,
   runPool,
 } from "../orchestrator/pipeline";
+import { assertOracleRunnable } from "../orchestrator/pipeline";
 import { SETUP_FAILED_EXIT } from "../orchestrator/run-task";
 import type { RunSeed, RunStyreResult } from "../orchestrator/run-task";
 import type { Instance, TaskRecord } from "../orchestrator/types";
@@ -24,6 +25,13 @@ import type { Instance, TaskRecord } from "../orchestrator/types";
 // fixtures leave `platform` unset, so the pipeline resolves them at the default "linux/amd64"
 // key (see pipeline.ts's resolveBinary).
 const STYRE_BINS: Record<string, string> = { "linux/amd64": "/bin/styre" };
+
+/** `bun test` stubs EVERY external stage (see pipeline.ts's header) — the real
+ *  `preflightOracle` shells out to `scorer/score.py`, which would make these tests depend on a
+ *  populated python venv and, on macOS, fail outright on the multi-swe-bench harness. A run
+ *  that genuinely cannot preflight is covered explicitly below, not by ambient environment. */
+const OK_PREFLIGHT = async (languages: string[]) =>
+  Object.fromEntries(languages.map((l) => [l, { ok: true, detail: "stubbed" }]));
 
 function makeInstance(overrides: Partial<Instance> = {}): Instance {
   return {
@@ -791,6 +799,7 @@ describe("runPilot: threads runPool's skipped count into ReportMeta (Task-11 cap
     const deps: Partial<RunPilotDeps> = {
       loadInstances: async () => [inst],
       selectPilot: (pool) => pool,
+      preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({
         records: [],
@@ -827,6 +836,7 @@ describe("runPilot: SMOKE mode routes selection through selectSmoke, not selectP
         smokeCalled = true;
         return pool;
       },
+      preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({
         records: [],
@@ -964,6 +974,7 @@ describe("runPilot: ONLY mode routes selection through selectSingle", () => {
         pilotCalled = true;
         return pool;
       },
+      preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({ records: [], spentUsd: 0, budgetExceeded: false, skipped: [] }),
       renderReport: (records) => ({ markdown: "", json: records }),
@@ -984,6 +995,7 @@ describe("runPilot: ONLY mode routes selection through selectSingle", () => {
     const deps: Partial<RunPilotDeps> = {
       loadInstances: async (family) => (family === "swe-bench" ? [py] : []),
       selectSingle: (pool, id) => pool.filter((i) => i.id === id),
+      preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async (_instances, _binaryPath, _cfg, opts) => {
         capturedOpts = opts;
@@ -1007,6 +1019,7 @@ describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
     const deps: Partial<RunPilotDeps> = {
       loadInstances: async (family) => (family === "swe-bench" ? [py] : [ts]),
       selectSmoke: (pool) => pool,
+      preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async (_instances, _binaryPath, _cfg, opts) => {
         capturedOpts = opts;
@@ -1019,6 +1032,107 @@ describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
     await runPilot(makeCfg(), { deps, smoke: true, bypassOracle: true });
 
     expect(capturedOpts?.runInstanceOpts?.bypassOracle).toBe(true);
+  });
+});
+
+describe("runPilot: ENG-410 oracle preflight aborts before anything expensive", () => {
+  const brokenTs = async (languages: string[]) =>
+    Object.fromEntries(
+      languages.map((l) => [
+        l,
+        l === "ts"
+          ? {
+              ok: false,
+              detail: "ModuleNotFoundError: multi_swe_bench.harness.repos.python.qiskit",
+            }
+          : { ok: true, detail: "ok" },
+      ]),
+    );
+
+  function depsWith(
+    preflightOracle: (
+      languages: string[],
+    ) => Promise<Record<string, { ok: boolean; detail: string }>>,
+    spy: { built: boolean; ran: boolean },
+  ): Partial<RunPilotDeps> {
+    return {
+      loadInstances: async (family) =>
+        family === "swe-bench"
+          ? [makeInstance({ id: "py-1", language: "python" })]
+          : [makeInstance({ id: "ts-1", language: "ts" })],
+      selectPilot: (pool) => pool,
+      selectSmoke: (pool) => pool,
+      preflightOracle,
+      buildStyre: async () => {
+        spy.built = true;
+        return { binaries: STYRE_BINS, commit: "abc123", webTools: "off" };
+      },
+      runPool: async () => {
+        spy.ran = true;
+        return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
+      },
+      renderReport: (records) => ({ markdown: "", json: records }),
+      writeReport: async () => {},
+    };
+  }
+
+  test("a broken harness throws BEFORE buildStyre and runPool — the whole point is not paying for it", async () => {
+    const spy = { built: false, ran: false };
+    await expect(runPilot(makeCfg(), { deps: depsWith(brokenTs, spy) })).rejects.toThrow(
+      /oracle harness cannot run on this host/,
+    );
+    expect(spy.built).toBe(false);
+    expect(spy.ran).toBe(false);
+  });
+
+  test("preflight is asked about exactly the languages SELECTED, not every language known", async () => {
+    const spy = { built: false, ran: false };
+    let asked: string[] | undefined;
+    const deps = depsWith(async (languages) => {
+      asked = languages;
+      return Object.fromEntries(languages.map((l) => [l, { ok: true, detail: "ok" }]));
+    }, spy);
+    // Select python only; ts must not be preflighted, or a Mac could never run a python-only run.
+    deps.selectPilot = (pool) => pool.filter((i) => i.language === "python");
+
+    await runPilot(makeCfg(), { deps });
+
+    expect(asked).toEqual(["python"]);
+    expect(spy.built).toBe(true);
+  });
+
+  test("bypassOracle skips preflight entirely — SMOKE=2/ONLY deliberately run without an oracle", async () => {
+    const spy = { built: false, ran: false };
+    let called = false;
+    const deps = depsWith(async (languages) => {
+      called = true;
+      return Object.fromEntries(languages.map((l) => [l, { ok: false, detail: "would abort" }]));
+    }, spy);
+
+    await runPilot(makeCfg(), { deps, smoke: true, bypassOracle: true });
+
+    expect(called).toBe(false);
+    expect(spy.ran).toBe(true);
+  });
+
+  test("the abort names EVERY broken family, not just the first", () => {
+    let message = "";
+    try {
+      assertOracleRunnable({
+        python: { ok: false, detail: "swebench missing" },
+        ts: { ok: false, detail: "qiskit case collision" },
+      });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("swebench missing");
+    expect(message).toContain("qiskit case collision");
+  });
+
+  test("an all-ok report is silent", () => {
+    expect(() =>
+      assertOracleRunnable({ python: { ok: true, detail: "ok" }, ts: { ok: true, detail: "ok" } }),
+    ).not.toThrow();
   });
 });
 

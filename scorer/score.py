@@ -12,7 +12,7 @@ CLI usage (subprocess boundary): `python scorer/score.py <command>` (run as a
 script, not `-m`, so `adapters/` resolves as a plain top-level import off this
 file's own directory -- see `scorer/conftest.py` for the pytest-side
 equivalent), where `<command>` is one of `run_controls` / `score` /
-`run_self_test`, reading a single JSON object from stdin
+`run_self_test` / `preflight`, reading a single JSON object from stdin
 (`{"instance": {...}, ...}`) and writing a single JSON object to stdout. On
 any exception, writes `{"error": "..."}` to stdout and exits non-zero -- this
 is a TRANSPORT failure to the TS caller (re-dispatch/investigate), never a
@@ -57,12 +57,33 @@ def run_self_test(
     return get_adapter(instance).run_self_test(instance, candidate_diff, added_test_paths)
 
 
+def preflight(languages: list[str]) -> dict[str, dict[str, Any]]:
+    """Report, per language, whether that family's harness can run on this host.
+
+    DELIBERATELY DOES NOT RAISE per family, unlike every other command here. Preflight's job is
+    to name EVERY broken family in one pass so the operator fixes them together; raising on the
+    first would hide the second. The fail-closed contract is upheld by the caller
+    (`orchestrator/pipeline.ts`), which aborts the run when any entry reports `ok: false` --
+    a `False` here is never softened into a verdict, because preflight produces no verdicts.
+    """
+    report: dict[str, dict[str, Any]] = {}
+    for language in languages:
+        try:
+            get_adapter({"language": language}).preflight()
+        except Exception as exc:  # noqa: BLE001 - the report IS the result
+            report[language] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        else:
+            report[language] = {"ok": True, "detail": "harness importable"}
+    return report
+
+
 _COMMANDS = {
     "run_controls": lambda payload: run_controls(payload["instance"]),
     "score": lambda payload: score(payload["instance"], payload["candidate_diff"]),
     "run_self_test": lambda payload: run_self_test(
         payload["instance"], payload["candidate_diff"], payload["added_test_paths"]
     ),
+    "preflight": lambda payload: preflight(payload["languages"]),
 }
 
 

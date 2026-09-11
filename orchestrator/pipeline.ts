@@ -121,6 +121,42 @@ async function spawnPythonJson<T>(argv: string[], payload: unknown): Promise<T> 
   return parsed as T;
 }
 
+/** Per-language harness readiness, from `scorer/score.py preflight`. Unlike every other
+ *  scorer call this one reports rather than raises per family, so ONE abort can name every
+ *  broken harness; the fail-closed decision is `assertOracleRunnable`'s, below. */
+export type PreflightReport = Record<string, { ok: boolean; detail: string }>;
+
+async function callPreflight(languages: string[]): Promise<PreflightReport> {
+  return spawnPythonJson<PreflightReport>([PYTHON_BIN, SCORER_SCRIPT, "preflight"], {
+    languages,
+  });
+}
+
+/**
+ * Abort the run NOW if any selected language's oracle harness cannot run on this host.
+ *
+ * ENG-410. A harness that cannot run is not a bad verdict, it is NO verdict — and the cost of
+ * discovering that late is the entire run. The 2026-09-11 macOS matrix built three
+ * multi-gigabyte image chains and burned ~90 minutes per TypeScript cell before the harness
+ * subprocess died on an import that takes milliseconds to check. This check is that import,
+ * moved to second zero.
+ *
+ * Throws listing EVERY broken family, never just the first: fixing one and rediscovering the
+ * next on the following run is the same slow loop in smaller pieces.
+ */
+export function assertOracleRunnable(report: PreflightReport): void {
+  const broken = Object.entries(report).filter(([, v]) => !v.ok);
+  if (broken.length === 0) return;
+  const detail = broken.map(([lang, v]) => `  - ${lang}: ${v.detail}`).join("\n");
+  throw new Error(
+    `pipeline: the oracle harness cannot run on this host, so this run could produce no verdict
+at all. Aborting before any container is built.
+${detail}
+Run the matrix on a Linux host (./infra/provision-bench-host.sh create), or set SMOKE=2 /
+ONLY=<id> to exercise the pipeline WITHOUT the oracle.`,
+  );
+}
+
 async function callRunControls(inst: Instance): Promise<RunControlsResult> {
   return spawnPythonJson<RunControlsResult>([PYTHON_BIN, SCORER_SCRIPT, "run_controls"], {
     instance: inst,
@@ -1003,6 +1039,7 @@ export interface RunPilotDeps {
   selectPilot: (pool: Instance[], seed: number) => Instance[];
   selectSmoke: (pool: Instance[], seed: number) => Instance[];
   selectSingle: (pool: Instance[], id: string) => Instance[];
+  preflightOracle: (languages: string[]) => Promise<PreflightReport>;
   buildStyre: (cfg: BuildStyreConfig) => Promise<BuildStyreResult>;
   runPool: (
     instances: Instance[],
@@ -1027,6 +1064,7 @@ const defaultRunPilotDeps: RunPilotDeps = {
   selectPilot: (pool, seed) => selectPilot(pool, seed),
   selectSmoke: (pool, seed) => selectSmoke(pool, seed),
   selectSingle: (pool, id) => selectSingle(pool, id),
+  preflightOracle: (languages) => callPreflight(languages),
   buildStyre: (cfg) => buildStyre(cfg),
   runPool: (instances, binaries, cfg, opts) => runPool(instances, binaries, cfg, opts),
   renderReport: (records, meta) => renderReport(records, meta),
@@ -1094,6 +1132,15 @@ export async function runPilot(
   const instances = opts.only
     ? deps.selectSingle(pool, opts.only)
     : (opts.smoke ? deps.selectSmoke : deps.selectPilot)(pool, cfg.seed);
+
+  // ENG-410: the oracle is the only thing that turns this run into a NUMBER. Prove its harness
+  // can run here before spending a single container build on instances it could never score.
+  // Skipped under bypassOracle (SMOKE=2 / ONLY) — those modes deliberately run without it.
+  if (!opts.bypassOracle) {
+    const languages = [...new Set(instances.map((inst) => inst.language))];
+    assertOracleRunnable(await deps.preflightOracle(languages));
+    console.error(`[preflight] oracle harness OK for: ${languages.join(", ")}`);
+  }
 
   // Detect the DISTINCT container platforms this run actually needs (SWE-bench on an arm64
   // host -> linux/arm64; MSB -> linux/amd64) and cross-compile a styre binary for each. The
