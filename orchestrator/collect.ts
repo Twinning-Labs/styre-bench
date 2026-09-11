@@ -23,7 +23,9 @@ export type TestLang = Instance["language"] | "js" | "go" | "java" | "rust";
  * actually opened a PR (drives the `self_test_passed` approximation). */
 export interface CollectCtx {
   language: TestLang;
-  pr_opened: boolean;
+  /** Tri-state — see `TaskRecord.pr_opened`. `null` ("we could not find out") propagates
+   *  into `self_test_passed`'s approximation as `null`, never as `false`. */
+  pr_opened: boolean | null;
 }
 
 /** The subset of styre's `summary` telemetry event (`src/telemetry/events.ts` /
@@ -263,6 +265,10 @@ export function collect(
   const result: Partial<TaskRecord> = { self_authored_test, self_test_passed };
 
   if (!summary) {
+    // No summary at all: styre made no claim about a PR either way. `null`, not `false` —
+    // "it did not say" is not "it said no", and only the former should stay out of the
+    // disagreement check in `report/render.ts`.
+    result.pr_self_reported = null;
     result.taxonomy = "infra";
     return result;
   }
@@ -276,6 +282,10 @@ export function collect(
   result.escalation_reasons = summary.escalation_reasons;
   result.outcome = summary.outcome;
   result.status = summary.status;
+  // styre's OWN claim that it opened a PR: the two terminal outcomes that imply one
+  // (`deriveTaxonomy` treats exactly this pair as "ran to completion"). Compared against the
+  // forge read in `report/render.ts` — see `TaskRecord.pr_self_reported`.
+  result.pr_self_reported = summary.outcome === "pr-ready" || summary.outcome === "done";
   // Cost/tokens are deliberately NOT taken from the summary (ENG-390): the container's
   // `claude` wrapper hands styre plain text, so `summary.cost_usd`/`tokens_*` are null for
   // every dispatch. `defaultCollectStage` measures them from the teed transcript instead.
