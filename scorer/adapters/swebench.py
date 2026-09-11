@@ -67,6 +67,8 @@ from swebench.harness.constants import (
 )
 
 from .base import OracleAdapter
+from .build_lock import image_build_lock
+from .env_build import failed_image_names, summarize_env_build_failure
 
 _MODEL_NAME = "styre-bench-scorer"
 _SELF_TEST_TIMEOUT_S = 300
@@ -220,6 +222,37 @@ def _assert_patch_applied_cleanly(run_id: str, instance_id: str, candidate_diff:
     )
 
 
+def _build_env_images_or_raise(build_env_images: Any, client: Any, raw: Any, instance_id: str) -> None:
+    """Build this instance's environment image, serialized host-wide, and RAISE if it failed.
+
+    Two ENG-420 fixes in one place, because they are the same defect seen from both ends.
+
+    `build_env_images` does NOT raise on a failed build -- it returns `(successful, failed)`, and
+    both were discarded. `run_instance` then died with "Environment image ... not found", which is
+    true, is not the cause, and points at image tags. The real reason (an OOM kill, exit 137) sat
+    in a log nothing read. So: check `failed`, and report from the build's own log.
+
+    The lock is why a build failed at all. Three scorer PROCESSES built images concurrently on a
+    7 GiB host; one `conda create` alone peaks at 3.6 GB. Serializing only the build phase costs
+    almost nothing -- this call returns immediately once the image exists -- and leaves evaluation,
+    the long part, fully parallel.
+    """
+    with image_build_lock():
+        _successful, failed = build_env_images(
+            client,
+            [raw],
+            force_rebuild=False,
+            max_workers=1,
+            namespace=None,
+            instance_image_tag="latest",
+            env_image_tag="latest",
+        )
+    if failed:
+        raise RuntimeError(
+            summarize_env_build_failure(failed_image_names(failed), instance_id)
+        )
+
+
 class SweBenchAdapter(OracleAdapter):
     def __init__(self, dataset_name: str = "princeton-nlp/SWE-bench_Verified", split: str = "test"):
         self.dataset_name = dataset_name
@@ -290,15 +323,7 @@ class SweBenchAdapter(OracleAdapter):
         # base_image_tag None and trips `assert base_image_tag is not None`
         # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
         # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
-        build_env_images(
-            client,
-            [raw],
-            force_rebuild=False,
-            max_workers=1,
-            namespace=None,
-            instance_image_tag="latest",
-            env_image_tag="latest",
-        )
+        _build_env_images_or_raise(build_env_images, client, raw, instance_id)
         # Fresh run_id per call: run_instance() short-circuits on an existing
         # report.json, which would otherwise hand back a stale cached verdict
         # (e.g. the gold-patch result) for a later empty-candidate control call.
@@ -385,15 +410,7 @@ class SweBenchAdapter(OracleAdapter):
         # base_image_tag None and trips `assert base_image_tag is not None`
         # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
         # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
-        build_env_images(
-            client,
-            [raw],
-            force_rebuild=False,
-            max_workers=1,
-            namespace=None,
-            instance_image_tag="latest",
-            env_image_tag="latest",
-        )
+        _build_env_images_or_raise(build_env_images, client, raw, instance_id)
         run_id = f"styre-bench-selftest-{uuid.uuid4().hex}"
         log_dir = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id
         log_dir.mkdir(parents=True, exist_ok=True)

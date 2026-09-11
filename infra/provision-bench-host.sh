@@ -26,9 +26,29 @@ set -euo pipefail
 
 NAME="${BENCH_HOST_NAME:-styre-bench}"
 # 4 vCPU / 8 GiB / 160 GB SSD — $0.07143/hr, $48/mo (digitalocean.com/pricing/droplets,
-# verified 2026-09-11). DISK is the binding constraint, not CPU: ~13GB of images per instance
-# chain, so a 6-cell matrix wants ~80GB plus OS, repos and worktrees.
+# verified 2026-09-11).
+#
+# DISK sizing: ~13GB of images per instance chain, so a 6-cell matrix wants ~80GB plus OS, repos
+# and worktrees.
+#
+# MEMORY sizing (ENG-420 — this used to say only the above, and the omission cost a cell). A
+# single SWE-bench env-image build runs `conda create`, MEASURED at 3.6 GB resident
+# (anon-rss:3619772kB, droplet `styre-bench`, 2026-09-11 03:03:48). Three scorer processes built
+# images concurrently on 7 GiB usable with no swap, and the kernel OOM-killed one:
+#
+#   conda invoked oom-killer: ... global_oom
+#   Out of memory: Killed process 24727 (conda) total-vm:3999020kB, anon-rss:3619772kB
+#
+# Two mitigations, both cheap, in preference to doubling the droplet:
+#   1. `scorer/adapters/build_lock.py` serializes the BUILD phase across scorer processes, so at
+#      most one conda build runs at a time. Evaluation stays fully parallel.
+#   2. The swapfile below absorbs what the lock does not cover — Multi-SWE-bench builds its own
+#      images inside its harness subprocess, which our lock cannot reach.
+# If an OOM recurs despite both, the next lever is s-8vcpu-16gb (~$96/mo) — raise it deliberately
+# rather than guessing, and record the measurement that justified it.
 SIZE="${BENCH_HOST_SIZE:-s-4vcpu-8gb}"
+# Headroom for build spikes, not a substitute for RAM. DigitalOcean droplets ship with none.
+SWAP_GB="${BENCH_HOST_SWAP_GB:-8}"
 REGION="${BENCH_HOST_REGION:-nyc3}"
 IMAGE="${BENCH_HOST_IMAGE:-ubuntu-24-04-x64}"   # x86_64 on purpose: both corpora ship amd64 images
 
@@ -65,7 +85,9 @@ cmd_setup() {
   local ip; ip="$(host_ip)"
   [ -n "$ip" ] || die "droplet '$NAME' not found — run: $0 create"
   echo "setting up $NAME ($ip) ..."
-  ssh -o StrictHostKeyChecking=accept-new "root@$ip" 'bash -s' <<'REMOTE'
+  # SWAP_GB crosses into the quoted heredoc as an env var — the heredoc is 'REMOTE' (unexpanded)
+  # on purpose, so nothing local interpolates into the remote script by accident.
+  ssh -o StrictHostKeyChecking=accept-new "root@$ip" "SWAP_GB='${SWAP_GB}' bash -s" <<'REMOTE'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -77,6 +99,20 @@ import sys
 assert sys.version_info >= (3, 11), f"python {sys.version_info.major}.{sys.version_info.minor} is below the 3.11 floor"
 print(f"  python {sys.version_info.major}.{sys.version_info.minor} OK")
 PYV
+
+# Swap (ENG-420). A DigitalOcean droplet has none, so a build spike above physical RAM is not
+# slow — it is an instant SIGKILL. Idempotent: skips entirely if any swap is already active.
+# NOTE the assignment-then-test shape: the remote script runs under `set -euo pipefail`, where a
+# pipeline inside `[ ... ]` that exits non-zero (or yields an empty string) aborts setup outright.
+swap_lines="$(swapon --show --noheadings 2>/dev/null | wc -l || true)"
+if [ "${swap_lines:-0}" -eq 0 ] && [ ! -f /swapfile ]; then
+  echo "creating ${SWAP_GB}G swapfile (build spikes exceed physical RAM) ..."
+  fallocate -l "${SWAP_GB}G" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB * 1024))
+  chmod 600 /swapfile
+  mkswap -q /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 # Docker — the bench runs every instance in a container, and both oracle harnesses drive Docker.
 if ! command -v docker >/dev/null; then
@@ -130,6 +166,7 @@ echo "docker : $(docker --version)"
 echo "bun    : $(bun --version)"
 echo "python : $(./.venv/bin/python --version)"
 echo "disk   : $(df -h / | awk 'NR==2{print $4" free of "$2}')"
+echo "memory : $(free -g | awk 'NR==2{print $2"G RAM"}') + $(free -g | awk 'NR==3{print $2"G swap"}')   (a conda env build peaks ~3.6G — ENG-420)"
 echo "arch   : $(uname -m)   (both corpora ship amd64 images; no emulation here)"
 echo
 # This is the ONE thing the host exists to make true, so a failure here fails setup. Printing a

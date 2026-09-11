@@ -38,6 +38,44 @@ Two further defects sat behind the same failure and are fixed alongside it:
   passes `"latest"`. `scorer/tests/test_env_image_tags.py` pins every call site to doing the
   same.
 
+### The third cause of the same message (ENG-420)
+
+`Environment image ... not found` has now had **three** distinct root causes: the missing
+`build_env_images` call above, the tag mismatch above, and — on 2026-09-11 — a build that ran
+and was **killed**:
+
+```
++ /opt/miniconda3/bin/conda create -n testbed python=3.9 -y
+Collecting package metadata (repodata.json): ...working...
+/opt/miniconda3/etc/profile.d/conda.sh: line 1: 12 Killed ( "$CONDA_EXE" ... )
+ERROR - ... returned a non-zero code: 137
+```
+
+Exit 137 is SIGKILL. The kernel: `conda invoked oom-killer ... Out of memory: Killed process
+24727 (conda) anon-rss:3619772kB`. One conda build peaks at **3.6 GB**; three scorer processes
+were building at once on 7 GiB with no swap.
+
+That a single message covers three unrelated failures is the defect, not a detail.
+`build_env_images` does not raise — it returns `(successful, failed)`, and both were discarded,
+so the run continued to `run_instance` and reported the *consequence*. The message was true,
+was not the cause, and pointed at image tags. Establishing the real reason took a kernel log.
+
+Two changes, so it cannot happen a fourth time:
+
+- `_build_env_images_or_raise` checks `failed` and raises from the build's **own log**, naming an
+  OOM kill explicitly when it sees exit 137 (`scorer/adapters/env_build.py`). "Not found" can
+  now only mean not found. `scorer/tests/test_env_build_invariant.py` pins every build site to
+  that wrapper — the defect was a missed line at two identical call sites, and a third would
+  reinstate it silently.
+- `scorer/adapters/build_lock.py` serializes the **build phase** across scorer processes with a
+  file lock. An in-process semaphore cannot help: each instance runs `score.py` as its own
+  process. Evaluation — the long part, and not memory-hungry — stays fully parallel, and builds
+  are a one-time cost because `build_env_images` returns immediately once the image exists.
+
+The host now also carries an 8 GiB swapfile, because Multi-SWE-bench builds its images inside its
+own harness subprocess where that lock cannot reach. `infra/provision-bench-host.sh` records the
+measured 3.6 GB peak next to the disk sizing it previously reasoned about alone.
+
 `styre-bench` is public, so GitHub Actions minutes are free and **scoring needs no secrets**:
 no agent key, no GitHub token beyond the default.
 
