@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from scorer.adapters.multiswebench import f2p_fails_before_fix, parse_report
+from adapters.multiswebench import f2p_fails_before_fix, parse_report
 
 F2P = ["/home/material-ui/packages/x/A.test.js:<A /> does the thing"]
 P2P = ["/home/material-ui/packages/x/B.test.js:<B /> keeps working"]
@@ -109,7 +109,7 @@ def test_an_unverifiable_claim_is_not_a_passed_control(raw):
 
 def _controls_with(monkeypatch, *, gold_results, raw):
     """Drive `run_controls` with `score` and the corpus fetch both stubbed."""
-    from scorer.adapters import multiswebench as m
+    from adapters import multiswebench as m
 
     calls: list[str] = []
     results = list(gold_results)

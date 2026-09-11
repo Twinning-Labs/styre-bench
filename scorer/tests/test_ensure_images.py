@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-from scorer.adapters.image_source import NAMESPACE_ENV
-from scorer.adapters.swebench import _ensure_images_or_raise
+from adapters.image_source import NAMESPACE_ENV
+from adapters.swebench import _ensure_images_or_raise
 
 
 class _ImageNotFound(Exception):
@@ -90,8 +90,8 @@ def test_local_mode_builds_and_never_pulls(monkeypatch):
         built.append("built")
         return ([], [])  # (successful, failed)
 
-    monkeypatch.setattr("scorer.adapters.swebench.build_env_images", fake_build, raising=False)
-    monkeypatch.setattr("scorer.adapters.swebench._build_env_images_or_raise",
+    monkeypatch.setattr("adapters.swebench.build_env_images", fake_build, raising=False)
+    monkeypatch.setattr("adapters.swebench._build_env_images_or_raise",
                         lambda *_a, **_k: built.append("built"))
     _ensure_images_or_raise(fake_build, FakeClient(images), {}, SPEC, "django__django-x")
     assert built == ["built"]
@@ -101,7 +101,7 @@ def test_local_mode_builds_and_never_pulls(monkeypatch):
 # ── _test_spec_for: the one line that decides pull-vs-build ─────────────────────────────────
 
 def _capture_spec_call(monkeypatch, env: str | None):
-    from scorer.adapters.swebench import _test_spec_for
+    from adapters.swebench import _test_spec_for
 
     if env is None:
         monkeypatch.delenv(NAMESPACE_ENV, raising=False)

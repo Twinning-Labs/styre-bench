@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from scorer.adapters.image_source import (
+from adapters.image_source import (
     DEFAULT_NAMESPACE,
     NAMESPACE_ENV,
     builds_locally,

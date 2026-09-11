@@ -322,8 +322,11 @@ def test_dataset_and_patch_files_are_JSONL_not_json_arrays():
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
+        # ENG-431 made this two invocations: `--mode image` first (no --patch_files), then
+        # `--mode evaluation`. Read whichever flags this call carries.
         for flag in ("--dataset_files", "--patch_files"):
-            seen[flag] = Path(cmd[cmd.index(flag) + 1]).read_text()
+            if flag in cmd:
+                seen[flag] = Path(cmd[cmd.index(flag) + 1]).read_text()
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
     raw = {"org": "o", "repo": "r", "number": 1, "f2p_tests": {}, "p2p_tests": {}}
@@ -332,6 +335,8 @@ def test_dataset_and_patch_files_are_JSONL_not_json_arrays():
             with pytest.raises(subprocess.TimeoutExpired):
                 adapter._run_harness({"id": "o__r-1", "language": "ts"}, "d")
 
+    # The build phase runs first and carries no patch, so only the dataset is seen here; the
+    # evaluation invocation (with --patch_files) is covered by its own case below.
     for flag, text in seen.items():
         lines = [ln for ln in text.splitlines() if ln.strip()]
         assert len(lines) == 1, f"{flag}: expected exactly one JSONL record"
