@@ -53,6 +53,7 @@ sandboxed run environment can't reach HF.
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from typing import Any
 
@@ -69,6 +70,12 @@ from swebench.harness.constants import (
 from .base import OracleAdapter
 from .build_lock import image_build_lock
 from .env_build import failed_image_names, summarize_env_build_failure
+from .image_source import (
+    builds_locally,
+    image_namespace,
+    image_source_description,
+    missing_published_image_hint,
+)
 
 _MODEL_NAME = "styre-bench-scorer"
 _SELF_TEST_TIMEOUT_S = 300
@@ -222,6 +229,57 @@ def _assert_patch_applied_cleanly(run_id: str, instance_id: str, candidate_diff:
     )
 
 
+def _test_spec_for(make_test_spec: Any, raw: Any) -> Any:
+    """ONE place the image source is chosen (ENG-429).
+
+    Both call sites used bare `make_test_spec(raw)`, whose `namespace=None` default means BUILD
+    LOCALLY -- the opposite of the harness's own default, and how a 2026 docutils ended up in a
+    2020 Sphinx image. Tags are passed by KEYWORD: the signature is
+    `(instance, namespace, base_image_tag, env_image_tag, instance_image_tag, arch)`, and
+    swebench 4.1.0's own `get_test_specs_from_dataset` passes them positionally in a DIFFERENT
+    order, so positional args here would land `instance_image_tag` in the `base_image_tag` slot.
+    """
+    return make_test_spec(
+        raw,
+        namespace=image_namespace(),
+        base_image_tag="latest",
+        env_image_tag="latest",
+        instance_image_tag="latest",
+    )
+
+
+def _ensure_images_or_raise(
+    build_env_images: Any, client: Any, raw: Any, test_spec: Any, instance_id: str
+) -> None:
+    """Make the evaluation image available, by whichever route this run selected (ENG-429).
+
+    In LOCAL mode this is the pre-existing build. In PULL mode it pulls HERE rather than leaving
+    it to `build_container`, for one reason: `run_instance` catches every exception and returns
+    `{"completed": False}` with the cause only in its own log file. A missing published image
+    would therefore surface as a generic "did not complete", indistinguishable from a harness
+    crash — for the most actionable failure this adapter has. Pulling here turns that into a
+    named error, before a container is created.
+
+    `build_container` still calls `client.images.get` first, so the pull below is not repeated.
+    """
+    if builds_locally():
+        _build_env_images_or_raise(build_env_images, client, raw, instance_id)
+        return
+
+    import docker.errors
+
+    key = test_spec.instance_image_key
+    try:
+        client.images.get(key)
+        return  # already local from an earlier instance or run
+    except docker.errors.ImageNotFound:
+        pass
+    try:
+        client.images.pull(key)
+    except docker.errors.NotFound as exc:  # the registry has no such image
+        raise RuntimeError(missing_published_image_hint(instance_id, key)) from exc
+
+
 def _build_env_images_or_raise(build_env_images: Any, client: Any, raw: Any, instance_id: str) -> None:
     """Build this instance's environment image, serialized host-wide, and RAISE if it failed.
 
@@ -275,6 +333,11 @@ class SweBenchAdapter(OracleAdapter):
                 f"the swebench harness is not runnable on this host ({type(exc).__name__}: {exc}). "
                 f"Install it with `pip install -r scorer/requirements.txt`."
             ) from exc
+        # ENG-429: say where this run's verdicts will come from, once, at the start. A run whose
+        # images were built locally is not comparable with published SWE-bench results, and that
+        # is the kind of fact that has to be visible BEFORE the numbers, not inferred from them
+        # afterwards.
+        print(f"[preflight] swebench: {image_source_description()}", file=sys.stderr)
 
     # -- live (Docker + HF) path -------------------------------------------------
 
@@ -297,7 +360,7 @@ class SweBenchAdapter(OracleAdapter):
 
         instance_id = instance["id"]
         raw = self._raw_instance(instance_id)
-        test_spec = make_test_spec(raw)
+        test_spec = _test_spec_for(make_test_spec, raw)
         pred = {
             KEY_INSTANCE_ID: instance_id,
             KEY_MODEL: _MODEL_NAME,
@@ -323,7 +386,7 @@ class SweBenchAdapter(OracleAdapter):
         # base_image_tag None and trips `assert base_image_tag is not None`
         # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
         # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
-        _build_env_images_or_raise(build_env_images, client, raw, instance_id)
+        _ensure_images_or_raise(build_env_images, client, raw, test_spec, instance_id)
         # Fresh run_id per call: run_instance() short-circuits on an existing
         # report.json, which would otherwise hand back a stale cached verdict
         # (e.g. the gold-patch result) for a later empty-candidate control call.
@@ -396,7 +459,7 @@ class SweBenchAdapter(OracleAdapter):
 
         instance_id = instance["id"]
         raw = self._raw_instance(instance_id)
-        test_spec = make_test_spec(raw)
+        test_spec = _test_spec_for(make_test_spec, raw)
         client = docker.from_env()
         # Same prerequisite as `score`: `build_container` -> `build_instance_image` raises when
         # the env image is absent and never builds one. No-op once the images exist.
@@ -410,7 +473,7 @@ class SweBenchAdapter(OracleAdapter):
         # base_image_tag None and trips `assert base_image_tag is not None`
         # (swebench/harness/test_spec/test_spec.py). The harness's own main() never hits this
         # because it passes "latest"; we pass it for the same reason. Do not tidy these away.
-        _build_env_images_or_raise(build_env_images, client, raw, instance_id)
+        _ensure_images_or_raise(build_env_images, client, raw, test_spec, instance_id)
         run_id = f"styre-bench-selftest-{uuid.uuid4().hex}"
         log_dir = RUN_EVALUATION_LOG_DIR / run_id / _MODEL_NAME / instance_id
         log_dir.mkdir(parents=True, exist_ok=True)
