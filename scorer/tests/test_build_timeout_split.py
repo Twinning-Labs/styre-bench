@@ -61,13 +61,27 @@ def test_the_two_budgets_are_actually_different():
     assert EVAL_TIMEOUT_SEC >= 1080
 
 
-def test_the_build_phase_carries_no_patch():
-    # The candidate diff must not reach an image build — it has nothing to do with building, and
-    # `--mode image` takes no patch.
+def test_the_build_phase_carries_the_patch_the_harness_DEMANDS():
+    """`--mode image` requires `--patch_files` even though it never reads one.
+
+    THIS TEST USED TO ASSERT THE OPPOSITE, and was wrong in the way that matters: I reasoned
+    that a build phase has no business carrying a candidate patch, wrote that as an invariant,
+    and it passed — because it was checking argv I had constructed myself, against a harness
+    contract I had only read `--help` for. `CliArgs.__post_init__` calls `_check_patch_files()`
+    UNCONDITIONALLY, before the per-mode branch, so every call raised
+
+        ValueError: Invalid patch_files: None
+
+    and all three TypeScript cells of bench matrix #3 were dropped as infra within seconds.
+
+    Passing it changes nothing about the image: `run_mode_image` builds from `self.instances`
+    and their dependency graph and never reads a patch (checked in the harness source, and by
+    running the real invocation — see `test_live_mode_image_actually_runs`).
+    """
     calls: list = []
     with pytest.raises(Exception):
         _drive(calls, then=subprocess.TimeoutExpired(cmd="x", timeout=1))
-    assert "--patch_files" not in calls[0]["cmd"]
+    assert "--patch_files" in calls[0]["cmd"], "the harness rejects --mode image without it"
     assert "--patch_files" in calls[1]["cmd"]
 
 
@@ -142,3 +156,46 @@ def test_a_FAILED_build_is_not_cached_as_built():
 
     assert calls.count("image") == 2, "a failed build must be retried, never remembered as done"
     assert "evaluation" not in calls, "evaluation must not run against an image that failed to build"
+
+
+# ── the test that would have caught it ─────────────────────────────────────────────────────
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("RUN_LIVE"),
+    reason="invokes the real multi-swe-bench harness; gated for the operator's live pass",
+)
+def test_live_mode_image_actually_runs(tmp_path):
+    """Invoke `--mode image` FOR REAL and require exit 0.
+
+    Every other test in this file stubs `subprocess.run`, so all of them pass against an argv
+    the harness would reject — which is exactly what happened. A stub-only suite proves argv
+    construction; it cannot prove the call works. This one costs a live harness invocation and
+    is the only thing here that could have caught ENG-431.
+    """
+    import json
+    import os
+    import subprocess as sp
+    import sys
+
+    corpus = json.load(open("data/multi-swe-bench.json"))
+    rec = next(r for r in corpus if r.get("instance_id") == "mui__material-ui-33777")
+    work = tmp_path / "work"
+    repo = tmp_path / "repo"
+    for d in (work, repo, tmp_path / "output"):
+        d.mkdir(parents=True, exist_ok=True)
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(rec) + "\n")
+    patch = tmp_path / "patch.json"
+    patch.write_text(
+        json.dumps({"org": rec["org"], "repo": rec["repo"], "number": rec["number"], "fix_patch": ""})
+        + "\n"
+    )
+
+    out = sp.run(
+        [sys.executable, "-m", "multi_swe_bench.harness.run_evaluation",
+         "--mode", "image", "--workdir", str(work), "--patch_files", str(patch),
+         "--dataset_files", str(dataset), "--repo_dir", str(repo),
+         "--output_dir", str(tmp_path / "output"), "--log_dir", str(tmp_path / "logs")],
+        capture_output=True, text=True, timeout=3600,
+    )
+    assert out.returncode == 0, f"--mode image rejected our arguments:\n{out.stdout}\n{out.stderr}"

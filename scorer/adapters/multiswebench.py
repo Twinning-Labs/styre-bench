@@ -437,7 +437,7 @@ class MultiSweBenchAdapter(OracleAdapter):
         (run_dir / "repo").mkdir(parents=True, exist_ok=True)
         # ENG-431: build FIRST, on its own clock. Once the images exist the evaluation
         # invocation's own build phase is a no-op, so `EVAL_TIMEOUT_SEC` is spent on evaluating.
-        self._build_images_or_raise(instance["id"], run_dir, dataset_file)
+        self._build_images_or_raise(instance["id"], run_dir, dataset_file, patch_file)
         cmd = [
             sys.executable,
             "-m",
@@ -492,7 +492,9 @@ class MultiSweBenchAdapter(OracleAdapter):
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         return self._run_harness(instance, candidate_diff)
 
-    def _build_images_or_raise(self, instance_id: str, run_dir: Any, dataset_file: Any) -> None:
+    def _build_images_or_raise(
+        self, instance_id: str, run_dir: Any, dataset_file: Any, patch_file: Any
+    ) -> None:
         """Build this instance's images in their own invocation, on their own clock (ENG-431).
 
         `--mode image` is the harness's own build-only entrypoint. Running it first means the
@@ -515,6 +517,21 @@ class MultiSweBenchAdapter(OracleAdapter):
             "image",
             "--workdir",
             str(run_dir / "work"),
+            # `--patch_files` IS REQUIRED HERE, despite having nothing to do with building.
+            #
+            # ENG-431 omitted it, reasoning that a build phase has no business carrying a
+            # candidate patch. The harness disagrees: `CliArgs.__post_init__` calls
+            # `_check_patch_files()` UNCONDITIONALLY, before the per-mode branch, so every mode
+            # requires it and `--mode image` raised
+            #     ValueError: Invalid patch_files: None
+            # on every call. All three TypeScript cells of bench matrix #3 were dropped as infra
+            # within seconds of starting.
+            #
+            # It does not change what gets built: `run_mode_image` builds from `self.instances`
+            # and their dependency graph and never reads a patch (verified in the harness source
+            # and by running the real invocation, which reports "Images built successfully").
+            "--patch_files",
+            str(patch_file),
             "--dataset_files",
             str(dataset_file),
             "--repo_dir",
