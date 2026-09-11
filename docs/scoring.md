@@ -56,6 +56,47 @@ That is sufficient: `SweBenchAdapter.score` reads only `instance["id"]`
 Two guards enforce this: a unit test in `tests/emit-score-payload.test.ts`, and a step in the
 workflow that refuses any payload containing a corpus field.
 
+### What the seed-side firewall does and does not gate (ENG-411)
+
+`assertNoHeldOut` exists to catch a **bench bug**: did we compose a line of `fix_patch` /
+`test_patch` into a ticket *we* wrote? It runs over `buildIssueBody`'s `benchAuthored` half,
+before `createIssue`, and stays fail-closed — including on an unparseable corpus patch.
+
+It does **not** gate the corpus's own `problem_statement`. That text is a public GitHub issue
+written before any fix existed, and real issues routinely contain the fix: in
+`astropy__astropy-13398` the reporter says *"I have put together the makings of a pull
+request"* and pastes the code that was merged. Gating on it blocked **154 of 500 (30.8%)** of
+SWE-bench Verified, and refusing to run cannot un-write a 2022 issue — it only discards a
+fifth of the corpus and makes the resolve rate incomparable with published numbers. (The
+blocking was roughly difficulty-neutral, 26–33% across bands, so it was not a skew so much as
+a straight loss of sample.)
+
+Instead, `measureTicketOverlap` records how much the ticket gave away, on every record, and
+`report/render.ts` prints the rate twice: the **headline** rate over everything (comparable
+with published SWE-bench numbers) and, directly beneath it, the rate over **clean tickets
+only**. Both functions share `heldOutLines`, so the gate and the measurement cannot drift on
+what counts as a held-out line.
+
+A record whose overlap is `null` was never measured, which is not the same claim as measured
+zero; it is excluded from the clean subset's numerator **and** denominator.
+
+After this change, across the full corpora:
+
+| | blocked | clean tickets | overlap recorded |
+|---|---|---|---|
+| SWE-bench Verified (500) | 0 | 393 (78.6%) | 107 (21.4%) |
+| Multi-SWE-bench (224) | 0 | 212 (94.6%) | 12 (5.4%) |
+
+### `hints_text` is never read
+
+`corpus.ts` deliberately does not read it. It is the issue's comment thread collected up to
+the fix commit, so it routinely contains a maintainer pasting the accepted patch — and
+SWE-bench itself never puts it in front of a model: all four prompt builders in
+`swebench/inference/make_datasets/create_instance.py` use `problem_statement` alone, and
+`swebench/harness/test_spec/test_spec.py` reads it only to mark it `# Unused`. Sending it made
+us the outlier, contaminated instances in prose no sentinel could ever match, and accounted for
+9.4 of the 30.8 points. The ticket's `## Refs` section went with it.
+
 ## Running it
 
 1. **Run styre locally.** The run writes its candidate diff to

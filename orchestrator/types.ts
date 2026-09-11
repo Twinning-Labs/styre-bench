@@ -1,3 +1,5 @@
+import type { TicketFixOverlap } from "./firewall";
+
 export type Cohort = "web-off" | "web-on";
 export type Difficulty = "easy" | "medium" | "hard";
 export interface Instance {
@@ -7,7 +9,6 @@ export interface Instance {
   repo: string;
   base_commit: string;
   problem_statement: string;
-  hints?: string;
   image: string; // pinned Docker image ref
   /** `docker run --platform` value for this instance's image, set by `corpus.ts`'s
    *  normalizers: SWE-bench (Python) uses the host-native arch (`linux/arm64` on Apple
@@ -96,6 +97,16 @@ export interface TaskRecord {
    *  Recovering these after the fact cost a full image build and a re-run, because the
    *  booleans were tested and then discarded. */
   controls?: { gold_resolved: boolean; base_fails: boolean; deterministic: boolean };
+  /** ENG-411: how much of the accepted fix / held-out tests the corpus's OWN issue text
+   *  already contained, measured by `firewall.ts`'s `measureTicketOverlap`. A record with
+   *  `fix_lines === 0 && test_lines === 0` is a "clean ticket" and counts toward the report's
+   *  clean-subset resolve rate; the headline rate counts every record, so it stays comparable
+   *  with published SWE-bench numbers.
+   *
+   *  `null` means NOT MEASURED (a record that never got as far as seeding — probe/infra/
+   *  parked), which is NOT the same claim as "measured zero" and must never be folded into
+   *  the clean subset. Optional so pre-ENG-411 fixtures stay valid. */
+  ticket_fix_overlap?: TicketFixOverlap | null;
   /** Task 11: count of whole-instance infra-retries consumed before this record was
    *  finalized (0 if none). Optional/additive — pre-Task-11 code (e.g. report.test.ts's
    *  hand-built fixtures) never sets this and remains valid; `renderReport` does not read

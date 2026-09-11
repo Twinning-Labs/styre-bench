@@ -155,7 +155,13 @@ function normalizeSweBench(r: Record<string, unknown>, imageArch: ImageArch): In
   const repo = requireString(r, "repo", family);
   const base_commit = requireString(r, "base_commit", family);
   const problem_statement = requireString(r, "problem_statement", family);
-  const hints = optionalString(r, "hints_text");
+  // ENG-411: `hints_text` is DELIBERATELY NOT READ. It is the issue's comment thread collected
+  // up to the fix commit, so it routinely contains a maintainer pasting the accepted patch.
+  // SWE-bench itself never puts it in front of a model — all four prompt builders in
+  // `swebench/inference/make_datasets/create_instance.py` use `problem_statement` alone, and
+  // `swebench/harness/test_spec/test_spec.py` reads it only to mark it `# Unused`. Sending it
+  // made us the outlier, contaminated every instance it touched (in prose no sentinel can
+  // match), and accounted for 9.4 of the 30.8 points the firewall was blocking.
   const merge_date = optionalString(r, "created_at");
 
   const label = typeof r.difficulty === "string" ? (r.difficulty as string) : undefined;
@@ -169,7 +175,6 @@ function normalizeSweBench(r: Record<string, unknown>, imageArch: ImageArch): In
     repo,
     base_commit,
     problem_statement,
-    hints,
     // SWE-bench eval image naming convention: the pullable image lives on Docker Hub under
     // the `swebench/` namespace as `swebench/sweb.eval.<arch>.<instance_id>`, with every `__`
     // in the instance_id replaced by `_1776_` (SWE-bench's own tag-sanitization rule), then
