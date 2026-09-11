@@ -63,7 +63,25 @@ def _swe_report(resolved: bool, passed: list[str]) -> dict[str, Any]:
 
 
 def _msb_report(resolved: bool, passed: list[str]) -> dict[str, Any]:
-    return {"valid": resolved, "fix_patch_result": {"passed_tests": passed, "failed_tests": []}}
+    """A report from a fix stage that RAN.
+
+    The unrelated failing test is not filler. ENG-430 makes a stage that captured zero test
+    results raise rather than return a verdict, so a fixture with an empty suite would describe
+    a harness that measured nothing — a different scenario, covered by its own case below. The
+    invariant these cases exist for is "the suite ran, and our target id is not among the passed
+    ones", which needs a suite that ran. Real harness reports carry counts as well as id lists.
+    """
+    failed = ["suite/some_unrelated_test"]
+    return {
+        "valid": resolved,
+        "fix_patch_result": {
+            "passed_tests": passed,
+            "failed_tests": failed,
+            "passed_count": len(passed),
+            "failed_count": len(failed),
+            "skipped_count": 0,
+        },
+    }
 
 
 CASES = [
