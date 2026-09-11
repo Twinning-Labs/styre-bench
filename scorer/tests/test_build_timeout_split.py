@@ -39,7 +39,6 @@ def _drive(calls: list, *, build_rc=0, then=None):
             raise then
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    m._IMAGES_BUILT.clear()
     with patch("adapters.multiswebench._raw_instance", return_value=RAW):
         with patch("subprocess.run", side_effect=fake_run):
             return MultiSweBenchAdapter()._run_harness({"id": "o__r-1", "language": "ts"}, "d")
@@ -81,8 +80,18 @@ def test_the_build_phase_carries_the_patch_the_harness_DEMANDS():
     calls: list = []
     with pytest.raises(Exception):
         _drive(calls, then=subprocess.TimeoutExpired(cmd="x", timeout=1))
-    assert "--patch_files" in calls[0]["cmd"], "the harness rejects --mode image without it"
-    assert "--patch_files" in calls[1]["cmd"]
+    def flag_value(cmd, flag):
+        return cmd[cmd.index(flag) + 1] if flag in cmd else None
+
+    # The VALUE, not just the token: `"--patch_files", ""` satisfied the old assertion and dies
+    # live with `No files found matching pattern:`. And both invocations must name the SAME file
+    # — the patch is the build's instance SELECTOR (CliArgs.instances filters on patch_numbers),
+    # so a build pointed at a different patch would select no instances, build nothing, and
+    # still exit 0 reporting success.
+    build_patch = flag_value(calls[0]["cmd"], "--patch_files")
+    eval_patch = flag_value(calls[1]["cmd"], "--patch_files")
+    assert build_patch, "the harness rejects --mode image without a patch file"
+    assert build_patch == eval_patch, "build and eval must select the same instance"
 
 
 def test_a_failed_build_raises_and_says_nothing_was_evaluated():
@@ -101,23 +110,30 @@ def test_a_build_TIMEOUT_propagates_unmodified():
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd="build", timeout=IMAGE_BUILD_TIMEOUT_SEC)
 
-    m._IMAGES_BUILT.clear()
     with patch("adapters.multiswebench._raw_instance", return_value=RAW):
         with patch("subprocess.run", side_effect=fake_run):
             with pytest.raises(subprocess.TimeoutExpired):
                 MultiSweBenchAdapter()._run_harness({"id": "o__r-1", "language": "ts"}, "d")
 
 
-def test_an_instance_already_built_in_this_process_is_not_rebuilt():
-    # `run_controls` scores gold twice (ENG-430); the second call would otherwise pay ~60s of
-    # harness startup to be told the images are already there.
+def test_EVERY_score_call_builds__caching_it_moved_a_git_clone_into_the_eval_budget():
+    """The build invocation must run on every call, including the second gold run.
+
+    An earlier version cached it per instance in a module-level set, believing it saved "~60s of
+    harness startup". An independent review showed it saves more than that, and the difference is
+    the bug: `run_dir` is a fresh `mkdtemp` per call, so `run_dir/repo` is EMPTY every time, and
+    `run_mode_image` opens with `check_commit_hashes()`, which git-clones the repo when absent.
+
+    Skipping the build for `run_controls`' second gold run therefore pushed a multi-GB clone of
+    mui/material-ui into EVAL_TIMEOUT_SEC, next to an 11-18 minute suite — recreating the exact
+    "one budget for setup and measurement" failure this module exists to delete.
+    """
     calls: list = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd[cmd.index("--mode") + 1])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    m._IMAGES_BUILT.clear()
     with patch("adapters.multiswebench._raw_instance", return_value=RAW):
         with patch("subprocess.run", side_effect=fake_run):
             a = MultiSweBenchAdapter()
@@ -125,77 +141,97 @@ def test_an_instance_already_built_in_this_process_is_not_rebuilt():
                 try:
                     a._run_harness({"id": "o__r-1", "language": "ts"}, "d")
                 except Exception:
-                    pass  # no report.json from a stubbed run; the build calls are the point
-    assert calls.count("image") == 1, "the image build must not repeat for the same instance"
+                    pass  # no report.json from a stubbed run; the invocations are the point
+    assert calls.count("image") == 2, "each call must build, so each call's repo dir is populated"
     assert calls.count("evaluation") == 2
 
 
-def test_a_FAILED_build_is_not_cached_as_built():
-    """A retry must rebuild, not skip straight to evaluating against a missing image.
-
-    The bench retries an infra failure (`runInstance`'s infra-retry loop), so a poisoned cache
-    would turn one bad build into an evaluation against nothing — for every remaining attempt in
-    the process. Marking the instance built before checking the exit code survived the first
-    mutation sweep: the "not rebuilt" case above only covers the SUCCESS path.
-    """
-    calls: list = []
-
-    def fake_run(cmd, **kwargs):
-        mode = cmd[cmd.index("--mode") + 1]
-        calls.append(mode)
-        rc = 1 if mode == "image" else 0
-        return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout="", stderr="boom")
-
-    m._IMAGES_BUILT.clear()
-    with patch("adapters.multiswebench._raw_instance", return_value=RAW):
-        with patch("subprocess.run", side_effect=fake_run):
-            a = MultiSweBenchAdapter()
-            for _ in range(2):
-                with pytest.raises(RuntimeError):
-                    a._run_harness({"id": "o__r-1", "language": "ts"}, "d")
-
-    assert calls.count("image") == 2, "a failed build must be retried, never remembered as done"
-    assert "evaluation" not in calls, "evaluation must not run against an image that failed to build"
-
-
-# ── the test that would have caught it ─────────────────────────────────────────────────────
-
+@pytest.mark.run_live
 @pytest.mark.skipif(
     not __import__("os").environ.get("RUN_LIVE"),
     reason="invokes the real multi-swe-bench harness; gated for the operator's live pass",
 )
-def test_live_mode_image_actually_runs(tmp_path):
-    """Invoke `--mode image` FOR REAL and require exit 0.
+def test_live_the_ADAPTER_can_build_images(tmp_path, monkeypatch):
+    """Drive `_build_images_or_raise` FOR REAL and require it not to raise.
 
-    Every other test in this file stubs `subprocess.run`, so all of them pass against an argv
-    the harness would reject — which is exactly what happened. A stub-only suite proves argv
-    construction; it cannot prove the call works. This one costs a live harness invocation and
-    is the only thing here that could have caught ENG-431.
+    An earlier version of this test hand-built its own argv and invoked the harness directly.
+    That proved the harness accepts THAT argv — not the adapter's — so dropping `--patch_files`
+    from `_build_images_or_raise` again would have left it green. Which is precisely the flaw
+    that shipped ENG-431: asserting against a construction of my own rather than the real call.
+
+    So this one calls the adapter's own method, with the adapter's own argv.
     """
     import json
-    import os
-    import subprocess as sp
-    import sys
 
-    corpus = json.load(open("data/multi-swe-bench.json"))
+    from adapters.multiswebench import MultiSweBenchAdapter
+
+    corpus = json.load(open(Path(__file__).resolve().parents[2] / "data" / "multi-swe-bench.json"))
     rec = next(r for r in corpus if r.get("instance_id") == "mui__material-ui-33777")
-    work = tmp_path / "work"
-    repo = tmp_path / "repo"
-    for d in (work, repo, tmp_path / "output"):
-        d.mkdir(parents=True, exist_ok=True)
+
+    for name in ("work", "repo", "output"):
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
     dataset = tmp_path / "dataset.json"
     dataset.write_text(json.dumps(rec) + "\n")
     patch = tmp_path / "patch.json"
     patch.write_text(
-        json.dumps({"org": rec["org"], "repo": rec["repo"], "number": rec["number"], "fix_patch": ""})
+        json.dumps(
+            {"org": rec["org"], "repo": rec["repo"], "number": rec["number"], "fix_patch": ""}
+        )
         + "\n"
     )
 
-    out = sp.run(
-        [sys.executable, "-m", "multi_swe_bench.harness.run_evaluation",
-         "--mode", "image", "--workdir", str(work), "--patch_files", str(patch),
-         "--dataset_files", str(dataset), "--repo_dir", str(repo),
-         "--output_dir", str(tmp_path / "output"), "--log_dir", str(tmp_path / "logs")],
-        capture_output=True, text=True, timeout=3600,
+    # Not raising IS the assertion: the method raises RuntimeError on a non-zero exit and lets
+    # TimeoutExpired through.
+    MultiSweBenchAdapter()._build_images_or_raise(
+        rec["instance_id"], tmp_path, dataset, patch
     )
-    assert out.returncode == 0, f"--mode image rejected our arguments:\n{out.stdout}\n{out.stderr}"
+
+
+def test_nix_swe_is_pre_created_BEFORE_the_build_dispatches():
+    """ENG-419's race is reachable again the moment the build actually runs.
+
+    The harness's `__main__` does its check-then-act on the fixed-name `nix_swe` container
+    BEFORE parsing a single argument, for every mode including `image`. Under ENG-431 that was
+    unreachable — the build died on `Invalid patch_files: None` before touching Docker — so
+    adding the argument is what makes the race live: at concurrency 3, two of three builds lose
+    it and exit 1, which is the ENG-419 symptom wearing a new error string.
+    """
+    order: list = []
+
+    def fake_ensure():
+        order.append("nix_swe")
+        return "present"
+
+    def fake_run(cmd, **kwargs):
+        order.append(cmd[cmd.index("--mode") + 1])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    with patch("adapters.multiswebench._raw_instance", return_value=RAW):
+        with patch("adapters.multiswebench.ensure_nix_swe", side_effect=fake_ensure):
+            with patch("subprocess.run", side_effect=fake_run):
+                try:
+                    MultiSweBenchAdapter()._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+                except Exception:
+                    pass
+    assert order[0] == "nix_swe", f"nix_swe must be pre-created first, got {order}"
+    assert "image" in order and order.index("nix_swe") < order.index("image")
+
+
+def test_a_failed_build_carries_the_nix_swe_hint():
+    """The build is now the FIRST harness invocation, so it is where a lost 409 actually lands —
+    the hint written for exactly that error belongs on this path more than on the eval path."""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[cmd.index("--mode") + 1] == "image":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="",
+                stderr="409 Client Error: Conflict ... container name \"/nix_swe\" is already in use",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    with patch("adapters.multiswebench._raw_instance", return_value=RAW):
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError) as exc:
+                MultiSweBenchAdapter()._run_harness({"id": "o__r-1", "language": "ts"}, "d")
+    assert "image build failed" in str(exc.value)
+    assert "nix_swe" in str(exc.value)

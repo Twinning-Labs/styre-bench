@@ -116,12 +116,6 @@ _SELF_TEST_TIMEOUT_S = 300
 IMAGE_BUILD_TIMEOUT_SEC = 3600
 EVAL_TIMEOUT_SEC = 1800
 
-#: Images already built in THIS process, keyed by instance id. The second gold run of
-#: `run_controls` (ENG-430) would otherwise pay the build invocation again -- a no-op that still
-#: costs ~60s of harness startup per call.
-_IMAGES_BUILT: set[str] = set()
-
-
 MSB_DATASET = "ByteDance-Seed/Multi-SWE-bench"
 _RAW_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -501,14 +495,27 @@ class MultiSweBenchAdapter(OracleAdapter):
         evaluation invocation finds its images present and spends `EVAL_TIMEOUT_SEC` evaluating
         rather than sharing it with a 15-minute build.
 
-        Skipped for an instance already built in this process: `run_controls` scores gold twice
-        (ENG-430), and the second call would otherwise pay ~60s of harness startup to be told the
-        images are there.
+        NOT CACHED PER INSTANCE (ENG-436 review). An earlier version skipped this invocation for
+        an instance already built in this process, believing it saved ~60s of harness startup. It
+        saves more than that, and the difference is the bug: `run_dir` is a fresh `mkdtemp` per
+        call, so `run_dir/repo` is EMPTY every time, and `run_mode_image` opens with
+        `check_commit_hashes()` which git-clones the repo when it is absent. Skipping the build
+        invocation for `run_controls`' second gold run therefore pushed a multi-GB clone of
+        mui/material-ui into `EVAL_TIMEOUT_SEC`, alongside an 11-18 minute suite — recreating the
+        exact "one budget for setup and measurement" failure this whole change exists to delete.
+
+        `ensure_nix_swe()` FIRST, and this is load-bearing (ENG-419). The harness's `__main__`
+        does its check-then-act on the fixed-name `nix_swe` container BEFORE it parses a single
+        argument, for every mode including `image`. Under ENG-431 that was unreachable — the
+        build died on `Invalid patch_files: None` before touching Docker — so adding the argument
+        is what makes the race live again: at `concurrency: 3` two of three builds would lose it
+        and exit 1.
         """
         import subprocess
 
-        if instance_id in _IMAGES_BUILT:
-            return
+        outcome = ensure_nix_swe()
+        if outcome.startswith("unavailable"):
+            print(f"multi-swe-bench: could not pre-create nix_swe ({outcome})", file=sys.stderr)
         cmd = [
             sys.executable,
             "-m",
@@ -527,9 +534,17 @@ class MultiSweBenchAdapter(OracleAdapter):
             # on every call. All three TypeScript cells of bench matrix #3 were dropped as infra
             # within seconds of starting.
             #
-            # It does not change what gets built: `run_mode_image` builds from `self.instances`
-            # and their dependency graph and never reads a patch (verified in the harness source
-            # and by running the real invocation, which reports "Images built successfully").
+            # It does not change the patch CONTENT that is applied — `run_mode_image` reads only
+            # `self.instances` and the dependency graph; `fix_patch` is written to disk in
+            # `run_instance`, which `--mode image` never reaches.
+            #
+            # But it is NOT inert, and an earlier comment here wrongly called it so: `CliArgs.
+            # instances` filters `instance.pr.number in self.patch_numbers`, so the patch file is
+            # the INSTANCE SELECTOR for the build. `_run_harness` writes both files from the same
+            # `raw` record so the numbers always agree — and if they ever diverged, the instance
+            # list would be empty, the build loop would never run, and the harness would still log
+            # "Images built successfully" and exit 0. That log line is therefore not evidence that
+            # anything was built, which is why the live test below asserts through the adapter.
             "--patch_files",
             str(patch_file),
             "--dataset_files",
@@ -547,12 +562,16 @@ class MultiSweBenchAdapter(OracleAdapter):
             cmd, capture_output=True, text=True, timeout=IMAGE_BUILD_TIMEOUT_SEC
         )
         if result.returncode != 0:
+            # The nix_swe hint belongs here MORE than on the eval path: the build is the first
+            # harness invocation, so it is where a lost 409 race actually lands.
+            hint = nix_swe_failure_hint(result.stdout, result.stderr)
             raise RuntimeError(
                 f"multi-swe-bench: image build failed (exit {result.returncode}) for "
                 f"{instance_id!r} -- no evaluation was attempted, so this is a build failure and "
-                f"not a verdict.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                f"not a verdict."
+                + (f"\n{hint}" if hint else "")
+                + f"\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
-        _IMAGES_BUILT.add(instance_id)
 
     def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
         """MSB's controls, re-derived (ENG-430).
