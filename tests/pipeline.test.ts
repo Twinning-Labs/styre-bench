@@ -121,6 +121,8 @@ function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): Co
     addedTestPaths: ["tests/y.test.ts"],
     transcript: "",
     pr_opened: true,
+    pr_self_reported: true,
+    pr_lookup_error: null,
   };
 }
 
@@ -130,7 +132,9 @@ function infraStage(): CollectStageResult {
     diff: "",
     addedTestPaths: [],
     transcript: "",
-    pr_opened: false,
+    pr_opened: null,
+    pr_self_reported: null,
+    pr_lookup_error: "stubbed infra failure",
   };
 }
 
@@ -146,6 +150,8 @@ function probeStage(): CollectStageResult {
     addedTestPaths: [],
     transcript: "",
     pr_opened: false,
+    pr_self_reported: false,
+    pr_lookup_error: null,
   };
 }
 
@@ -542,6 +548,8 @@ describe("runPool: runBudgetUsd kill-switch", () => {
         language: inst.language,
         difficulty: inst.difficulty,
         styre_commit: "abc",
+        pr_self_reported: false,
+        pr_lookup_error: null,
         cost_usd_estimated: 0,
         evidence_dir: "/runs/stub",
         cohort: "web-off",
@@ -600,6 +608,8 @@ describe("runPool: runBudgetUsd kill-switch", () => {
       post_cutoff: false,
       resolved: true,
       pr_opened: true,
+      pr_self_reported: true,
+      pr_lookup_error: null,
       self_authored_test: null,
       self_test_passed: null,
       ticks: 1,

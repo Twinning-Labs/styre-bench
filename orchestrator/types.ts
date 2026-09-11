@@ -52,7 +52,29 @@ export interface TaskRecord {
    *  `false` from. Every other taxonomy still sets a real `boolean` (including the
    *  `false` default on `dropped-flaky`/`probe`/`infra`/`parked` — see `blankRecord`). */
   resolved: boolean | null;
-  pr_opened: boolean;
+  /** GROUND TRUTH (CLAUDE.md move 5): whether a pull request actually exists on the seeded
+   *  throwaway repo, read from the forge by `pipeline.ts`'s `lookupPrOpened`.
+   *
+   *  `null` iff THE LOOKUP COULD NOT FIND OUT (no token, an API failure, or collect threw
+   *  before reaching it). That is a different claim from `false` ("we looked; there is no
+   *  PR"), and the two must never be collapsed: for two consecutive matrices a failing
+   *  `git clone` inside the old lookup was swallowed into `false`, and the report published
+   *  a PR-opened rate of 0% and a self-report gap of 0/2 for a run that demonstrably opened
+   *  a PR. `report/render.ts` drops `null` from BOTH the numerator and the denominator —
+   *  the same rule `ticket_fix_overlap` already follows. */
+  pr_opened: boolean | null;
+  /** SELF-REPORT: whether styre's own terminal `outcome` claims a PR (`pr-ready` / `done`),
+   *  derived in `collect.ts` from the summary event. `null` iff no summary was emitted at
+   *  all, so styre made no claim either way.
+   *
+   *  Kept BESIDE `pr_opened` rather than replacing it: the forge is the ground truth, and
+   *  this is the claim being checked against it. Their disagreement is a first-class finding
+   *  (`report/render.ts`'s `isPrReportDisagreement`) — had it been reported, the `pr_opened`
+   *  defect would have announced itself in matrix #1 instead of being found by hand in #2. */
+  pr_self_reported: boolean | null;
+  /** Why `pr_opened` is `null` — the swallowed reason, made visible. `null` when the lookup
+   *  succeeded. */
+  pr_lookup_error: string | null;
   self_authored_test: boolean | null;
   self_test_passed: boolean | null;
   ticks: number;

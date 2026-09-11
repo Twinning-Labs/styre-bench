@@ -74,9 +74,34 @@ function isCleanTicket(r: TaskRecord): boolean {
 }
 
 /** true iff `r` counts toward the "self-report gap": styre opened a PR (self-reported
- * success) but the oracle says it did not actually resolve the issue. */
-function isSelfReportGap(r: TaskRecord): boolean {
-  return r.pr_opened && !r.resolved;
+ * success) but the oracle says it did not actually resolve the issue.
+ *
+ * Both halves are compared EXPLICITLY against their booleans. `pr_opened` and `resolved` are
+ * each tri-state, and `!r.resolved` would fold an unmeasured `null` verdict into the gap
+ * numerator — counting a run we never scored as a run we caught lying. */
+export function isSelfReportGap(r: TaskRecord): boolean {
+  return r.pr_opened === true && r.resolved === false;
+}
+
+/** true iff `r` has a PR-opened verdict at all. A `null` means the forge lookup could not
+ * find out, and such a record must leave BOTH the numerator and the denominator of the
+ * PR-opened rate — the same rule `isCleanTicket` applies to an unmeasured overlap. Folding
+ * it in is exactly the bug that published a 0% PR-opened rate for a run that opened a PR. */
+function hasPrVerdict(r: TaskRecord): boolean {
+  return r.pr_opened !== null;
+}
+
+/**
+ * true iff the forge and styre's own telemetry DISAGREE about whether a PR exists.
+ *
+ * This is a validity check on the bench itself, not on styre. `pr_opened` is ground truth
+ * (CLAUDE.md move 5); `pr_self_reported` is the claim. When a run reports `pr-ready` and the
+ * forge shows no pull request, one of the two readers is broken and no metric built on either
+ * can be trusted until we know which. Records where either side is `null` are excluded — an
+ * absent reading cannot disagree with anything.
+ */
+export function isPrReportDisagreement(r: TaskRecord): boolean {
+  return r.pr_opened !== null && r.pr_self_reported !== null && r.pr_opened !== r.pr_self_reported;
 }
 
 function pctNum(n: number, d: number): number {
@@ -169,9 +194,14 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   const gapOn = webOn.filter(isSelfReportGap).length;
   const gapPost = postCutoff.filter(isSelfReportGap).length;
 
-  const prOff = webOff.filter((r) => r.pr_opened).length;
-  const prOn = webOn.filter((r) => r.pr_opened).length;
-  const prPost = postCutoff.filter((r) => r.pr_opened).length;
+  // Denominator hygiene, second axis: on top of the taxonomy filter already applied to
+  // `webOff`, a record whose PR state was never determined leaves this rate entirely.
+  const prDenomOff = webOff.filter(hasPrVerdict);
+  const prDenomOn = webOn.filter(hasPrVerdict);
+  const prDenomPost = postCutoff.filter(hasPrVerdict);
+  const prOff = prDenomOff.filter((r) => r.pr_opened === true).length;
+  const prOn = prDenomOn.filter((r) => r.pr_opened === true).length;
+  const prPost = prDenomPost.filter((r) => r.pr_opened === true).length;
 
   const cohortLabel =
     webOnAll.length > 0 ? "web-OFF (headline) + web-on delta" : "web-OFF (headline)";
@@ -206,7 +236,7 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
     `| Self-report gap (opened-unresolved) | ${absCell(gapOff, webOff.length)} | ${deltaCell(gapOff, webOff.length, gapOn, webOn.length)} | ${absCell(gapPost, postCutoff.length)} |`,
   );
   lines.push(
-    `| PR-opened rate | ${absCell(prOff, webOff.length)} | ${deltaCell(prOff, webOff.length, prOn, webOn.length)} | ${absCell(prPost, postCutoff.length)} |`,
+    `| PR-opened rate | ${absCell(prOff, prDenomOff.length)} | ${deltaCell(prOff, prDenomOff.length, prOn, prDenomOn.length)} | ${absCell(prPost, prDenomPost.length)} |`,
   );
   lines.push("");
 
@@ -443,6 +473,12 @@ function renderValidityPanel(records: TaskRecord[]): string {
 
   const scanNotRun = records.filter((r) => r.leak_reasons.includes("transcript-unavailable"));
 
+  // Bench-validity, not styre-performance: see `isPrReportDisagreement`. Counted over ALL
+  // records, not just the resolve denominator — a reader that is broken on a dropped instance
+  // is broken on a scored one too, and we want to hear about it at the first occurrence.
+  const prDisagree = records.filter(isPrReportDisagreement);
+  const prUnknown = records.filter((r) => r.pr_opened === null);
+
   const lines: string[] = [];
   lines.push("## Validity panel");
   if (webOnAll.length > 0) {
@@ -461,6 +497,24 @@ function renderValidityPanel(records: TaskRecord[]): string {
     lines.push(
       `- instances dropped by oracle controls before scoring: ${totalDropped} ` +
         `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · flaky: ${flakyDropped})`,
+    );
+  }
+  if (prDisagree.length > 0) {
+    const names = prDisagree.map(
+      (r) =>
+        `${r.instance} (styre: ${r.pr_self_reported ? "PR" : "no PR"}, forge: ${r.pr_opened ? "PR" : "no PR"})`,
+    );
+    lines.push(
+      `- **⚠ PR ground-truth vs self-report DISAGREE on ${prDisagree.length} instance(s): ${names.join(" · ")}.** One of the two readers is wrong; the PR-opened rate and the self-report gap are both suspect until it is identified.`,
+    );
+  } else {
+    lines.push("- PR ground-truth vs self-report: agree on every instance");
+  }
+  if (prUnknown.length > 0) {
+    lines.push(
+      `- PR state UNDETERMINED (excluded from the PR-opened rate) on ${prUnknown.length} instance(s): ${prUnknown
+        .map((r) => `${r.instance} — ${r.pr_lookup_error ?? "reason not recorded"}`)
+        .join(" · ")}`,
     );
   }
   if (scanNotRun.length > 0) {
