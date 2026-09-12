@@ -1,0 +1,84 @@
+name: CI
+
+# styre-bench had no automatic checking of any kind until ENG-438: `score.yml` was the only
+# workflow and it is `workflow_dispatch` only, so 26 PRs merged with nothing running lint,
+# typecheck, `bun test` or pytest. The suites were green only where they were run by hand,
+# which turned out to mean "green on the operator's machine" -- see the config step below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `edited` so a title change re-runs pr-title; the Conventional-Commits lint must
+    # re-evaluate when a malformed title is fixed (default types omit `edited`).
+    types: [opened, synchronize, reopened, edited]
+
+# A PR title edit re-runs every job, not just pr-title, because `on:` is workflow-level.
+# Cancel superseded runs rather than queueing them.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # `config/bench.config.ts` is gitignored operator config (the styre commit pin, the
+      # throwaway Linear project id), but `orchestrator/`, `bin/` and two test files import
+      # it -- so a clean checkout could not typecheck or test at all. Copying the tracked
+      # example is exactly the documented dev setup (see that file's own header), and doing
+      # it here keeps the example provably in sync: if it stops satisfying the schema or the
+      # importers, this job goes red instead of only the next fresh clone.
+      - name: Materialise operator config from the tracked example
+        run: cp config/bench.config.example.ts config/bench.config.ts
+
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      # No creds are set here, deliberately. Three tests used to borrow them from the
+      # operator's gitignored `.env`; they now carry their own fakes (ENG-438). This job
+      # is the guard that keeps it that way -- a test that reaches for the environment
+      # fails here rather than on someone's next clone.
+      - run: bun test
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scorer/requirements.txt
+      - run: pip install -r scorer/requirements.txt
+      # EXACTLY ONE test runs here that does not run on the operator's macOS machine:
+      # test_preflight_is_cheap_and_passes_on_a_healthy_host[multi-swe-bench]. The other 16
+      # multi-swe-bench cases in that file already run and pass on macOS -- only this one is
+      # skipped, because it imports `harness.run_evaluation`, and the package ships both
+      # `Qiskit/` and `qiskit/`, which a case-insensitive filesystem merges into one.
+      #
+      # That import also opens a Docker socket (`utils.docker_util` calls `docker.from_env()`
+      # at module scope), so this job wants a running daemon. ubuntu-latest has one, and
+      # score.yml already depends on that. The test now skips rather than erroring if it is
+      # ever run somewhere without one -- `pytest.importorskip` converts ImportError and
+      # nothing else, so a DockerException used to fail collection outright.
+      - run: pytest scorer/tests -q
+
+  pr-title:
+    # Squash-merge makes the PR title the commit line, same as in styre. styre enforces
+    # Conventional Commits on it; this repo did not, despite the same merge strategy.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825  # v5.x
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

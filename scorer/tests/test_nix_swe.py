@@ -195,8 +195,30 @@ class TestBestEffortContract:
     """`ensure_nix_swe` must NEVER raise: it is a courtesy to the harness, not a precondition.
     Turning a race we might have avoided into an exception we definitely caused is strictly worse."""
 
-    def test_a_missing_docker_module_is_reported_not_raised(self) -> None:
-        assert ensure_nix_swe(docker_module=None) is not None  # real import path, whatever it finds
+    def test_a_missing_docker_module_falls_back_to_the_real_import(self, monkeypatch) -> None:
+        """`docker_module=None` must import `docker` itself, and still never raise.
+
+        This used to assert only `is not None`. Every branch of `ensure_nix_swe` returns a
+        string, so that could not fail on any host. It also took the REAL Docker path: on a
+        machine with a live daemon -- every Linux CI runner -- it reached
+        `containers.run(IMAGE, ...)`, and docker-py auto-pulls on ImageNotFound, so the
+        "no Docker, no network" unit suite quietly pulled a 364 MB image.
+
+        Patching `from_env` on the real module keeps the fallback under test (the patch is
+        reachable ONLY through `__import__("docker")`) while contacting nothing: drop the
+        fallback and the sentinel never appears. (ENG-438)
+        """
+        import docker
+
+        sentinel = "sentinel: this test must not consult a daemon"
+
+        def boom():
+            raise OSError(sentinel)
+
+        monkeypatch.setattr(docker, "from_env", boom)
+        got = ensure_nix_swe(docker_module=None)
+        assert got.startswith("unavailable:"), got
+        assert sentinel in got, got
 
     def test_an_exploding_docker_client_is_reported_not_raised(self) -> None:
         class Exploding:

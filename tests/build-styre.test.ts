@@ -114,6 +114,50 @@ describe("applyWebOffPatch (pure, no clone/build needed)", () => {
   });
 });
 
+describe("buildStyre: the commit to bench must actually be pinned", () => {
+  // This guard used to live in tests/smoke.test.ts, where it asserted that the OPERATOR's
+  // gitignored config had a non-empty `styreCommit`. That tests the machine, not the code:
+  // it passed only where a filled-in config happened to exist, and failed on every clean
+  // checkout (ENG-438). `buildStyre` is what actually consumes the value -- it hands it to
+  // `git checkout` and builds the cache path from it -- so the check belongs here, where
+  // it holds for every caller rather than for one file on one host.
+  const cfg = {
+    styreRepo: "https://example.invalid/styre.git",
+    styreCommit: "",
+    cohort: "web-off" as const,
+    targets: TARGETS,
+  };
+
+  test("an empty styreCommit is refused before anything is cloned or checked out", async () => {
+    const calls: string[] = [];
+    await expect(
+      buildStyre(cfg, {
+        cacheDir: "/tmp/fake-cache",
+        deps: {
+          clone: async () => {
+            calls.push("clone");
+          },
+          checkout: async () => {
+            calls.push("checkout");
+          },
+        },
+      }),
+    ).rejects.toThrow(/styreCommit/);
+    // Fail BEFORE the side effects: an empty commit would otherwise reach `git checkout ""`
+    // and collide every cohort into the same `.cache/styre-build/-web-off` directory.
+    expect(calls).toEqual([]);
+  });
+
+  test("a whitespace-only styreCommit is refused too", async () => {
+    await expect(
+      buildStyre(
+        { ...cfg, styreCommit: "   " },
+        { cacheDir: "/tmp/fake-cache", deps: { clone: async () => {}, checkout: async () => {} } },
+      ),
+    ).rejects.toThrow(/styreCommit/);
+  });
+});
+
 describe("buildStyre: cohort branching (git clone / bun install / build.sh stubbed — no network)", () => {
   test("web-off: patches the allowlist file via readAllowlist/writeAllowlist", async () => {
     const calls: string[] = [];

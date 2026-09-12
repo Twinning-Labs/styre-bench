@@ -19,6 +19,21 @@ const SENTINEL_FIX_LINE =
 const SENTINEL_TEST_LINE =
   "+    assert compute_regression_result(edge_case_input) == EXPECTED_REGRESSION_VALUE";
 
+/** Complete fake creds for every test that reaches `resolveCreds`.
+ *
+ *  `resolveCreds` falls back to `process.env` per field, so a test supplying a PARTIAL set
+ *  silently borrows the rest from whatever machine it runs on. Three tests did, and passed
+ *  here only because Bun auto-loads the operator's gitignored `.env` -- on a clean checkout
+ *  they failed with `missing required creds` (ENG-438). Values are fixed, fake, and complete
+ *  so the suite reads the same on any host. */
+const FAKE_CREDS = {
+  anthropicApiKey: "ak-1",
+  linearApiKey: "lk-1",
+  githubToken: "gh-1",
+  benchGhToken: "bgh-1",
+  slackBotToken: "slk-1",
+};
+
 function makeInstance(overrides: Partial<Instance> = {}): Instance {
   return {
     id: "org__repo-123",
@@ -386,13 +401,7 @@ describe("resolveNotifyTier (pure)", () => {
 });
 
 describe("buildDockerArgs (pure)", () => {
-  const creds = {
-    anthropicApiKey: "ak-1",
-    linearApiKey: "lk-1",
-    githubToken: "gh-1",
-    benchGhToken: "bgh-1",
-    slackBotToken: "slk-1",
-  };
+  const creds = FAKE_CREDS;
 
   test("defaults --platform to linux/amd64 when none is passed (MSB + legacy/fixture callers)", () => {
     const args = buildDockerArgs({
@@ -508,7 +517,7 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
       "/host/dist/styre",
       {
         outDir: "/host/out/abc123",
-        creds: { anthropicApiKey: "ak", linearApiKey: "lk", githubToken: "gh" },
+        creds: FAKE_CREDS,
       },
       {
         deps: {
@@ -556,7 +565,7 @@ describe("runStyre (wiring — deps stubbed, no real docker daemon)", () => {
       "/host/dist/styre",
       {
         outDir: "/host/out/x",
-        creds: { anthropicApiKey: "a", linearApiKey: "l", githubToken: "g" },
+        creds: FAKE_CREDS,
       },
       {
         deps: {
@@ -1089,7 +1098,7 @@ describe("container naming (leak-on-kill guard)", () => {
       makeInstance(),
       makeSeed(),
       "/host/dist/styre",
-      { outDir: "/host/out/abc123" },
+      { outDir: "/host/out/abc123", creds: FAKE_CREDS },
       {
         deps: {
           ensureOutDir: async () => {},
