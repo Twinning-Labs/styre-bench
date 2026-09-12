@@ -34,7 +34,8 @@ WHAT ACTUALLY FIXES IT, precisely. Two things, and the lock is NOT one of them:
      reporting failure would manufacture the very error we are preventing.
 Both hold with no lock at all, and a test pins that.
 
-WHAT THE LOCK IS FOR, then: `containers.run` PULLS `mswebench/nix_swe:v1.0` (1.5 GB) when the
+WHAT THE LOCK IS FOR, then: `containers.run` PULLS `mswebench/nix_swe:v1.0` (a 364 MB download
+per Docker Hub, larger once unpacked) when the
 image is absent, so three unserialized callers on a cold host mean three concurrent pulls. On the
 very host where ENG-420 was an OOM kill, that is worth avoiding. Measured on the droplet with the
 container removed: cold, 25.7s and outcomes ["created", "present", "present"] -- one pull. Warm,

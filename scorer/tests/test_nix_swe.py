@@ -167,7 +167,8 @@ def test_only_one_caller_ATTEMPTS_the_create_which_is_what_the_lock_buys() -> No
     version passes the test above. Saying the lock fixes the race would be overstating it.
 
     What the lock buys is that only ONE process calls `containers.run`. That call PULLS
-    `mswebench/nix_swe:v1.0` -- 1.5 GB -- when absent, so on a cold host three concurrent callers
+    `mswebench/nix_swe:v1.0` -- a 364 MB download, more on disk -- when absent, so on a cold host
+    three concurrent callers
     mean three concurrent pulls. On the very host where ENG-420 was an OOM kill, that is worth
     avoiding. This test pins the real benefit rather than a claimed one.
     """
@@ -184,7 +185,7 @@ def test_only_one_caller_ATTEMPTS_the_create_which_is_what_the_lock_buys() -> No
 
     assert all(not r.startswith("unavailable") for r in results), results
     assert len(attempts) == 1, (
-        f"{len(attempts)} processes called containers.run; each pulls a 1.5 GB image on a cold "
+        f"{len(attempts)} processes called containers.run; each pulls a 364 MB image on a cold "
         f"host. The build lock should have left exactly one."
     )
     assert results.count("created") == 1
@@ -202,7 +203,9 @@ class TestBestEffortContract:
         string, so that could not fail on any host. It also took the REAL Docker path: on a
         machine with a live daemon -- every Linux CI runner -- it reached
         `containers.run(IMAGE, ...)`, and docker-py auto-pulls on ImageNotFound, so the
-        "no Docker, no network" unit suite quietly pulled a 364 MB image.
+        "no Docker, no network" unit suite quietly pulled a 364 MB image (Docker Hub reports
+        full_size 364,141,290 bytes for v1.0/amd64; the repo previously said 1.5 GB in three
+        places, which nobody had measured).
 
         Patching `from_env` on the real module keeps the fallback under test (the patch is
         reachable ONLY through `__import__("docker")`) while contacting nothing: drop the

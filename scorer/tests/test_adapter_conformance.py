@@ -26,8 +26,6 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import importlib
-
 import pytest
 
 from adapters import multiswebench as msb_mod
@@ -296,21 +294,25 @@ def test_preflight_is_cheap_and_passes_on_a_healthy_host(case: Case) -> None:
     on precisely the host the whole ticket is about. The half of this suite with teeth
     everywhere is the sabotage test above; this half has teeth on Linux and in CI.
     """
-    module = (
+    import docker.errors
+
+    # WIDENED BY EXACTLY ONE TYPE, DELIBERATELY. `pytest.importorskip` converts ImportError and
+    # nothing else, and `multi_swe_bench.utils.docker_util` calls `docker.from_env()` at MODULE
+    # scope -- so on a host without a running daemon the import raises DockerException and this
+    # fails COLLECTION instead of skipping.
+    #
+    # The first fix used a bare `except Exception: pytest.skip(...)`, which was wrong: a skip is
+    # invisible, and THIS IS THE ONLY TEST IN THE SUITE THAT CAN DETECT THE MSB HARNESS BECOMING
+    # UNRUNNABLE. `adapters/multiswebench.py` imports it at line 363, inside `preflight`, with no
+    # module-scope backstop -- unlike `adapters/swebench.py`, which imports at line 60, so a
+    # broken swebench fails collection anyway. Any import-time regression in MSB (a dependency
+    # ABI break, a bad release) would have gone green as a skip, which is the exact ENG-410
+    # failure mode `preflight` exists to prevent.
+    pytest.importorskip(
         "swebench.harness.run_evaluation"
         if case.name == "swe-bench"
-        else "multi_swe_bench.harness.run_evaluation"
+        else "multi_swe_bench.harness.run_evaluation",
+        reason=f"{case.name} harness is not runnable on this host (expected on macOS for MSB)",
+        exc_type=(ImportError, docker.errors.DockerException),
     )
-    try:
-        importlib.import_module(module)
-    except ImportError as exc:
-        # macOS: `Qiskit/` and `qiskit/` merge on a case-insensitive filesystem.
-        pytest.skip(f"{case.name} harness is not importable on this host ({exc})")
-    except Exception as exc:  # noqa: BLE001 - see below; anything here means "cannot run"
-        # `pytest.importorskip` converts ImportError and NOTHING ELSE, so the docker_util
-        # `docker.from_env()` above turns "no daemon" into a collection ERROR rather than a
-        # skip. That is invisible on a GitHub-hosted runner, which always has one running,
-        # and fails confusingly anywhere else (a self-hosted runner, a container job, or a
-        # developer who has simply stopped Docker). Skip instead, naming the reason.
-        pytest.skip(f"{case.name} harness is not runnable on this host ({type(exc).__name__})")
     assert case.adapter.preflight() is None
