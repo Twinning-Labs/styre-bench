@@ -193,6 +193,17 @@ export async function buildStyre(
   cfg: BuildStyreConfig,
   opts: BuildStyreOpts = {},
 ): Promise<BuildStyreResult> {
+  // The commit is what makes a run attributable to a specific styre build, and it is the only
+  // field of the config with no usable default. Empty, it reaches `git checkout ""` and also
+  // collapses every cohort into one cache dir (`.cache/styre-build/-web-off`). Refuse it here,
+  // at the point of use, rather than in a smoke test over the operator's own config file --
+  // that only held where a filled-in config existed, and failed on every clean checkout.
+  if (cfg.styreCommit.trim() === "") {
+    throw new Error(
+      "buildStyre: styreCommit is empty — set it in config/bench.config.ts (full sha; short " +
+        "shas are ambiguous on fetch). Nothing was cloned.",
+    );
+  }
   const deps: BuildStyreDeps = { ...defaultDeps, ...opts.deps };
   const cacheDir =
     opts.cacheDir ??
