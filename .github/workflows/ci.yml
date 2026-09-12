@@ -1,8 +1,11 @@
 name: CI
 
 # styre-bench had no automatic checking of any kind until ENG-438: `score.yml` was the only
-# workflow and it is `workflow_dispatch` only, so 26 PRs merged with nothing running lint,
-# typecheck, `bun test` or pytest. The suites were green only where they were run by hand,
+# workflow and it is `workflow_dispatch` only, so EVERY PR merged before ENG-438 landed with
+# nothing running lint, typecheck, `bun test` or pytest -- 34 of them, the first on 2026-07-06.
+# (This comment first said "26", which was the September-only slice. The correction reached the
+# commit message and not the file, which is the only copy anyone reads.)
+# The suites were green only where they were run by hand,
 # which turned out to mean "green on the operator's machine" -- see the config step below.
 
 on:
@@ -17,14 +20,18 @@ on:
 # Cancel superseded runs rather than queueing them.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR runs: cancel superseded ones (a title edit re-runs every job, since `on:` is
+  # workflow-level). PUSH-TO-MAIN runs: never cancel. Two merges in quick succession would
+  # otherwise leave the first main commit with a cancelled run and no verdict -- which is
+  # how this repo got 34 unverified commits in the first place.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7  # node24, matching styre
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -51,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7  # node24, matching styre
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -66,9 +73,13 @@ jobs:
       #
       # That import also opens a Docker socket (`utils.docker_util` calls `docker.from_env()`
       # at module scope), so this job wants a running daemon. ubuntu-latest has one, and
-      # score.yml already depends on that. The test now skips rather than erroring if it is
-      # ever run somewhere without one -- `pytest.importorskip` converts ImportError and
-      # nothing else, so a DockerException used to fail collection outright.
+      # score.yml already depends on that. Its guard is an `importorskip` widened to
+      # DockerException and NOTHING ELSE, so "no daemon" skips while a genuine import-time
+      # regression still fails -- see that test's own comment for why the difference matters.
+      #
+      # NOTE: pytest is the whole of the Python gate. There is no ruff and no mypy in this
+      # repo, despite `# noqa` comments that presuppose ruff. The lint and typecheck steps
+      # in the `check` job are TypeScript only (biome, tsc).
       - run: pytest scorer/tests -q
 
   pr-title:
