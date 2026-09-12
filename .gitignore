@@ -160,3 +160,7 @@ config/bench.config.ts
 
 # ENG-393: durable per-run evidence dirs (sot.db, transcripts) — local only
 runs
+
+# Independent-review records keyed by commit SHA (see .claude/hooks/require-independent-review.sh).
+# Local process artifacts, not project history.
+.claude/reviews/
