@@ -605,3 +605,25 @@ describe("ENG-411: the clean-ticket resolve rate sits under the headline, never 
     expect(headlineOf(none)).toContain("clean tickets only (no fix in the ticket) | n/a (0/0) |");
   });
 });
+
+describe("ENG-443: missing scores remain visible in attempted-candidate bounds", () => {
+  test("unknown candidate cannot silently turn one success into a complete 100% claim", () => {
+    const records = [
+      makeRecord({ instance: "scored", resolved: true }),
+      makeRecord({ instance: "unknown", resolved: null, taxonomy: "oracle-unmeasured" }),
+      makeRecord({ instance: "unqualified", resolved: null, taxonomy: "dropped-base-unmeasured" }),
+    ];
+    const { markdown } = renderReport(records, META);
+    expect(markdown).toContain("1 submitted candidate(s) have no oracle verdict (origin unknown)");
+    expect(markdown).toContain("Resolve bounds across 2 submitted attempts: 50%–100%");
+    expect(markdown).toContain("controls not measured: 1");
+  });
+
+  test("an unknown-only attempted set renders bounds without inventing a false verdict", () => {
+    const { markdown } = renderReport(
+      [makeRecord({ instance: "unknown", resolved: null, taxonomy: "oracle-unmeasured" })],
+      META,
+    );
+    expect(markdown).toContain("Resolve bounds across 1 submitted attempts: 0%–100%");
+  });
+});

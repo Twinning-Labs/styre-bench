@@ -44,14 +44,16 @@ class OracleAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run_controls(self, instance: dict[str, Any]) -> dict[str, bool]:
+    def run_controls(self, instance: dict[str, Any]) -> dict[str, Any]:
         """Positive + negative + determinism control for one instance.
 
-        Returns `{"gold_resolved": bool, "base_fails": bool, "deterministic": bool}`:
+        Returns `gold_resolved`, `base_fails`, `deterministic` booleans (or None
+        when a required control could not be measured), plus optional raw evidence:
           - gold_resolved: scoring `instance["fix_patch"]` against the harness resolves it.
           - base_fails: scoring an empty candidate (test_patch applied, no fix) does
             NOT resolve -- i.e. the FAIL_TO_PASS tests genuinely fail on base.
-          - deterministic: re-scoring the empty candidate twice agrees (flaky-test guard).
+          - deterministic: repeated measured runs agree on verdict and target statuses.
+            MSB repeats gold; SWE-bench repeats base.
 
         An instance failing any of these must be DROPPED upstream by the caller,
         never scored -- this method only reports facts, it does not drop instances.
@@ -69,7 +71,9 @@ class OracleAdapter(ABC):
         PASS_TO_PASS test living in a file test_patch never touches).
 
         Returns `{"resolved": bool, "fail_to_pass": {test_id: bool, ...},
-        "pass_to_pass": {test_id: bool, ...}}`.
+        "pass_to_pass": {test_id: bool, ...}}`. A structurally valid zero-result
+        stage with unknown origin returns resolved=None and measurement_error;
+        this is not a verdict or a transport failure. Missing/malformed reports raise.
         """
         raise NotImplementedError
 

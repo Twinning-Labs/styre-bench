@@ -70,16 +70,8 @@ export function resolvePythonBin(
 
 const PYTHON_BIN = resolvePythonBin();
 
-export interface RunControlsResult {
-  gold_resolved: boolean;
-  base_fails: boolean;
-  deterministic: boolean;
-}
-export interface ScoreResult {
-  resolved: boolean;
-  fail_to_pass: Record<string, boolean>;
-  pass_to_pass: Record<string, boolean>;
-}
+export type RunControlsResult = import("./types").OracleControls;
+export type ScoreResult = import("./types").OracleScore;
 export interface SelfTestResult {
   passed: boolean | null;
 }
@@ -745,7 +737,7 @@ async function runJudgmentStages(
  *
  * 1. FAIL-CLOSED DROP (Task-3 crux): `run_controls` FIRST. If
  *    `NOT (gold_resolved && base_fails && deterministic)`, drop the instance —
- *    `taxonomy: "dropped-flaky"`, `resolved: false`, and NONE of seed/run/collect/score are
+ *    an evidence-specific `dropped-*` taxonomy, `resolved: null`, and NONE of seed/run/collect/score are
  *    ever called (a corpus/harness the controls can't validate must never reach a score).
  * 2. seed -> run -> collect, wrapped in a whole-instance infra-retry loop: retried (capped at
  *    `maxInfraRetries`, default 2) ONLY when the attempt's `taxonomy === "infra"` — a quality
@@ -766,10 +758,9 @@ async function runJudgmentStages(
  *    preserved as-is.
  *
  * JUDGMENT-STAGE-CRASH CONTRACT (Task-11 capstone reviews, Fix 1): `score()` is the ONLY
- * stage whose failure means "no trustworthy verdict exists" — it is called INSIDE the
- * infra-retry loop below, so a crash there is treated exactly like a seed/run/collect
- * failure (`taxonomy: "infra"`, retried against the same `maxInfraRetries`/
- * `perTaskCostCapUsd` budget). `run_self_test`/`detect_leak`/`blindQuality`/`abReview` run
+ * stage whose failure means "no trustworthy verdict exists". Its retries reuse the same
+ * collected diff and have their own bounded counter; exhaustion produces oracle-unmeasured,
+ * never another authoring attempt. `run_self_test`/`detect_leak`/`blindQuality`/`abReview` run
  * strictly AFTER `score()` has already produced a `resolved` verdict for this attempt — each
  * is wrapped in its OWN try/catch, so a crash in any one of them degrades ONLY that signal
  * (`self_test_passed: null` / `suspected_leak: false` + `leak_reasons: ["transcript-
@@ -783,27 +774,14 @@ async function runJudgmentStages(
  * just the last attempt's cost alone. This is what `runPool`'s `runBudgetUsd` kill-switch
  * and the report's cost stats sum over, so it must reflect true cumulative spend.
  */
-/**
- * Which control failed, as a taxonomy value (ENG-413).
- *
- * The three controls answer unrelated questions and only `deterministic` is about flakiness:
- *   - `gold_resolved: false` — the instance or its image is unusable; the HUMAN's fix does not
- *     resolve it. Says nothing about styre.
- *   - `base_fails: false` — the instance is corrupt; its FAIL_TO_PASS tests already pass on base.
- *   - `deterministic: false` — genuinely flaky tests.
- *
- * Reporting the first two as "flaky" was a false statement in the record and in the validity
- * panel. Checked in this order because an instance whose gold fix does not resolve cannot be
- * meaningfully judged on the other two.
- */
-export function dropTaxonomyFor(c: {
-  gold_resolved: boolean;
-  base_fails: boolean;
-  deterministic: boolean;
-}): string {
+/** Instability takes precedence; retain every measured fact in controls. */
+export function dropTaxonomyFor(c: RunControlsResult): string {
+  if (c.deterministic === false) return "dropped-flaky";
+  if (c.gold_resolved === null || c.deterministic === null) return "dropped-controls-unmeasured";
   if (!c.gold_resolved) return "dropped-gold-unresolved";
+  if (c.base_fails === null) return "dropped-base-unmeasured";
   if (!c.base_fails) return "dropped-base-passes";
-  return "dropped-flaky";
+  throw new Error("dropTaxonomyFor called for passing controls");
 }
 
 export async function runInstance(
@@ -821,14 +799,16 @@ export async function runInstance(
   // the fail-closed drop gate entirely rather than call it against a harness that can't run.
   if (!bypassOracle) {
     const controls = await deps.runControls(inst);
+    base.controls = controls;
     if (!(controls.gold_resolved && controls.base_fails && controls.deterministic)) {
       // ENG-413: name the control that actually failed, and keep the booleans. The gate itself
       // is unchanged — any false control still drops the instance.
-      return { ...base, taxonomy: dropTaxonomyFor(controls), controls };
+      return { ...base, resolved: null, taxonomy: dropTaxonomyFor(controls), controls };
     }
   }
 
   let infraRetries = 0;
+  let scorerRetries = 0;
   // Measured stays null until something is actually measured — see TaskRecord.cost_usd_measured.
   let taskMeasuredUsd: number | null = null;
   let taskEstimatedUsd = 0;
@@ -836,11 +816,7 @@ export async function runInstance(
     new Error("runInstance: internal error — the attempt loop never ran"),
     "internal",
   );
-  // Set inside the loop, in the SAME iteration that leaves `stage.record.taxonomy` neither
-  // "infra" nor "probe" — i.e. iff `deps.score` returned successfully for the attempt the
-  // loop broke on. See the defensive check below for what happens if that invariant is ever
-  // violated by a future edit.
-  let scoreResult: ScoreResult | undefined;
+  let scoreResult: ScoreResult;
 
   for (;;) {
     const attempt = await attemptOnce(inst, binaries, cfg, deps);
@@ -867,30 +843,6 @@ export async function runInstance(
         repo_url: attempt.seed.repoUrl,
         ident: attempt.seed.ident,
       });
-    }
-
-    scoreResult = undefined;
-
-    if (!bypassOracle && stage.record.taxonomy !== "infra" && stage.record.taxonomy !== "probe") {
-      try {
-        scoreResult = await deps.score(inst, stage.diff);
-      } catch (err) {
-        // score() crash contract (Fix 1): the oracle is ground truth — a crash here means
-        // NO trustworthy verdict was produced, so this is a real oracle/infra failure, not
-        // a judgment-stage gap. Reclassifying as taxonomy:"infra" routes it through the
-        // SAME infra-retry budget as a seed/run/collect failure (`canRetry` below), rather
-        // than rejecting `runInstance` and silently discarding the attempt's telemetry (the
-        // `runPool` catch's fresh-blank-record failure mode this fix closes).
-        const message = err instanceof Error ? err.message : String(err);
-        stage = {
-          ...stage,
-          record: {
-            ...stage.record,
-            taxonomy: "infra",
-            status: `pipeline-error(score): ${message}`,
-          },
-        };
-      }
     }
 
     const canRetry =
@@ -954,17 +906,40 @@ export async function runInstance(
     };
   }
 
-  if (!scoreResult) {
-    // Defensive only — unreachable given the loop invariant above (taxonomy is neither
-    // "infra" nor "probe" here, which the loop only allows once `deps.score` has already
-    // returned successfully in that same iteration). Degrades to an infra record rather
-    // than throwing, matching `runInstance`'s "never reject" contract (see `runPool`'s
-    // catch, which exists purely as defense-in-depth against this function rejecting).
+  for (;;) {
+    try {
+      scoreResult = await deps.score(inst, stage.diff);
+      break;
+    } catch (err) {
+      if (scorerRetries < maxInfraRetries) {
+        scorerRetries++;
+        continue;
+      }
+      // Even a process failure after submission cannot prove a harness-only origin
+      // (a candidate can hang the test command). Keep this attempted candidate in
+      // the report's uncertainty bounds, and preserve its diff, PR state and spend.
+      return {
+        ...withCollect,
+        resolved: null,
+        taxonomy: "oracle-unmeasured",
+        scorer_retries: scorerRetries,
+        oracle_error: {
+          origin: "unknown",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
+  }
+  if (scoreResult.resolved === null) {
     return {
       ...withCollect,
-      taxonomy: "infra",
-      status:
-        "pipeline-error(score): internal error — scoreResult missing for a non-infra/probe taxonomy",
+      resolved: null,
+      taxonomy: "oracle-unmeasured",
+      scorer_retries: scorerRetries,
+      oracle_error: scoreResult.measurement_error ?? {
+        origin: "unknown",
+        detail: "No oracle verdict",
+      },
     };
   }
 
@@ -991,6 +966,7 @@ export async function runInstance(
 
   return {
     ...withCollect,
+    scorer_retries: scorerRetries,
     resolved,
     taxonomy,
     self_test_passed: selfTestPassed,

@@ -92,6 +92,9 @@ jobs:
               print(f"`{d['error']}`\n")
               print("Per `scorer/score.py`, this is a harness/transport failure to investigate. "
                     "It is explicitly NOT `resolved: false`.")
+          elif d.get("resolved") is None:
+              print("## Oracle unmeasured — no verdict (failure origin unknown)\n")
+              print("```json"); print(json.dumps(d, indent=2)); print("```")
           else:
               print(f"## resolved = `{d.get('resolved')}`\n")
               print("```json"); print(json.dumps(d, indent=2)); print("```")
@@ -118,8 +121,8 @@ jobs:
               sys.exit(f"scorer output is not JSON ({exc}); first bytes: {raw[:200]!r}")
           if "error" in d:
               sys.exit(f"transport failure, not a verdict: {d['error']}")
-          if "resolved" not in d:
-              sys.exit(f"scorer returned no `resolved` field: {sorted(d)}")
+          if not isinstance(d.get("resolved"), bool):
+              sys.exit(f"scorer returned no boolean verdict: {d.get('measurement_error', d)}")
           print(f"verdict produced: resolved={d['resolved']}")
           PY
 

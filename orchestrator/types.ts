@@ -39,6 +39,26 @@ export interface Instance {
   repo_name?: string;
   pr_number?: number;
 }
+/** Evidence from the oracle; null means a required control was not measured. */
+export interface OracleControls {
+  gold_resolved: boolean | null;
+  base_fails: boolean | null;
+  deterministic: boolean | null;
+  base_provenance?: "not-measured" | "independent";
+  gold_runs?: OracleScore[];
+  base_report_path?: string;
+  base_error?: string;
+  base_fail_to_pass?: Record<string, "passed" | "failed">;
+}
+
+export interface OracleScore {
+  harness_report_path?: string;
+  resolved: boolean | null;
+  fail_to_pass: Record<string, boolean>;
+  pass_to_pass: Record<string, boolean>;
+  measurement_error?: { origin: "unknown"; detail: string };
+}
+
 export interface TaskRecord {
   instance: string;
   language: "ts" | "python";
@@ -115,10 +135,14 @@ export interface TaskRecord {
    *  statement in the record: sphinx-doc__sphinx-7590 was reported flaky when its determinism
    *  control PASSED and the human's own fix simply did not resolve the instance. */
   taxonomy: string;
-  /** ENG-413: the oracle controls as measured, present only on a `dropped-*` record.
+  /** ENG-443: retain oracle control provenance and repeated results on every qualified/dropped run.
    *  Recovering these after the fact cost a full image build and a re-run, because the
    *  booleans were tested and then discarded. */
-  controls?: { gold_resolved: boolean; base_fails: boolean; deterministic: boolean };
+  controls?: OracleControls;
+  /** A candidate was produced but has no trustworthy score; never silently infra-excluded. */
+  oracle_error?: { origin: "unknown"; detail: string };
+  /** Scorer retries reuse the collected diff and never spend another agent attempt. */
+  scorer_retries?: number;
   /** ENG-411: how much of the accepted fix / held-out tests the corpus's OWN issue text
    *  already contained, measured by `firewall.ts`'s `measureTicketOverlap`. A record with
    *  `fix_lines === 0 && test_lines === 0` is a "clean ticket" and counts toward the report's
