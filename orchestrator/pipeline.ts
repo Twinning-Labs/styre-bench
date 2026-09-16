@@ -28,8 +28,7 @@ import { selectPilot, selectSingle, selectSmoke, tagCutoff } from "./matrix";
 import { archFromPlatform, bunLinuxTarget } from "./platform";
 import { SETUP_FAILED_EXIT, runStyre } from "./run-task";
 import type { RunSeed, RunStyreResult } from "./run-task";
-import { seedGithub } from "./seed-github";
-import { seedLinear } from "./seed-linear";
+import { seedStage } from "./seed-stage";
 import type { Instance, TaskRecord } from "./types";
 import { sumTranscriptUsage } from "./usage";
 
@@ -437,14 +436,12 @@ export interface PipelineDeps {
     seed: number,
   ) => Promise<{ preference: AbPreference; notes: string }>;
   /** Called once per attempt that got past `seed` (i.e. a `RunSeed` exists to tear down) —
-   *  see `attemptOnce`. NOT called when `seed` itself throws (nothing was created). */
+   *  see `attemptOnce`. NOT called when `seed` itself throws; seedStage rolls back partially created resources. */
   cleanup: (ctx: { seed: RunSeed; failed: boolean }) => Promise<void>;
 }
 
 async function defaultSeedStage(inst: Instance, cfg: PipelineConfig): Promise<RunSeed> {
-  const gh = await seedGithub(inst, { benchGithubOrg: cfg.benchGithubOrg });
-  const li = await seedLinear(inst, { linearProjectId: cfg.linearProjectId });
-  return { ...gh, ident: li.ident };
+  return seedStage(inst, cfg);
 }
 
 async function defaultRunStage(
@@ -609,7 +606,7 @@ function infraStageFromError(err: unknown, where: string): CollectStageResult {
  * `stage.record.taxonomy`, never from a caught exception.
  *
  * `cleanup` (Task 11 contract: "always runs per started instance, try/finally") is called
- * iff `seed` succeeded — an attempt that never got a `RunSeed` created nothing to tear down
+ * iff `seed` succeeded — seedStage owns rollback before a complete `RunSeed` exists
  * (see `cleanup.ts`'s `CleanupCtx` doc). A `cleanup` failure itself is swallowed (logged via
  * the thrown error's message being dropped here) rather than reclassifying an otherwise-
  * successful attempt as infra — a leaked throwaway repo/ticket is a separately-monitorable
