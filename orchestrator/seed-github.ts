@@ -2,9 +2,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { $ } from "bun";
-import { Octokit } from "octokit";
 import { assertNoHeldOutPaths } from "./firewall";
-import { createOwnedRepo, deleteOwnedRepo } from "./seed-repo";
+import { createOwnedRepo, createSeedClient, deleteOwnedRepo } from "./seed-repo";
 import type { OwnedRepo, SeedEvent } from "./seed-repo";
 import type { Instance } from "./types";
 
@@ -109,7 +108,7 @@ export const defaultDeps: SeedGithubDeps = {
 
   async createRepo(org, name, emit) {
     return createOwnedRepo(
-      new Octokit({ auth: requireBenchToken("create a throwaway repo") }),
+      createSeedClient(requireBenchToken("create a throwaway repo")),
       org,
       name,
       emit,
@@ -144,7 +143,7 @@ export const defaultDeps: SeedGithubDeps = {
     if (!ownedRepo || ownedRepo.org !== org || ownedRepo.name !== name) {
       throw new Error(`seedGithub: refusing rollback without ownership for ${org}/${name}`);
     }
-    await deleteOwnedRepo(new Octokit({ auth: requireBenchToken("roll back a seed") }), ownedRepo);
+    await deleteOwnedRepo(createSeedClient(requireBenchToken("roll back a seed")), ownedRepo);
   },
 };
 

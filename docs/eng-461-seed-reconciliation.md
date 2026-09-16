@@ -13,9 +13,17 @@ automatic retries and per-request retry counts. GitHub's
 [repository API](https://docs.github.com/en/rest/repos/repos#create-an-organization-repository)
 supports a description in the creation request and repository lookup by owner/name.
 
+Independent review found a second retry mechanism: Octokit's enabled-by-default
+[throttling plugin](https://github.com/octokit/plugin-throttling.js) retries rate-limit
+responses independently of `request.retries`. A control using the production plugin
+defaults reproduces `403 → repeated POST → 422` even with `request.retries: 0`.
+The seed client now explicitly declines both primary and secondary throttle retries,
+while keeping the plugin's request pacing. Tests use that production client factory;
+they no longer disable throttling to speed up the fake transport.
+
 ## Behavior
 
-- Creation sends one POST, with automatic retries disabled for that request.
+- Creation sends one POST, with automatic request and throttle retries disabled.
 - An opaque per-attempt UUID marker is written in the description in the same POST.
   On any creation error, a bounded GET reconciliation may recover only the matching
   private owner/name/marker. A same-name repository alone is never adopted or deleted.
@@ -39,6 +47,8 @@ They test the baseline SDK retry behavior, successful reconciliation, ownership
 mismatches, 404 lookup, Actions failure, replacement-repo refusal, partial Linear
 failure, rollback failure, successful seeding and original-error preservation. The
 existing tests still exercise real local Git history and the leak firewall.
+Primary and secondary rate-limit tests also prove POST and rollback DELETE are not
+repeated by the throttle plugin and that the first response remains in the journal.
 
 This does not establish that the historical Sphinx failure was a lost response;
 request diagnostics on a subsequent targeted run will distinguish that hypothesis.

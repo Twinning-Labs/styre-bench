@@ -1,10 +1,24 @@
-import type { Octokit } from "octokit";
+import { Octokit } from "octokit";
 import type { SeedGithubResult } from "./seed-github";
 
 type Repo = Pick<
   Awaited<ReturnType<Octokit["rest"]["repos"]["get"]>>["data"],
   "id" | "description" | "private" | "full_name" | "clone_url" | "html_url" | "default_branch"
 >;
+
+/** Keep throttling's request pacing, but never let its separate retry limiter repeat
+ * a guarded mutation. request.retries only controls plugin-retry, not plugin-throttling.
+ * Reconciliation and ownership checks, not hidden SDK POST/DELETE retries, own recovery. */
+export function createSeedClient(auth: string, fetch?: typeof globalThis.fetch): Octokit {
+  return new Octokit({
+    auth,
+    throttle: {
+      onRateLimit: () => false,
+      onSecondaryRateLimit: () => false,
+    },
+    ...(fetch ? { request: { fetch } } : {}),
+  });
+}
 
 export interface OwnedRepo {
   org: string;

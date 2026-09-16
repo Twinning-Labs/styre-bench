@@ -4,21 +4,24 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Octokit } from "octokit";
 import { seedGithub } from "../orchestrator/seed-github";
-import { createOwnedRepo, deleteOwnedRepo } from "../orchestrator/seed-repo";
+import { createOwnedRepo, createSeedClient, deleteOwnedRepo } from "../orchestrator/seed-repo";
 import type { SeedEvent } from "../orchestrator/seed-repo";
 import { seedStage } from "../orchestrator/seed-stage";
 import type { Instance } from "../orchestrator/types";
 
-function client(handler: (method: string, url: string, body: Record<string, unknown>) => Response) {
+function client(
+  handler: (method: string, url: string, body: Record<string, unknown>) => Response,
+  sdkDefaults = false,
+) {
   const fetch = (async (url: string | URL | Request, init?: RequestInit) =>
     handler(
       init?.method ?? "GET",
       String(url),
       init?.body ? JSON.parse(String(init.body)) : {},
     )) as typeof globalThis.fetch;
+  if (!sdkDefaults) return createSeedClient("fake-test-token", fetch);
   return new Octokit({
     auth: "fake-test-token",
-    throttle: { enabled: false },
     retry: { retryAfterBaseValue: 1 },
     request: { fetch },
   });
@@ -38,7 +41,78 @@ const repo = (marker: string) => ({
   default_branch: "main",
 });
 
+function rateLimit(secondary: boolean, status = 403): Response {
+  return new Response(
+    JSON.stringify({ message: secondary ? "secondary rate limit" : "API rate limit exceeded" }),
+    {
+      status,
+      headers: {
+        "content-type": "application/json",
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": "1",
+        "retry-after": "1",
+        "x-github-request-id": "first-response",
+      },
+    },
+  );
+}
+
 describe("GitHub creation reconciliation through real Octokit, fake HTTP", () => {
+  test("control: default throttle retries POST despite request.retries=0 and masks first response", async () => {
+    let posts = 0;
+    const octokit = client(
+      () => (++posts === 1 ? rateLimit(false) : json({ message: "name already exists" }, 422)),
+      true,
+    );
+    await expect(
+      octokit.rest.repos.createInOrg({
+        org: "scratch",
+        name: "bench-abc",
+        request: { retries: 0 },
+      }),
+    ).rejects.toThrow("name already exists");
+    expect(posts).toBe(2);
+  });
+
+  test.each([false, true])(
+    "production seed client declines throttle POST retry (secondary: %s)",
+    async (secondary) => {
+      let marker = "";
+      let posts = 0;
+      const events: SeedEvent[] = [];
+      const octokit = client((method, _url, body) => {
+        if (method === "POST") {
+          posts++;
+          marker = String(body.description);
+          return rateLimit(secondary);
+        }
+        return json(method === "GET" ? repo(marker) : {});
+      });
+      await createOwnedRepo(octokit, "scratch", "bench-abc", async (e) => {
+        events.push(e);
+      });
+      expect(posts).toBe(1);
+      expect(events.find((e) => e.phase === "create-error")).toMatchObject({
+        status: 403,
+        requestId: "first-response",
+      });
+    },
+  );
+
+  test.each([false, true])(
+    "rollback never retries DELETE after throttle error without rechecking ownership (secondary: %s)",
+    async (secondary) => {
+      const calls: string[] = [];
+      const octokit = client((method) => {
+        calls.push(method);
+        return method === "GET" ? json(repo("marker")) : rateLimit(secondary);
+      });
+      await expect(
+        deleteOwnedRepo(octokit, { org: "scratch", name: "bench-abc", id: 123, marker: "marker" }),
+      ).rejects.toThrow(/rate limit/i);
+      expect(calls).toEqual(["GET", "DELETE"]);
+    },
+  );
   test("control: unmodified SDK repeats the same POST after 500 and surfaces the later 422", async () => {
     const bodies: Record<string, unknown>[] = [];
     const octokit = client((_method, _url, body) => {
@@ -46,7 +120,7 @@ describe("GitHub creation reconciliation through real Octokit, fake HTTP", () =>
       return bodies.length === 1
         ? json({ message: "server error" }, 500)
         : json({ message: "name already exists" }, 422);
-    });
+    }, true);
     await expect(
       octokit.rest.repos.createInOrg({ org: "scratch", name: "bench-abc" }),
     ).rejects.toThrow("name already exists");
