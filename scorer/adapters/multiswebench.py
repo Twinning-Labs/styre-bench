@@ -88,6 +88,7 @@ ASSUMPTION (verify at live pass, genuinely unconfirmed from static reading):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import uuid
@@ -95,6 +96,13 @@ from pathlib import Path
 from typing import Any
 
 from .base import OracleAdapter
+from .mui_profile import (
+    assert_idle_docker,
+    inspect_image_id,
+    native_profile_command,
+    selected_profile,
+    serial_profile_lock,
+)
 from .nix_swe import ensure_nix_swe, nix_swe_failure_hint
 
 _SELF_TEST_TIMEOUT_S = 300
@@ -391,11 +399,23 @@ class MultiSweBenchAdapter(OracleAdapter):
         return org, repo, int(number_str)
 
     def _run_harness(self, instance: dict[str, Any], candidate_diff: str, *, base: bool = False) -> dict[str, Any]:
+        raw = _raw_instance(instance["id"], instance.get("language") or "ts")
+        profile = selected_profile(instance["id"], raw)
+        if profile is None:
+            return self._run_harness_unlocked(instance, candidate_diff, raw, base=base)
+        with serial_profile_lock():
+            assert_idle_docker()
+            return self._run_harness_unlocked(instance, candidate_diff, raw, base=base, profile=profile)
+
+    def _run_harness_unlocked(
+        self, instance: dict[str, Any], candidate_diff: str, raw: dict,
+        *, base: bool, profile: dict | None = None,
+    ) -> dict[str, Any]:
         import subprocess
         import sys
         import tempfile
 
-        raw = _raw_instance(instance["id"], instance.get("language") or "ts")
+        profile_evidence = None
         org, repo, number = raw["org"], raw["repo"], raw["number"]
         run_dir = Path(tempfile.mkdtemp(prefix="styre-bench-msb-"))
         patch_file = run_dir / "patch.json"
@@ -444,7 +464,15 @@ class MultiSweBenchAdapter(OracleAdapter):
             "--log_dir",
             str(run_dir / "logs"),
         ]
-        if base:
+        if profile is not None:
+            assert_idle_docker()
+            command, profile_evidence = native_profile_command(raw, base=base, mocha=profile["mocha"])
+            profile_evidence["image_id_before"] = inspect_image_id(profile_evidence["image"])
+            profile_evidence["candidate_sha256"] = hashlib.sha256(candidate_diff.encode()).hexdigest()
+            cmd.extend(["--fix_patch_run_cmd", command])
+            profile_evidence["argv"] = cmd
+            (run_dir / "execution-profile.json").write_text(json.dumps(profile_evidence, indent=2))
+        elif base:
             # The default fix-run.sh applies test+fix in one git invocation, which
             # exits on an empty patch. Run the harness's actual test-only script
             # instead, in its normal fresh container and with its normal parser.
@@ -470,6 +498,22 @@ class MultiSweBenchAdapter(OracleAdapter):
                 + f"\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
 
+        if profile_evidence is not None:
+            profile_evidence["image_id_after"] = inspect_image_id(profile_evidence["image"])
+            (run_dir / "execution-profile.json").write_text(json.dumps(profile_evidence, indent=2))
+            if profile_evidence["image_id_before"] != profile_evidence["image_id_after"]:
+                raise RuntimeError("MUI profile: image tag changed during evaluation")
+            assert_idle_docker()
+        profile_result = {}
+        if profile_evidence is not None:
+            profile_result["oracle_profile"] = {
+                "id": profile_evidence["id"],
+                "minimum_timeout_ms": profile_evidence["minimum_timeout_ms"],
+                "image_id": profile_evidence["image_id_before"],
+                "preload_sha256": profile_evidence["preload_sha256"],
+                "evidence_path": str(run_dir / "execution-profile.json"),
+            }
+
         # ASSUMPTION (see module docstring): exact per-instance report.json path
         # under output_dir/workdir is not yet confirmed against a live run.
         report_candidates = list(run_dir.glob("**/report.json"))
@@ -482,15 +526,26 @@ class MultiSweBenchAdapter(OracleAdapter):
             raise ValueError(f"multi-swe-bench: ambiguous reports under {run_dir}")
         report = json.loads(report_candidates[0].read_text())
         if base:
+            base_result = parse_base_report(report, test_ids(raw.get("f2p_tests")))
+            if profile is not None:
+                stage = report.get("fix_patch_result")
+                passed = set(stage.get("passed_tests") or []) if isinstance(stage, dict) else set()
+                p2p = {t: t in passed for t in test_ids(raw.get("p2p_tests"))}
+                base_result.update({
+                    "base_pass_to_pass": p2p,
+                    "base_preserved": bool(p2p) and all(p2p.values()),
+                })
             return {
-                **parse_base_report(report, test_ids(raw.get("f2p_tests"))),
+                **base_result,
                 "base_report_path": str(report_candidates[0]),
+                **profile_result,
             }
+
         try:
             parsed = parse_report(report, test_ids(raw.get("f2p_tests")), test_ids(raw.get("p2p_tests")))
         except UnmeasuredResult as exc:
             raise UnmeasuredResult(f"{exc}; report: {report_candidates[0]}") from exc
-        return {**parsed, "harness_report_path": str(report_candidates[0])}
+        return {**parsed, "harness_report_path": str(report_candidates[0]), **profile_result}
 
     def score(self, instance: dict[str, Any], candidate_diff: str) -> dict[str, Any]:
         try:
@@ -620,6 +675,18 @@ class MultiSweBenchAdapter(OracleAdapter):
             all(gold_a[k] == gold_b[k] for k in ("resolved", "fail_to_pass", "pass_to_pass"))
             if measured else None
         )
+        # Same target statuses under different timing/image profiles are not a
+        # repeated control. Evidence paths differ by design and are not identity.
+        if measured and any(r.get("oracle_profile") for r in (gold_a, gold_b, base)):
+            keys = ("id", "minimum_timeout_ms", "image_id", "preload_sha256")
+            profiles = [
+                tuple(r.get("oracle_profile", {}).get(k) for k in keys)
+                for r in (gold_a, gold_b, base)
+            ]
+            deterministic = (
+                deterministic and all(v is not None for v in profiles[0])
+                and profiles[0] == profiles[1] == profiles[2]
+            )
         return {
             "gold_resolved": all(g["resolved"] is True for g in (gold_a, gold_b)) if measured else None,
             **base,

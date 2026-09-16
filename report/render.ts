@@ -213,6 +213,20 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   lines.push(`# ${meta.title ?? "Styre-Bench Report"}`);
   lines.push("");
   lines.push(`styre: ${meta.styreRef} · dataset: ${meta.dataset} · seed: ${meta.seed}`);
+  const profiles = [
+    ...new Set(
+      records
+        .flatMap((r) => [r.oracle_profile, r.controls?.oracle_profile])
+        .flatMap((p) =>
+          p ? [`${p.id} (positive timeout floor ${p.minimum_timeout_ms / 1000}s)`] : [],
+        ),
+    ),
+  ];
+  if (profiles.length > 0) {
+    lines.push(
+      `oracle profile: ${profiles.join(", ")} — serial dedicated host; compare only like-profile runs`,
+    );
+  }
   const budgetStr =
     meta.spentUsd !== undefined
       ? `$${fmt2(meta.spentUsd)} / $${fmt2(meta.budgetUsd)}`

@@ -653,3 +653,18 @@ test("ENG-443: parked submission membership does not depend on its oracle result
   );
   expect(markdown).toContain("Resolve bounds across 2 submitted attempts: 50%–100%");
 });
+
+test("modified oracle profile is visible in human report and preserved in JSON", () => {
+  const profile = {
+    id: "mui-timeouts-v1",
+    minimum_timeout_ms: 30000,
+    image_id: "sha256:image",
+    preload_sha256: "preload",
+    evidence_path: "/evidence/profile",
+  };
+  const record = makeRecord({ instance: "mui__material-ui-33777", oracle_profile: profile });
+  const report = renderReport([record], META);
+  expect(report.markdown).toContain("mui-timeouts-v1 (positive timeout floor 30s)");
+  expect(report.markdown).toContain("compare only like-profile runs");
+  expect(JSON.stringify(report.json)).toContain("preload_sha256");
+});

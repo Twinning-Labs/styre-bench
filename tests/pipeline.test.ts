@@ -1253,3 +1253,77 @@ describe("ENG-413: drop reasons are distinct and recorded", () => {
     expect(calls.seed).toBeGreaterThan(0);
   });
 });
+
+// MUI controls must qualify the same finite-timeout environment used for the candidate.
+describe("MUI execution profile", () => {
+  const profile = {
+    id: "mui-timeouts-v1",
+    minimum_timeout_ms: 30000,
+    image_id: "sha256:image",
+    preload_sha256: "preload",
+    evidence_path: "/evidence/control",
+  };
+  test.each([false, undefined])("base preservation %s blocks before seeding", async (preserved) => {
+    const { deps, calls } = trackedDeps({
+      runControls: async () => ({
+        ...VALID_CONTROLS,
+        oracle_profile: profile,
+        base_preserved: preserved,
+      }),
+    });
+    const result = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(result.taxonomy).toBe("dropped-base-unstable");
+    expect(result.resolved).toBeNull();
+    expect(calls.seed).toBe(0);
+  });
+  test.each([
+    undefined,
+    { ...profile, image_id: "sha256:changed" },
+    { ...profile, preload_sha256: "changed" },
+    { ...profile, minimum_timeout_ms: 60000 },
+  ])("candidate must match qualified profile %j", async (actual) => {
+    const { deps } = trackedDeps({
+      runControls: async () => ({
+        ...VALID_CONTROLS,
+        oracle_profile: profile,
+        base_preserved: true,
+      }),
+      score: async () => ({ ...SCORE_RESOLVED, oracle_profile: actual }),
+    });
+    const result = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(result.taxonomy).toBe("oracle-unmeasured");
+    expect(result.resolved).toBeNull();
+    expect(result.oracle_error?.detail).toContain("differs");
+  });
+  test("matching profile is retained despite different evidence paths", async () => {
+    const actual = { ...profile, evidence_path: "/evidence/candidate" };
+    const { deps } = trackedDeps({
+      runControls: async () => ({
+        ...VALID_CONTROLS,
+        oracle_profile: profile,
+        base_preserved: true,
+      }),
+      score: async () => ({ ...SCORE_RESOLVED, oracle_profile: actual }),
+    });
+    const result = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(result.resolved).toBe(true);
+    expect(result.oracle_profile).toEqual(actual);
+  });
+  test("profile pool refuses concurrency before starting work", async () => {
+    let starts = 0;
+    await expect(
+      runPool(
+        [makeInstance({ id: "mui__material-ui-33777" })],
+        STYRE_BINS,
+        makeCfg({ concurrency: 3 }),
+        {
+          runInstance: async () => {
+            starts++;
+            throw new Error("must not run");
+          },
+        },
+      ),
+    ).rejects.toThrow("concurrency: 1");
+    expect(starts).toBe(0);
+  });
+});
