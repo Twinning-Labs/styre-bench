@@ -41,6 +41,9 @@ const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
   // single `dropped-flaky` was. Splitting the label must not change what counts.
   "dropped-gold-unresolved",
   "dropped-base-passes",
+  "dropped-base-unmeasured",
+  "dropped-controls-unmeasured",
+  "oracle-unmeasured",
   "dropped-flaky",
   "probe",
   "infra",
@@ -52,7 +55,7 @@ const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
 const CLEAN_TICKET_LABEL = "Resolve rate — clean tickets only (no fix in the ticket)";
 
 function inResolveDenom(r: TaskRecord): boolean {
-  return !EXCLUDED_FROM_RESOLVE_DENOM.has(r.taxonomy);
+  return r.resolved !== null && !EXCLUDED_FROM_RESOLVE_DENOM.has(r.taxonomy);
 }
 
 function resolvedCount(rs: TaskRecord[]): number {
@@ -239,6 +242,30 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
     `| PR-opened rate | ${absCell(prOff, prDenomOff.length)} | ${deltaCell(prOff, prDenomOff.length, prOn, prDenomOn.length)} | ${absCell(prPost, prDenomPost.length)} |`,
   );
   lines.push("");
+
+  // Unknown scores can be candidate-caused. Show bounds over the original
+  // submitted attempts so exclusion cannot silently inflate the headline.
+  for (const cohort of ["web-off", "web-on"] as const) {
+    const cohortRecords = records.filter((r) => r.cohort === cohort);
+    // Attempt membership cannot depend on the scoring outcome. Parked runs are
+    // excluded from the headline but still submitted: include them in these
+    // bounds whether they return a boolean or an unknown. Taxonomy fallback
+    // recognizes older records written before explicit submission provenance.
+    const submitted = cohortRecords.filter(
+      (r) => r.score_attempted === true || r.taxonomy === "oracle-unmeasured" || inResolveDenom(r),
+    );
+    const measured = submitted.filter((r) => r.resolved !== null);
+    const unknown = submitted.filter((r) => r.resolved === null);
+    if (unknown.length === 0) continue;
+    const total = measured.length + unknown.length;
+    const successes = resolvedCount(measured);
+    lines.push(
+      `**${cohort}: ${unknown.length} submitted candidate(s) have no oracle verdict (origin unknown). ` +
+        `The measured-only rate is incomplete. Resolve bounds across ${total} submitted attempts: ` +
+        `${pctStr(successes, total)}–${pctStr(successes + unknown.length, total)}.**`,
+    );
+    lines.push("");
+  }
 
   return lines.join("\n");
 }
@@ -432,6 +459,9 @@ const TAXONOMY_ORDER = [
   "infra",
   "dropped-gold-unresolved",
   "dropped-base-passes",
+  "dropped-base-unmeasured",
+  "dropped-controls-unmeasured",
+  "oracle-unmeasured",
   "dropped-flaky",
   "unscored",
 ];
@@ -469,7 +499,10 @@ function renderValidityPanel(records: TaskRecord[]): string {
   const goldUnresolved = records.filter((r) => r.taxonomy === "dropped-gold-unresolved").length;
   const basePasses = records.filter((r) => r.taxonomy === "dropped-base-passes").length;
   const flakyDropped = records.filter((r) => r.taxonomy === "dropped-flaky").length;
-  const totalDropped = goldUnresolved + basePasses + flakyDropped;
+  const unmeasuredControls = records.filter(
+    (r) => r.taxonomy === "dropped-base-unmeasured" || r.taxonomy === "dropped-controls-unmeasured",
+  ).length;
+  const totalDropped = goldUnresolved + basePasses + flakyDropped + unmeasuredControls;
 
   const scanNotRun = records.filter((r) => r.leak_reasons.includes("transcript-unavailable"));
 
@@ -496,7 +529,7 @@ function renderValidityPanel(records: TaskRecord[]): string {
   } else {
     lines.push(
       `- instances dropped by oracle controls before scoring: ${totalDropped} ` +
-        `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · flaky: ${flakyDropped})`,
+        `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · flaky: ${flakyDropped} · controls not measured: ${unmeasuredControls})`,
     );
   }
   if (prDisagree.length > 0) {

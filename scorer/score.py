@@ -43,7 +43,7 @@ def get_adapter(instance: dict[str, Any]) -> OracleAdapter:
     return MultiSweBenchAdapter()
 
 
-def run_controls(instance: dict[str, Any]) -> dict[str, bool]:
+def run_controls(instance: dict[str, Any]) -> dict[str, Any]:
     return get_adapter(instance).run_controls(instance)
 
 

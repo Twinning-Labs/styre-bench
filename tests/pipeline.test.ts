@@ -245,7 +245,8 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("dropped-flaky");
-    expect(rec.resolved).toBe(false);
+    expect(rec.score_attempted).toBeUndefined();
+    expect(rec.resolved).toBeNull();
     expect(calls.runControls).toBe(1);
     expect(calls.seed).toBe(0);
     expect(calls.run).toBe(0);
@@ -699,26 +700,66 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
     expect(rec.blind_quality).toBe("addresses-issue"); // blindQuality still ran normally
   });
 
-  test("score() itself throws -> taxonomy:infra (retryable), NOT a discarded verdict", async () => {
+  test("score exhaustion preserves the candidate and exposes unknown origin", async () => {
+    const diffs: string[] = [];
     const { deps, calls } = trackedDeps({
-      score: async () => {
-        throw new Error("scorer/score.py: docker daemon unreachable");
+      score: async (_inst, diff) => {
+        diffs.push(diff);
+        throw new Error("scorer: no report after timeout");
       },
     });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
       deps,
       maxInfraRetries: 1,
     });
-
-    expect(rec.taxonomy).toBe("infra");
-    expect(rec.resolved).toBe(false);
-    // score() crashing is retried against the SAME infra-retry budget as seed/run/collect.
-    expect(calls.score).toBe(2); // 1 initial + 1 retry
-    expect(rec.infra_retries).toBe(1);
-    // score having crashed on every attempt means no judgment stage ever ran.
+    expect(rec.taxonomy).toBe("oracle-unmeasured");
+    expect(rec.resolved).toBeNull();
+    expect(rec.oracle_error?.origin).toBe("unknown");
+    expect(calls.score).toBe(2);
+    expect(diffs[0]).toBe(diffs[1]);
+    expect(calls.seed).toBe(1);
+    expect(calls.run).toBe(1);
+    expect(calls.collect).toBe(1);
+    expect(rec.infra_retries).toBe(0);
+    expect(rec.scorer_retries).toBe(1);
+    expect(rec.score_attempted).toBe(true);
     expect(calls.detectLeak).toBe(0);
-    expect(calls.blindQuality).toBe(0);
-    expect(calls.abReview).toBe(0);
+  });
+
+  test("scorer recovery does not author a second candidate or double-charge spend", async () => {
+    let callsToScore = 0;
+    const { deps, calls } = trackedDeps({
+      score: async () => {
+        if (callsToScore++ === 0) throw new Error("transient scorer failure");
+        return SCORE_RESOLVED;
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.resolved).toBe(true);
+    expect(calls.run).toBe(1);
+    expect(calls.seed).toBe(1);
+    expect(rec.scorer_retries).toBe(1);
+    expect(rec.score_attempted).toBe(true);
+    expect(rec.infra_retries).toBe(0);
+    expect(rec.cost_usd_measured).toBe(1.5);
+  });
+
+  test("a structured no-result is terminal and keeps PR/spend telemetry", async () => {
+    const { deps, calls } = trackedDeps({
+      score: async () => ({
+        resolved: null,
+        fail_to_pass: {},
+        pass_to_pass: {},
+        measurement_error: { origin: "unknown", detail: "No tests captured" },
+      }),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.taxonomy).toBe("oracle-unmeasured");
+    expect(rec.resolved).toBeNull();
+    expect(rec.pr_opened).toBe(true);
+    expect(rec.cost_usd_measured).toBe(1.5);
+    expect(calls.score).toBe(1);
+    expect(calls.run).toBe(1);
   });
 
   test("crux regression: a runInstance that rejects at the pool layer -> pool record is taxonomy:infra && resolved:false", async () => {
@@ -1177,12 +1218,15 @@ describe("ENG-413: drop reasons are distinct and recorded", () => {
     );
   });
 
-  test("gold_resolved:false wins even when determinism ALSO failed", () => {
-    // sphinx-doc__sphinx-7590 was reported flaky when its determinism control had PASSED. An
-    // instance whose gold fix does not resolve cannot be meaningfully judged on the other
-    // controls, so that reason is reported first rather than masked by a second failure.
+  test("instability wins while preserving the failed positive control", () => {
     expect(dropTaxonomyFor({ gold_resolved: false, base_fails: false, deterministic: false })).toBe(
-      "dropped-gold-unresolved",
+      "dropped-flaky",
+    );
+    expect(dropTaxonomyFor({ gold_resolved: true, base_fails: null, deterministic: true })).toBe(
+      "dropped-base-unmeasured",
+    );
+    expect(dropTaxonomyFor({ gold_resolved: null, base_fails: true, deterministic: null })).toBe(
+      "dropped-controls-unmeasured",
     );
   });
 
