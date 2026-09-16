@@ -41,6 +41,7 @@ const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
   // single `dropped-flaky` was. Splitting the label must not change what counts.
   "dropped-gold-unresolved",
   "dropped-base-passes",
+  "dropped-base-unstable",
   "dropped-base-unmeasured",
   "dropped-controls-unmeasured",
   "oracle-unmeasured",
@@ -213,6 +214,24 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   lines.push(`# ${meta.title ?? "Styre-Bench Report"}`);
   lines.push("");
   lines.push(`styre: ${meta.styreRef} · dataset: ${meta.dataset} · seed: ${meta.seed}`);
+  const profiles = [
+    ...new Set(
+      records
+        .flatMap((r) => [
+          r.oracle_profile,
+          r.controls?.oracle_profile,
+          ...(r.controls?.gold_runs ?? []).map((g) => g.oracle_profile),
+        ])
+        .flatMap((p) =>
+          p ? [`${p.id} (positive timeout floor ${p.minimum_timeout_ms / 1000}s)`] : [],
+        ),
+    ),
+  ];
+  if (profiles.length > 0) {
+    lines.push(
+      `oracle profile: ${profiles.join(", ")} — serial dedicated host; compare only like-profile runs`,
+    );
+  }
   const budgetStr =
     meta.spentUsd !== undefined
       ? `$${fmt2(meta.spentUsd)} / $${fmt2(meta.budgetUsd)}`
@@ -459,6 +478,7 @@ const TAXONOMY_ORDER = [
   "infra",
   "dropped-gold-unresolved",
   "dropped-base-passes",
+  "dropped-base-unstable",
   "dropped-base-unmeasured",
   "dropped-controls-unmeasured",
   "oracle-unmeasured",
@@ -498,11 +518,13 @@ function renderValidityPanel(records: TaskRecord[]): string {
   // ENG-413: report WHY instances were dropped, not one number that calls them all flaky.
   const goldUnresolved = records.filter((r) => r.taxonomy === "dropped-gold-unresolved").length;
   const basePasses = records.filter((r) => r.taxonomy === "dropped-base-passes").length;
+  const baseUnstable = records.filter((r) => r.taxonomy === "dropped-base-unstable").length;
   const flakyDropped = records.filter((r) => r.taxonomy === "dropped-flaky").length;
   const unmeasuredControls = records.filter(
     (r) => r.taxonomy === "dropped-base-unmeasured" || r.taxonomy === "dropped-controls-unmeasured",
   ).length;
-  const totalDropped = goldUnresolved + basePasses + flakyDropped + unmeasuredControls;
+  const totalDropped =
+    goldUnresolved + basePasses + baseUnstable + flakyDropped + unmeasuredControls;
 
   const scanNotRun = records.filter((r) => r.leak_reasons.includes("transcript-unavailable"));
 
@@ -529,7 +551,7 @@ function renderValidityPanel(records: TaskRecord[]): string {
   } else {
     lines.push(
       `- instances dropped by oracle controls before scoring: ${totalDropped} ` +
-        `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · flaky: ${flakyDropped} · controls not measured: ${unmeasuredControls})`,
+        `(gold fix does not resolve: ${goldUnresolved} · FAIL_TO_PASS already passes on base: ${basePasses} · base preservation failed: ${baseUnstable} · flaky: ${flakyDropped} · controls not measured: ${unmeasuredControls})`,
     );
   }
   if (prDisagree.length > 0) {

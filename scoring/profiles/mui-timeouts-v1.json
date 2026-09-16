@@ -1,0 +1,14 @@
+{
+  "id": "mui-timeouts-v1",
+  "minimum_timeout_ms": 30000,
+  "harness_version": "1.1.2",
+  "instances": {
+    "mui__material-ui-33777": {"base": "812876d87be3ceeed0122b60e7003518b8ac6ea2", "mocha": "10.0.0"},
+    "mui__material-ui-39108": {"base": "375358b6f7d00342ad2a282c34950ebfb4b2cdc8", "mocha": "10.2.0"},
+    "mui__material-ui-39353": {"base": "f69997e32614d07f26782dddd0fb6f96c67c3c4d", "mocha": "10.2.0"}
+  },
+  "scripts": {
+    "test-run.sh": "d7bff80b5ae9f3ef1e7cb6acc2bfc0e4c23fb6b5001f3afff33380b0fe44a369",
+    "fix-run.sh": "9d5b2f316d1772cb493bb2f4eaabbe00f8ce9a5b927ddec4e5695f85fae9fced"
+  }
+}

@@ -221,3 +221,53 @@ us the outlier, contaminated instances in prose no sentinel could ever match, an
 - **Not the qualification matrix.** Lifecycle fixtures — reboot, surviving child, PID reuse,
   cgroup delegation — cannot run here: you cannot reboot an ephemeral runner and observe boot
   identity. Those need a persistent host and are out of scope for this workflow.
+
+## MUI oracle timeout profile (`mui-timeouts-v1`)
+
+The three pilot MUI revisions use a distinct, versioned execution profile. Their
+native 2-second default produced unrelated required-test timeouts. A serial
+5-second experiment passed both gold runs on 33777, but the fresh base still hit
+`envinfo`'s explicit 10-second timeout. That test synchronously invokes `npx` and
+its source explicitly budgets package downloads. Raising only Mocha's root
+`--timeout` cannot change an explicit test/hook budget.
+
+`scoring/profiles/mui-timeouts-v1.json` limits the change to 33777, 39108, 39353 at
+exact corpus base SHAs, with pinned MSB 1.1.2 native script fingerprints and
+Mocha 10.0.0/10.2.0. A Mocha `--require` preload raises the **effective positive
+Runnable timeout to at least 30 seconds**. This provides headroom beyond the
+observed 10-second failure; it is an operational choice, not a statistical
+stability guarantee. In these snapshots the audited timeout uses are setters;
+none asserts the getter's value. Native 2/4/10/20-second budgets become 30 seconds,
+zero remains disabled, and budgets above 30 seconds remain unchanged. Native
+setter parsing, active timer resets, assertions, test selection and retries are
+unchanged. The getter is test-visible, so these are modified-oracle results,
+not directly comparable to stock MSB. Reports label the profile explicitly.
+
+The preload runs only in Mocha, never through `NODE_OPTIONS`, which would also
+alter envinfo's npm subprocess. Base, gold and candidate use the same policy;
+the native patch-application script is preserved. Each evaluation records the
+native/executed script and preload hashes, command, corpus base, candidate hash,
+Mocha version, and image identity before/after execution in
+`execution-profile.json` beside its raw report. Changed corpus bases, scripts,
+versions or image tags fail closed. Candidate scores must match the profile,
+image and preload qualified by their controls.
+
+Run this profile with `concurrency: 1` on a **dedicated Docker host**. Both pilot
+and pool entrypoints reject larger concurrency before starting work. Cooperating
+MUI scorer processes share a strict file lock across build and evaluation; a
+busy Docker daemon is rejected. This also prevents a timed-out harness's detached
+container from silently overlapping the next run. It does not kill unrelated
+containers or serialize arbitrary host processes. Inspect/stop a leftover owned
+container before resuming. The native outer evaluation limit remains 1800 seconds;
+lock waiting has a separate 5400-second limit and lock failures do not fall back
+to concurrent execution.
+
+Profile controls require two passing gold runs with matching target results
+and profile identities, explicit base regression failures, **and every corpus
+base preservation test passing**. Missing/skipped base preservation tests do
+not qualify. Their per-test results are retained as `base_pass_to_pass`; a bad
+base preservation control becomes `dropped-base-unstable`, before seeding or
+agent work. Qualification uses fixed repetitions and retains failures; do not
+retry until green or filter troublesome tests. A passing calibration supports
+only the measured revisions and environment; controls still run before every
+future candidate attempt.

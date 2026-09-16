@@ -653,3 +653,61 @@ test("ENG-443: parked submission membership does not depend on its oracle result
   );
   expect(markdown).toContain("Resolve bounds across 2 submitted attempts: 50%–100%");
 });
+
+test("modified oracle profile is visible in human report and preserved in JSON", () => {
+  const profile = {
+    id: "mui-timeouts-v1",
+    minimum_timeout_ms: 30000,
+    image_id: "sha256:image",
+    preload_sha256: "preload",
+    evidence_path: "/evidence/profile",
+  };
+  const record = makeRecord({ instance: "mui__material-ui-33777", oracle_profile: profile });
+  const report = renderReport([record], META);
+  expect(report.markdown).toContain("mui-timeouts-v1 (positive timeout floor 30s)");
+  expect(report.markdown).toContain("compare only like-profile runs");
+  expect(JSON.stringify(report.json)).toContain("preload_sha256");
+});
+
+test.each([null, false])(
+  "base preservation control drop is counted and excluded (%s)",
+  (resolved) => {
+    const report = renderReport(
+      [makeRecord({ instance: "mui", taxonomy: "dropped-base-unstable", resolved })],
+      META,
+    );
+    expect(report.markdown).toContain("instances dropped by oracle controls before scoring: 1");
+    expect(report.markdown).toContain("base preservation failed: 1");
+    expect(report.markdown).toContain("dropped-base-unstable");
+    expect(report.markdown).toContain("n/a (0/0)");
+  },
+);
+
+test("profile remains visible when golds finish but base transport fails", () => {
+  const profile = {
+    id: "mui-timeouts-v1",
+    minimum_timeout_ms: 30000,
+    image_id: "sha256:image",
+    preload_sha256: "preload",
+    evidence_path: "/evidence/gold",
+  };
+  const report = renderReport(
+    [
+      makeRecord({
+        instance: "mui",
+        resolved: null,
+        taxonomy: "dropped-base-unmeasured",
+        controls: {
+          gold_resolved: true,
+          base_fails: null,
+          deterministic: true,
+          gold_runs: [
+            { resolved: true, fail_to_pass: {}, pass_to_pass: {}, oracle_profile: profile },
+          ],
+        },
+      }),
+    ],
+    META,
+  );
+  expect(report.markdown).toContain("mui-timeouts-v1 (positive timeout floor 30s)");
+});

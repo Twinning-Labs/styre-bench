@@ -9,6 +9,7 @@ import type { RenderReportResult, ReportMeta } from "../report/render";
 import type { AbPreference } from "../reviewer/ab-review";
 import { abReview } from "../reviewer/ab-review";
 import { blindQuality } from "../reviewer/blind-quality";
+import muiProfile from "../scoring/profiles/mui-timeouts-v1.json";
 import { buildStyre } from "./build-styre";
 import type { BuildStyreConfig, BuildStyreResult, StyreBinaries } from "./build-styre";
 import { cleanup as tearDown } from "./cleanup";
@@ -778,6 +779,7 @@ export function dropTaxonomyFor(c: RunControlsResult): string {
   if (!c.gold_resolved) return "dropped-gold-unresolved";
   if (c.base_fails === null) return "dropped-base-unmeasured";
   if (!c.base_fails) return "dropped-base-passes";
+  if (c.oracle_profile && c.base_preserved !== true) return "dropped-base-unstable";
   throw new Error("dropTaxonomyFor called for passing controls");
 }
 
@@ -797,7 +799,10 @@ export async function runInstance(
   if (!bypassOracle) {
     const controls = await deps.runControls(inst);
     base.controls = controls;
-    if (!(controls.gold_resolved && controls.base_fails && controls.deterministic)) {
+    if (
+      !(controls.gold_resolved && controls.base_fails && controls.deterministic) ||
+      (controls.oracle_profile && controls.base_preserved !== true)
+    ) {
       // ENG-413: name the control that actually failed, and keep the booleans. The gate itself
       // is unchanged — any false control still drops the instance.
       return { ...base, resolved: null, taxonomy: dropTaxonomyFor(controls), controls };
@@ -928,6 +933,20 @@ export async function runInstance(
       };
     }
   }
+  withCollect.oracle_profile = scoreResult.oracle_profile;
+  const expectedProfile = base.controls?.oracle_profile;
+  if (expectedProfile && !sameOracleProfile(expectedProfile, scoreResult.oracle_profile)) {
+    return {
+      ...withCollect,
+      resolved: null,
+      taxonomy: "oracle-unmeasured",
+      scorer_retries: scorerRetries,
+      oracle_error: {
+        origin: "unknown",
+        detail: "Candidate oracle profile differs from qualified controls",
+      },
+    };
+  }
   if (scoreResult.resolved === null) {
     return {
       ...withCollect,
@@ -1008,12 +1027,42 @@ export interface RunPoolOpts {
  * `runInstance` call is a pure defense-in-depth measure — `runInstance` itself is designed to
  * never reject.
  */
+export function assertMuiSerial(
+  instances: Instance[],
+  concurrency: number,
+  bypassOracle = false,
+): void {
+  if (
+    !bypassOracle &&
+    instances.some((inst) => Object.hasOwn(muiProfile.instances, inst.id)) &&
+    concurrency !== 1
+  ) {
+    throw new Error(
+      `${muiProfile.id} requires concurrency: 1 on a dedicated Docker host; qualify controls before matrix runs`,
+    );
+  }
+}
+
+export function sameOracleProfile(
+  expected: import("./types").OracleProfile,
+  actual: import("./types").OracleProfile | undefined,
+): boolean {
+  return (
+    actual !== undefined &&
+    expected.id === actual.id &&
+    expected.minimum_timeout_ms === actual.minimum_timeout_ms &&
+    expected.image_id === actual.image_id &&
+    expected.preload_sha256 === actual.preload_sha256
+  );
+}
+
 export async function runPool(
   instances: Instance[],
   binaries: StyreBinaries,
   cfg: PipelineConfig,
   opts: RunPoolOpts = {},
 ): Promise<RunPoolResult> {
+  assertMuiSerial(instances, cfg.concurrency, opts.runInstanceOpts?.bypassOracle);
   const runInstanceFn = opts.runInstance ?? runInstance;
   const results: (TaskRecord | undefined)[] = new Array(instances.length).fill(undefined);
   let nextIndex = 0;
@@ -1162,6 +1211,8 @@ export async function runPilot(
   const instances = opts.only
     ? deps.selectSingle(pool, opts.only)
     : (opts.smoke ? deps.selectSmoke : deps.selectPilot)(pool, cfg.seed);
+
+  assertMuiSerial(instances, cfg.concurrency, opts.bypassOracle);
 
   // ENG-410: the oracle is the only thing that turns this run into a NUMBER. Prove its harness
   // can run here before spending a single container build on instances it could never score.

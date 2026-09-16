@@ -39,8 +39,19 @@ export interface Instance {
   repo_name?: string;
   pr_number?: number;
 }
+export interface OracleProfile {
+  id: string;
+  minimum_timeout_ms: number;
+  image_id: string;
+  preload_sha256: string;
+  evidence_path: string;
+}
+
 /** Evidence from the oracle; null means a required control was not measured. */
 export interface OracleControls {
+  oracle_profile?: OracleProfile;
+  base_preserved?: boolean;
+  base_pass_to_pass?: Record<string, boolean>;
   gold_resolved: boolean | null;
   base_fails: boolean | null;
   deterministic: boolean | null;
@@ -52,6 +63,7 @@ export interface OracleControls {
 }
 
 export interface OracleScore {
+  oracle_profile?: OracleProfile;
   harness_report_path?: string;
   resolved: boolean | null;
   fail_to_pass: Record<string, boolean>;
@@ -60,6 +72,7 @@ export interface OracleScore {
 }
 
 export interface TaskRecord {
+  oracle_profile?: OracleProfile;
   instance: string;
   language: "ts" | "python";
   difficulty: Difficulty;

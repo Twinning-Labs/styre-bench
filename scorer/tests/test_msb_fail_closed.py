@@ -219,7 +219,7 @@ def test_native_base_uses_fresh_log_and_harness_command(monkeypatch, tmp_path):
     from subprocess import CompletedProcess
     from adapters import multiswebench as m
 
-    raw = {**RAW_OK, "org": "mui", "repo": "material-ui", "number": 33777}
+    raw = {**RAW_OK, "org": "example", "repo": "repo", "number": 1}
     # Corpus says pass; only the independently emitted fix stage says fail.
     raw["test_patch_result"] = {"passed_tests": F2P}
     calls = []
@@ -239,7 +239,7 @@ def test_native_base_uses_fresh_log_and_harness_command(monkeypatch, tmp_path):
         return CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("subprocess.run", run)
-    out = m.MultiSweBenchAdapter()._run_harness({"id": "mui__material-ui-33777"}, "", base=True)
+    out = m.MultiSweBenchAdapter()._run_harness({"id": "example__repo-1"}, "", base=True)
     assert out["base_fails"] is True
     assert out["base_provenance"] == "independent"
     assert raw["test_patch_result"]["passed_tests"] == F2P

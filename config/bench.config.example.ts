@@ -13,7 +13,8 @@ export const BenchConfig = z.object({
   seed: z.number().default(42),
   perTaskCostCapUsd: z.number().default(15),
   runBudgetUsd: z.number().default(150),
-  concurrency: z.number().default(3),
+  // MUI timeout profiles require a serial pool on a dedicated Docker host.
+  concurrency: z.number().default(1),
   // ENG-393: run evidence (sot.db, transcript.jsonl, profile.json, run.ndjson) lands here,
   // repo-relative, NOT in os.tmpdir() where the OS reclaims it mid-investigation.
   evidenceRoot: z.string().default("runs"),
