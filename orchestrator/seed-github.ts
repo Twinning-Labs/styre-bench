@@ -4,6 +4,8 @@ import path from "node:path";
 import { $ } from "bun";
 import { Octokit } from "octokit";
 import { assertNoHeldOutPaths } from "./firewall";
+import { createOwnedRepo, deleteOwnedRepo } from "./seed-repo";
+import type { OwnedRepo, SeedEvent } from "./seed-repo";
 import type { Instance } from "./types";
 
 export interface SeedGithubConfig {
@@ -19,6 +21,7 @@ export interface SnapshotFile {
 export interface SeedGithubResult {
   repoUrl: string;
   defaultBranch: string;
+  ownedRepo?: OwnedRepo;
 }
 
 /**
@@ -38,7 +41,11 @@ export interface SeedGithubDeps {
     repo: string,
     baseCommit: string,
   ) => Promise<{ files: SnapshotFile[]; repoDir: string }>;
-  createRepo: (org: string, name: string) => Promise<SeedGithubResult>;
+  createRepo: (
+    org: string,
+    name: string,
+    emit?: (event: SeedEvent) => Promise<void>,
+  ) => Promise<SeedGithubResult>;
   /** Publish the REAL `baseCommit` (its ancestry included, nothing after it) as `branch` on
    *  `repoUrl`. styre's fix branch — rooted at the same content-addressed `baseCommit` in the
    *  container clone — then shares it as the PR merge-base, so the PR opens and `git diff
@@ -56,7 +63,7 @@ export interface SeedGithubDeps {
    *  after createRepo). cleanup() only runs for attempts that produced a complete RunSeed, so
    *  a mid-seed failure here is seedGithub's own responsibility to clean up — otherwise every
    *  failed push leaks an orphan throwaway repo (observed: 14 accumulated in the first smoke). */
-  deleteRepo: (org: string, name: string) => Promise<void>;
+  deleteRepo: (org: string, name: string, ownedRepo?: OwnedRepo) => Promise<void>;
 }
 
 /** Guards every default dep that pushes/writes to the throwaway org — a scoped
@@ -100,47 +107,13 @@ export const defaultDeps: SeedGithubDeps = {
     }
   },
 
-  async createRepo(org, name) {
-    const token = process.env.BENCH_GH_TOKEN;
-    if (!token) {
-      throw new Error(
-        "seedGithub: BENCH_GH_TOKEN is not set — a GitHub PAT scoped ONLY to " +
-          "benchGithubOrg is required to create/push throwaway repos (blast-radius, see " +
-          "task-5 brief). Refusing to fall back to any other credential.",
-      );
-    }
-    const octokit = new Octokit({ auth: token });
-    const res = await octokit.rest.repos.createInOrg({
+  async createRepo(org, name, emit) {
+    return createOwnedRepo(
+      new Octokit({ auth: requireBenchToken("create a throwaway repo") }),
       org,
       name,
-      private: true,
-      auto_init: false,
-      description: "styre-bench throwaway seed repo — safe to delete",
-    });
-    const repoUrl = res.data.clone_url ?? res.data.html_url;
-    if (!repoUrl) {
-      throw new Error(`seedGithub: createInOrg for ${org}/${name} returned no clone/html URL`);
-    }
-    // Disable GitHub Actions on the throwaway repo. The seed snapshot carries the upstream
-    // repo's `.github/workflows/*` verbatim (BENCH_GH_TOKEN has the Workflows permission, so
-    // the push is allowed), but we do NOT want those workflows to actually RUN: the benchmark
-    // scores via the oracle harness, not the repo's own CI, and a throwaway repo firing
-    // push/PR/release workflows would burn Actions minutes and could trigger deploy side
-    // effects. Best-effort: a disable hiccup must not fail the whole seed (log and continue).
-    try {
-      await octokit.rest.actions.setGithubActionsPermissionsRepository({
-        owner: org,
-        repo: name,
-        enabled: false,
-      });
-    } catch (err) {
-      console.error(
-        `[seed] WARNING: could not disable Actions on ${org}/${name} — its workflows may run: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-    return { repoUrl, defaultBranch: res.data.default_branch ?? "main" };
+      emit,
+    );
   },
 
   async pushBaseRef(repoDir, baseCommit, repoUrl, branch, opts) {
@@ -167,14 +140,11 @@ export const defaultDeps: SeedGithubDeps = {
       .quiet();
   },
 
-  async deleteRepo(org, name) {
-    const token = process.env.BENCH_GH_TOKEN;
-    if (!token) return; // best-effort: no token -> nothing we can (or should) do
-    try {
-      await new Octokit({ auth: token }).rest.repos.delete({ owner: org, repo: name });
-    } catch {
-      // best-effort teardown of a half-seeded repo — never mask the original push error
+  async deleteRepo(org, name, ownedRepo) {
+    if (!ownedRepo || ownedRepo.org !== org || ownedRepo.name !== name) {
+      throw new Error(`seedGithub: refusing rollback without ownership for ${org}/${name}`);
     }
+    await deleteOwnedRepo(new Octokit({ auth: requireBenchToken("roll back a seed") }), ownedRepo);
   },
 };
 
@@ -182,6 +152,7 @@ export interface SeedGithubOpts {
   /** Override any subset of the side-effecting steps (tests only — production always uses
    *  the real git/Octokit implementations). */
   deps?: Partial<SeedGithubDeps>;
+  emit?: (event: SeedEvent) => Promise<void>;
 }
 
 /**
@@ -236,6 +207,13 @@ export async function seedGithub(
   opts: SeedGithubOpts = {},
 ): Promise<SeedGithubResult> {
   const deps: SeedGithubDeps = { ...defaultDeps, ...opts.deps };
+  const emit = async (event: SeedEvent): Promise<void> => {
+    try {
+      await opts.emit?.(event);
+    } catch {
+      console.error("[seed] could not record GitHub seed event");
+    }
+  };
 
   const { files, repoDir } = await deps.fetchSnapshot(inst.repo, inst.base_commit);
   try {
@@ -246,18 +224,27 @@ export async function seedGithub(
     const stripClaude = files.some((f) => f.path === ".claude" || f.path.startsWith(".claude/"));
 
     const name = repoNameFor(inst);
-    const { repoUrl, defaultBranch } = await deps.createRepo(cfg.benchGithubOrg, name);
+    const result = await deps.createRepo(cfg.benchGithubOrg, name, emit);
+    const { repoUrl, defaultBranch } = result;
     try {
       await deps.pushBaseRef(repoDir, inst.base_commit, repoUrl, defaultBranch, { stripClaude });
     } catch (err) {
       // The repo exists but the push failed — tear it down so a push failure never leaves an
       // orphan throwaway repo behind (see deleteRepo's rationale). Then re-throw the ORIGINAL
       // push error unchanged so the pipeline still classifies the attempt as an infra failure.
-      await deps.deleteRepo(cfg.benchGithubOrg, name);
+      try {
+        await deps.deleteRepo(cfg.benchGithubOrg, name, result.ownedRepo);
+        await emit({ phase: "rolled-back", org: cfg.benchGithubOrg, name });
+      } catch {
+        console.error(
+          `[seed] rollback failed for ${cfg.benchGithubOrg}/${name}; inspect seed-events.ndjson`,
+        );
+        await emit({ phase: "rollback-failed", org: cfg.benchGithubOrg, name });
+      }
       throw err;
     }
 
-    return { repoUrl, defaultBranch };
+    return result;
   } finally {
     // seedGithub owns the clone's lifetime once fetchSnapshot hands it back successfully.
     await rm(repoDir, { recursive: true, force: true });
