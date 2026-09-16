@@ -679,13 +679,16 @@ class MultiSweBenchAdapter(OracleAdapter):
         # repeated control. Evidence paths differ by design and are not identity.
         if measured and any(r.get("oracle_profile") for r in (gold_a, gold_b, base)):
             keys = ("id", "minimum_timeout_ms", "image_id", "preload_sha256")
+            # A missing base measurement is not observed gold instability. Keep
+            # the gold comparison and let base_fails=None report that failure.
+            compared = (gold_a, gold_b) if base.get("base_fails") is None else (gold_a, gold_b, base)
             profiles = [
                 tuple(r.get("oracle_profile", {}).get(k) for k in keys)
-                for r in (gold_a, gold_b, base)
+                for r in compared
             ]
             deterministic = (
                 deterministic and all(v is not None for v in profiles[0])
-                and profiles[0] == profiles[1] == profiles[2]
+                and all(profile == profiles[0] for profile in profiles[1:])
             )
         return {
             "gold_resolved": all(g["resolved"] is True for g in (gold_a, gold_b)) if measured else None,

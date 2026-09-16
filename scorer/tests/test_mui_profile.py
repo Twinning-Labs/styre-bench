@@ -155,3 +155,16 @@ def test_repeated_gold_statuses_under_different_images_are_not_deterministic(mon
     out = m.MultiSweBenchAdapter().run_controls({"id": "mui__material-ui-33777"})
     assert out["deterministic"] is False
     assert out["gold_resolved"] is True
+
+
+def test_missing_base_measurement_is_not_labeled_gold_instability(monkeypatch):
+    profile = {"id": "mui-timeouts-v1", "minimum_timeout_ms": 30000, "image_id": "sha256:a", "preload_sha256": "preload"}
+    monkeypatch.setattr(m, "_raw_instance", lambda *_: {"fix_patch": "gold"})
+    monkeypatch.setattr(m.MultiSweBenchAdapter, "score", lambda *_: {"resolved": True, "fail_to_pass": {"target": True}, "pass_to_pass": {"preserve": True}, "oracle_profile": profile})
+    def error(*a, **k):
+        raise RuntimeError("base transport failed")
+    monkeypatch.setattr(m.MultiSweBenchAdapter, "_run_harness", error)
+    out = m.MultiSweBenchAdapter().run_controls({"id": "mui__material-ui-33777"})
+    assert out["base_fails"] is None
+    assert out["deterministic"] is True
+    assert "base transport failed" in out["base_error"]
