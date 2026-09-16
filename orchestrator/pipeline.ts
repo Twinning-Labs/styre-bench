@@ -906,6 +906,7 @@ export async function runInstance(
     };
   }
 
+  withCollect.score_attempted = true;
   for (;;) {
     try {
       scoreResult = await deps.score(inst, stage.diff);

@@ -627,3 +627,29 @@ describe("ENG-443: missing scores remain visible in attempted-candidate bounds",
     expect(markdown).toContain("Resolve bounds across 1 submitted attempts: 0%–100%");
   });
 });
+
+test("ENG-443: parked submission membership does not depend on its oracle result", () => {
+  const { markdown } = renderReport(
+    [
+      makeRecord({
+        instance: "parked-scored",
+        taxonomy: "parked",
+        resolved: true,
+        score_attempted: true,
+      }),
+      makeRecord({
+        instance: "parked-unknown",
+        taxonomy: "oracle-unmeasured",
+        resolved: null,
+        score_attempted: true,
+      }),
+      makeRecord({
+        instance: "not-submitted",
+        taxonomy: "dropped-base-unmeasured",
+        resolved: null,
+      }),
+    ],
+    META,
+  );
+  expect(markdown).toContain("Resolve bounds across 2 submitted attempts: 50%–100%");
+});

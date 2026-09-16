@@ -245,6 +245,7 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("dropped-flaky");
+    expect(rec.score_attempted).toBeUndefined();
     expect(rec.resolved).toBeNull();
     expect(calls.runControls).toBe(1);
     expect(calls.seed).toBe(0);
@@ -721,6 +722,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
     expect(calls.collect).toBe(1);
     expect(rec.infra_retries).toBe(0);
     expect(rec.scorer_retries).toBe(1);
+    expect(rec.score_attempted).toBe(true);
     expect(calls.detectLeak).toBe(0);
   });
 
@@ -737,6 +739,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
     expect(calls.run).toBe(1);
     expect(calls.seed).toBe(1);
     expect(rec.scorer_retries).toBe(1);
+    expect(rec.score_attempted).toBe(true);
     expect(rec.infra_retries).toBe(0);
     expect(rec.cost_usd_measured).toBe(1.5);
   });

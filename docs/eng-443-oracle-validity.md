@@ -47,7 +47,9 @@ second authored attempt. Exhaustion also remains an unknown submitted candidate,
 silently excluded infra attempt. CI goes red unless a boolean verdict was actually produced.
 
 The report shows the measured-only rate alongside explicit lower/upper resolve bounds across
-measured plus unknown submissions, separately for each cohort. Failed controls are excluded
+measured plus unknown submissions, separately for each cohort. Explicit `score_attempted`
+provenance keeps submitted parked runs in these bounds regardless of the verdict, while
+the measured headline retains its existing parked exclusion. Failed controls are excluded
 from these bounds because Styre never submitted a candidate for them. Proven unresolved test
 verdicts remain false and count in the ordinary denominator. The schema does **not** claim to
 identify candidate-caused build failures: causal phase instrumentation remains a gap. The

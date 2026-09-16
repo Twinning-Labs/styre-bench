@@ -141,6 +141,8 @@ export interface TaskRecord {
   controls?: OracleControls;
   /** A candidate was produced but has no trustworthy score; never silently infra-excluded. */
   oracle_error?: { origin: "unknown"; detail: string };
+  /** True once a collected candidate is submitted, regardless of its verdict or run taxonomy. */
+  score_attempted?: boolean;
   /** Scorer retries reuse the collected diff and never spend another agent attempt. */
   scorer_retries?: number;
   /** ENG-411: how much of the accepted fix / held-out tests the corpus's OWN issue text

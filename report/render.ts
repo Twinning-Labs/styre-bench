@@ -247,8 +247,15 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   // submitted attempts so exclusion cannot silently inflate the headline.
   for (const cohort of ["web-off", "web-on"] as const) {
     const cohortRecords = records.filter((r) => r.cohort === cohort);
-    const measured = cohortRecords.filter(inResolveDenom);
-    const unknown = cohortRecords.filter((r) => r.taxonomy === "oracle-unmeasured");
+    // Attempt membership cannot depend on the scoring outcome. Parked runs are
+    // excluded from the headline but still submitted: include them in these
+    // bounds whether they return a boolean or an unknown. Taxonomy fallback
+    // recognizes older records written before explicit submission provenance.
+    const submitted = cohortRecords.filter(
+      (r) => r.score_attempted === true || r.taxonomy === "oracle-unmeasured" || inResolveDenom(r),
+    );
+    const measured = submitted.filter((r) => r.resolved !== null);
+    const unknown = submitted.filter((r) => r.resolved === null);
     if (unknown.length === 0) continue;
     const total = measured.length + unknown.length;
     const successes = resolvedCount(measured);
