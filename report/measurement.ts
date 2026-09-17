@@ -100,14 +100,13 @@ export function normalizeReportRecord(r: TaskRecord): TaskRecord {
     normalized.resolved = null;
     notes.push("Legacy resolved default discarded: no candidate oracle measurement provenance.");
   }
-  if (
-    r.taxonomy.startsWith("dropped-") &&
-    r.evidence_dir === null &&
-    r.outcome === "" &&
-    r.pr_self_reported === false
-  ) {
+  const beforeRun =
+    (r.taxonomy.startsWith("dropped-") && r.evidence_dir === null) ||
+    (r.taxonomy === "probe" &&
+      r.status === "styre setup failed — no usable profile produced (setup/enrichment gap)");
+  if (beforeRun && r.outcome === "" && r.pr_self_reported === false) {
     normalized.pr_self_reported = null;
-    notes.push("Pre-run control drop: no Styre self-report exists to compare with PR state.");
+    notes.push("Run did not start: no Styre self-report exists to compare with PR state.");
   }
   if (notes.length) normalized.reporting_notes = notes;
   return normalized;

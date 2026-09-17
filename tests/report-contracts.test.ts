@@ -123,6 +123,17 @@ describe("report evidence populations", () => {
     expect(result.markdown).toContain("agree on 1 comparable instance(s); 1 not compared");
     expect(result.metrics.webOff.prOpened.denominator).toBe(2);
   });
+  test("legacy setup failure has no claim, while a mislabeled probe with a real summary keeps its claim", () => {
+    const setup = record({
+      taxonomy: "probe",
+      outcome: "",
+      status: "styre setup failed — no usable profile produced (setup/enrichment gap)",
+    });
+    expect(normalizeReportRecord(setup).pr_self_reported).toBeNull();
+    expect(
+      normalizeReportRecord(record({ taxonomy: "probe", outcome: "paused" })).pr_self_reported,
+    ).toBe(false);
+  });
   test("unknown PR state leaves both sides of the opened-unresolved comparison", () => {
     expect(
       measurePopulation([record({ resolved: false, score_attempted: true, pr_opened: null })])
