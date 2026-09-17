@@ -20,6 +20,7 @@ import { assertOracleRunnable } from "../orchestrator/pipeline";
 import { SETUP_FAILED_EXIT } from "../orchestrator/run-task";
 import type { RunSeed, RunStyreResult } from "../orchestrator/run-task";
 import type { Instance, TaskRecord } from "../orchestrator/types";
+import { measurePopulation } from "../report/measurement";
 
 // The styre binaries map every runInstance/runPool/buildStyre stub uses. makeInstance()
 // fixtures leave `platform` unset, so the pipeline resolves them at the default "linux/amd64"
@@ -157,7 +158,18 @@ function probeStage(): CollectStageResult {
 
 const SCORE_RESOLVED: ScoreResult = { resolved: true, fail_to_pass: {}, pass_to_pass: {} };
 const SCORE_UNRESOLVED: ScoreResult = { resolved: false, fail_to_pass: {}, pass_to_pass: {} };
-const LEAK_CLEAN: LeakResult = { suspected: false, reasons: [] };
+const LEAK_CLEAN: LeakResult = {
+  suspected: false,
+  reasons: [],
+  exposure: "unknown" as const,
+  network_indicators: [],
+  transcript_scan: {
+    status: "complete" as const,
+    assistant_messages: 1,
+    unparsed_lines: 0,
+    unknown_entries: 0,
+  },
+};
 
 interface Calls {
   runControls: number;
@@ -245,7 +257,8 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("dropped-flaky");
-    expect(rec.score_attempted).toBeUndefined();
+    expect(rec.pr_self_reported).toBeNull();
+    expect(rec.score_attempted).toBe(false);
     expect(rec.resolved).toBeNull();
     expect(calls.runControls).toBe(1);
     expect(calls.seed).toBe(0);
@@ -389,6 +402,7 @@ describe("defaultCollectStage: styre-setup-failure -> probe (not infra)", () => 
     expect(record.record.status).toMatch(/setup/i);
     expect(record.record.self_authored_test).toBeNull();
     expect(record.pr_opened).toBe(false);
+    expect(record.pr_self_reported).toBeNull();
     expect(record.diff).toBe("");
   });
 });
@@ -659,8 +673,9 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
 
     expect(rec.resolved).toBe(true);
     expect(rec.taxonomy).toBe("resolved");
-    expect(rec.suspected_leak).toBe(false);
-    expect(rec.leak_reasons).toEqual(["transcript-unavailable"]);
+    expect(rec.suspected_leak).toBeNull();
+    expect(rec.leak_check?.status).toBe("error");
+    expect(rec.leak_reasons).toEqual(["detector-failed"]);
     // the OTHER judgment signals still ran and are untouched by detectLeak's crash.
     expect(rec.blind_quality).toBe("addresses-issue");
     expect(rec.ab_preference).toBe("A(styre)");
@@ -762,7 +777,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
     expect(calls.run).toBe(1);
   });
 
-  test("crux regression: a runInstance that rejects at the pool layer -> pool record is taxonomy:infra && resolved:false", async () => {
+  test("crux regression: a runInstance that rejects at the pool layer -> pool record is taxonomy:infra && resolved:null", async () => {
     const instances = [makeInstance({ id: "rejects-1" })];
     const runInstanceStub = async (): Promise<TaskRecord> => {
       throw new Error("unhandled: some judgment stage crashed and rejected the whole call");
@@ -775,7 +790,7 @@ describe("runInstance: judgment-stage crash NEVER discards the oracle verdict (T
     expect(result.records).toHaveLength(1);
     const [record] = result.records;
     expect(record?.taxonomy).toBe("infra");
-    expect(record?.resolved).toBe(false);
+    expect(record?.resolved).toBeNull();
   });
 });
 
@@ -860,7 +875,11 @@ describe("runPilot: threads runPool's skipped count into ReportMeta (Task-11 cap
       }),
       renderReport: (records, meta) => {
         capturedMeta = meta;
-        return { markdown: "", json: records };
+        return {
+          markdown: "",
+          metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+          json: records,
+        };
       },
       writeReport: async () => {},
     };
@@ -895,7 +914,11 @@ describe("runPilot: SMOKE mode routes selection through selectSmoke, not selectP
         budgetExceeded: false,
         skipped: [],
       }),
-      renderReport: (records) => ({ markdown: "", json: records }),
+      renderReport: (records) => ({
+        markdown: "",
+        metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+        json: records,
+      }),
       writeReport: async () => {},
     };
 
@@ -1028,7 +1051,11 @@ describe("runPilot: ONLY mode routes selection through selectSingle", () => {
       preflightOracle: OK_PREFLIGHT,
       buildStyre: async () => ({ binaries: STYRE_BINS, commit: "abc123", webTools: "off" }),
       runPool: async () => ({ records: [], spentUsd: 0, budgetExceeded: false, skipped: [] }),
-      renderReport: (records) => ({ markdown: "", json: records }),
+      renderReport: (records) => ({
+        markdown: "",
+        metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+        json: records,
+      }),
       writeReport: async () => {},
     };
 
@@ -1052,7 +1079,11 @@ describe("runPilot: ONLY mode routes selection through selectSingle", () => {
         capturedOpts = opts;
         return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
       },
-      renderReport: (records) => ({ markdown: "", json: records }),
+      renderReport: (records) => ({
+        markdown: "",
+        metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+        json: records,
+      }),
       writeReport: async () => {},
     };
 
@@ -1076,7 +1107,11 @@ describe("runPilot: SMOKE=2 threads bypassOracle to the instance path", () => {
         capturedOpts = opts;
         return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
       },
-      renderReport: (records) => ({ markdown: "", json: records }),
+      renderReport: (records) => ({
+        markdown: "",
+        metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+        json: records,
+      }),
       writeReport: async () => {},
     };
 
@@ -1122,7 +1157,11 @@ describe("runPilot: ENG-410 oracle preflight aborts before anything expensive", 
         spy.ran = true;
         return { records: [], spentUsd: 0, budgetExceeded: false, skipped: [] };
       },
-      renderReport: (records) => ({ markdown: "", json: records }),
+      renderReport: (records) => ({
+        markdown: "",
+        metrics: { webOff: measurePopulation(records), webOn: measurePopulation([]) },
+        json: records,
+      }),
       writeReport: async () => {},
     };
   }
@@ -1325,5 +1364,33 @@ describe("MUI execution profile", () => {
       ),
     ).rejects.toThrow("concurrency: 1");
     expect(starts).toBe(0);
+  });
+});
+
+describe("measurement boundary failures", () => {
+  test("malformed oracle verdict fails scoring loudly, without inventing an unresolved verdict", async () => {
+    const { deps, calls } = trackedDeps({
+      score: async () => ({ resolved: "false" }) as unknown as ScoreResult,
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), {
+      deps,
+      maxInfraRetries: 0,
+    });
+    expect(rec.resolved).toBeNull();
+    expect(rec.score_attempted).toBe(true);
+    expect(rec.taxonomy).toBe("oracle-unmeasured");
+    expect(rec.oracle_error?.detail).toContain("boolean-or-null");
+    expect(calls.run).toBe(1);
+    expect(calls.detectLeak).toBe(0);
+  });
+  test("malformed negative detector output cannot become a completed clean scan", async () => {
+    const { deps } = trackedDeps({
+      detectLeak: async () => ({ suspected: false, reasons: [] }) as unknown as LeakResult,
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.resolved).toBe(true);
+    expect(rec.suspected_leak).toBeNull();
+    expect(rec.leak_check?.status).toBe("error");
+    expect(rec.leak_reasons).toEqual(["detector-failed"]);
   });
 });

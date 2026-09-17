@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type PrSummary,
   defaultCollectStage,
@@ -98,6 +100,20 @@ const NO_FILES: RunStyreResult = {
   outDir: "/nonexistent",
 };
 
+function artifactFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "bench-collect-"));
+  const result = {
+    ...NO_FILES,
+    ndjsonPath: join(dir, "run.ndjson"),
+    profilePath: join(dir, "profile.json"),
+    rawCandidateDiffPath: join(dir, "candidate.diff"),
+  };
+  writeFileSync(result.ndjsonPath, "");
+  writeFileSync(result.profilePath, JSON.stringify({ components: [] }));
+  writeFileSync(result.rawCandidateDiffPath, "");
+  return { dir, result };
+}
+
 function inst(overrides: Partial<Instance> = {}): Instance {
   return {
     id: "inst-1",
@@ -120,13 +136,17 @@ describe("no GITHUB_TOKEN -> undetermined, not 'no PR'", () => {
     // `defaultCollectStage`'s lister defaults to null when the token is absent. Reporting
     // `false` here would mean "we checked the forge and styre opened nothing" on a host that
     // never checked anything at all.
-    const stage = await defaultCollectStage(inst(), SEED, NO_FILES, null);
+    const fixture = artifactFixture();
+    const stage = await defaultCollectStage(inst(), SEED, fixture.result, null);
+    rmSync(fixture.dir, { recursive: true, force: true });
     expect(stage.pr_opened).toBeNull();
     expect(stage.pr_lookup_error).toMatch(/GITHUB_TOKEN/);
   });
 
   test("a working lister on the same inputs still yields a real verdict", async () => {
-    const stage = await defaultCollectStage(inst(), SEED, NO_FILES, async () => []);
+    const fixture = artifactFixture();
+    const stage = await defaultCollectStage(inst(), SEED, fixture.result, async () => []);
+    rmSync(fixture.dir, { recursive: true, force: true });
     expect(stage.pr_opened).toBe(false);
     expect(stage.pr_lookup_error).toBeNull();
   });
@@ -156,7 +176,18 @@ describe("collect threw before the lookup -> undetermined, not 'no PR'", () => {
       },
       score: async () => ({ resolved: false }),
       runSelfTest: async () => ({ passed: null }),
-      detectLeak: async () => ({ suspected: false, reasons: [] }),
+      detectLeak: async () => ({
+        suspected: false,
+        reasons: [],
+        exposure: "unknown" as const,
+        network_indicators: [],
+        transcript_scan: {
+          status: "complete" as const,
+          assistant_messages: 1,
+          unparsed_lines: 0,
+          unknown_entries: 0,
+        },
+      }),
       blindQuality: async () => ({ verdict: "does-not-address", notes: "" }),
       abReview: async () => ({ preference: "B(human)" as const, notes: "" }),
       cleanup: async () => {},
@@ -172,4 +203,28 @@ describe("collect threw before the lookup -> undetermined, not 'no PR'", () => {
     expect(record.pr_opened).toBeNull();
     expect(record.pr_lookup_error).toMatch(/did not reach the PR lookup/);
   });
+});
+
+describe("required artifact evidence", () => {
+  for (const key of [
+    "ndjsonPath",
+    "profilePath",
+    "rawCandidateDiffPath",
+  ] as const satisfies readonly (keyof RunStyreResult)[]) {
+    test(`missing ${key} is an error, not empty evidence`, async () => {
+      const fixture = artifactFixture();
+      try {
+        await expect(
+          defaultCollectStage(
+            inst(),
+            SEED,
+            { ...fixture.result, [key]: "/nonexistent/missing-artifact" },
+            async () => [],
+          ),
+        ).rejects.toThrow();
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true });
+      }
+    });
+  }
 });

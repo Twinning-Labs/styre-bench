@@ -142,7 +142,7 @@ describe("PR ground-truth vs self-report disagreement", () => {
       [rec({ instance: "a", pr_opened: true, pr_self_reported: true })],
       META,
     );
-    expect(markdown).toContain("agree on every instance");
+    expect(markdown).toContain("agree on 1 comparable instance(s)");
     expect(markdown).not.toContain("DISAGREE");
   });
 

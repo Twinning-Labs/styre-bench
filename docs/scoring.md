@@ -1,5 +1,8 @@
 # Scoring a styre run against the oracle
 
+For metric populations, evidence states, and offline correction of archived reports, see
+[Reporting evidence contracts](reporting.md).
+
 ## Why this is split across two machines
 
 **Scoring does not need styre.** `scorer/score.py score` takes

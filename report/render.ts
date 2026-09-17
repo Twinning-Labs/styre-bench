@@ -1,78 +1,44 @@
+import { z } from "zod";
 import type { Difficulty, TaskRecord } from "../orchestrator/types";
+import {
+  hasOracleVerdict,
+  measurePopulation,
+  normalizeReportRecord,
+  wasSubmitted,
+} from "./measurement";
 
 /** Run-level metadata for the report header — NOT derived from `records` (styre commit,
  * dataset, sampling seed, budget, run date are properties of the run, not of any task). */
-export interface ReportMeta {
-  /** e.g. "feat/polyglot-setup @ a2406a4" */
-  styreRef: string;
-  /** e.g. "Multi-SWE-bench v1 + SWE-bench Verified" */
-  dataset: string;
-  seed: number;
-  /** ISO date, e.g. "2026-07-15" */
-  runDate: string;
-  budgetUsd: number;
-  spentUsd?: number;
-  /** Count of instances the `runBudgetUsd` kill-switch (`runPool`'s `skipped`) prevented from
-   *  ever starting — i.e. this run is budget-truncated, not a complete run over the selected
-   *  pilot set. `undefined`/`0` renders nothing (Task-11 capstone Fix 4: a truncated run must
-   *  never render as if it were a smaller-but-complete one). */
-  skippedCount?: number;
-  /** Defaults to "Styre-Bench Report". */
-  title?: string;
-}
+export const ReportMetaSchema = z.object({
+  styreRef: z.string().min(1),
+  dataset: z.string().min(1),
+  seed: z.number().int(),
+  runDate: z.string().min(1),
+  budgetUsd: z.number().finite().nonnegative(),
+  spentUsd: z.number().finite().nonnegative().optional(),
+  skippedCount: z.number().int().nonnegative().optional(),
+  title: z.string().min(1).optional(),
+});
+export type ReportMeta = z.infer<typeof ReportMetaSchema>;
 
 export interface RenderReportResult {
   markdown: string;
   json: TaskRecord[];
+  metrics: {
+    webOff: ReturnType<typeof measurePopulation>;
+    webOn: ReturnType<typeof measurePopulation>;
+  };
 }
 
-/**
- * DENOMINATOR HYGIENE (the load-bearing correctness rule — reviews have hammered this):
- * these taxonomies never received a trustworthy oracle verdict (flaky-dropped before styre
- * ever ran, an unusable `styre setup` profile, a parked/resumable run, an infra/tooling
- * failure, or — SMOKE=2 Option-B — the oracle was deliberately BYPASSED so no verdict was
- * ever produced) — they must NEVER appear in the resolve-rate / self-report-gap /
- * PR-opened-rate denominators. They are reported separately (taxonomy histogram + validity
- * panel), and their cost/blind_quality/ab_preference still populate the sections that aren't
- * gated on a `resolved` verdict (see `renderJudgmentQuality`'s `reviewed`/`abEligible`).
- */
-const EXCLUDED_FROM_RESOLVE_DENOM = new Set([
-  // ENG-413: all three control drops are excluded from the resolve denominator, exactly as the
-  // single `dropped-flaky` was. Splitting the label must not change what counts.
-  "dropped-gold-unresolved",
-  "dropped-base-passes",
-  "dropped-base-unstable",
-  "dropped-base-unmeasured",
-  "dropped-controls-unmeasured",
-  "oracle-unmeasured",
-  "dropped-flaky",
-  "probe",
-  "infra",
-  "parked",
-  "unscored",
-]);
-
-/** ENG-411. Named once so the report and its tests cannot drift on what this row claims. */
-const CLEAN_TICKET_LABEL = "Resolve rate — clean tickets only (no fix in the ticket)";
-
-function inResolveDenom(r: TaskRecord): boolean {
-  return r.resolved !== null && !EXCLUDED_FROM_RESOLVE_DENOM.has(r.taxonomy);
-}
+const OVERLAP_SUBSET_LABEL = "Resolve rate — zero measured ticket/patch overlap";
+const inResolveDenom = hasOracleVerdict;
 
 function resolvedCount(rs: TaskRecord[]): number {
   return rs.filter((r) => r.resolved).length;
 }
 
-/**
- * ENG-411: true iff the corpus's own issue text contained NO line of the accepted fix or the
- * held-out tests — i.e. styre had to derive the fix rather than read it off the ticket.
- *
- * A record whose overlap is `null`/absent was never measured (an unparseable corpus patch, or
- * a pre-ENG-411 fixture). It is excluded from the clean subset entirely — numerator AND
- * denominator. "We did not look" must never render as "we proved it clean"; folding it in
- * would inflate exactly the number this subset exists to keep honest.
- */
-function isCleanTicket(r: TaskRecord): boolean {
+/** Zero lexical matches under the recorded rule; neither presence nor absence proves exposure. */
+function hasZeroMeasuredOverlap(r: TaskRecord): boolean {
   const o = r.ticket_fix_overlap;
   return o != null && o.fix_lines === 0 && o.test_lines === 0;
 }
@@ -89,10 +55,10 @@ export function isSelfReportGap(r: TaskRecord): boolean {
 
 /** true iff `r` has a PR-opened verdict at all. A `null` means the forge lookup could not
  * find out, and such a record must leave BOTH the numerator and the denominator of the
- * PR-opened rate — the same rule `isCleanTicket` applies to an unmeasured overlap. Folding
+ * PR-opened rate — the same rule `hasZeroMeasuredOverlap` applies to an unmeasured overlap. Folding
  * it in is exactly the bug that published a 0% PR-opened rate for a run that opened a PR. */
 function hasPrVerdict(r: TaskRecord): boolean {
-  return r.pr_opened !== null;
+  return typeof r.pr_opened === "boolean";
 }
 
 /**
@@ -127,6 +93,7 @@ function absCell(n: number, d: number): string {
  * NaN/Infinity artifact when the run had no web-on cohort at all. */
 function deltaCell(offN: number, offD: number, onN: number, onD: number): string {
   if (onD === 0) return "n/a (no web-on data)";
+  if (offD === 0) return `${absCell(onN, onD)} (Δ n/a: no measured web-off baseline)`;
   const offPct = pctNum(offN, offD);
   const onPct = pctNum(onN, onD);
   const delta = onPct - offPct;
@@ -139,7 +106,7 @@ function sortedNums(nums: number[]): number[] {
 }
 
 function median(nums: number[]): number {
-  if (nums.length === 0) return 0;
+  if (nums.length === 0) return Number.NaN;
   const s = sortedNums(nums);
   const mid = Math.floor(s.length / 2);
   if (s.length % 2 === 0) {
@@ -149,19 +116,19 @@ function median(nums: number[]): number {
 }
 
 function percentile(nums: number[], p: number): number {
-  if (nums.length === 0) return 0;
+  if (nums.length === 0) return Number.NaN;
   const s = sortedNums(nums);
   const idx = Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1));
   return s[idx] ?? 0;
 }
 
 function mean(nums: number[]): number {
-  if (nums.length === 0) return 0;
+  if (nums.length === 0) return Number.NaN;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
 function fmt1(n: number): string {
-  return n.toFixed(1);
+  return Number.isNaN(n) ? "n/a" : n.toFixed(1);
 }
 
 function fmt2(n: number): string {
@@ -183,13 +150,10 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
   const resolvedOn = resolvedCount(webOn);
   const resolvedPost = resolvedCount(postCutoff);
 
-  // ENG-411: the SAME denominator hygiene, further narrowed to tickets that gave nothing away.
-  // The headline row above stays the full rate, so it remains comparable with published
-  // SWE-bench numbers; this row sits under it and says what the rate is when styre could not
-  // have read the fix off its own ticket.
-  const cleanOff = webOff.filter(isCleanTicket);
-  const cleanOn = webOn.filter(isCleanTicket);
-  const cleanPost = postCutoff.filter(isCleanTicket);
+  // Lexical subset only: zero matches does not establish absence of solution information.
+  const cleanOff = webOff.filter(hasZeroMeasuredOverlap);
+  const cleanOn = webOn.filter(hasZeroMeasuredOverlap);
+  const cleanPost = postCutoff.filter(hasZeroMeasuredOverlap);
   const resolvedCleanOff = resolvedCount(cleanOff);
   const resolvedCleanOn = resolvedCount(cleanOn);
   const resolvedCleanPost = resolvedCount(cleanPost);
@@ -200,9 +164,9 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
 
   // Denominator hygiene, second axis: on top of the taxonomy filter already applied to
   // `webOff`, a record whose PR state was never determined leaves this rate entirely.
-  const prDenomOff = webOff.filter(hasPrVerdict);
-  const prDenomOn = webOn.filter(hasPrVerdict);
-  const prDenomPost = postCutoff.filter(hasPrVerdict);
+  const prDenomOff = webOffAll.filter(hasPrVerdict);
+  const prDenomOn = webOnAll.filter(hasPrVerdict);
+  const prDenomPost = webOffAll.filter((r) => r.post_cutoff === true).filter(hasPrVerdict);
   const prOff = prDenomOff.filter((r) => r.pr_opened === true).length;
   const prOn = prDenomOn.filter((r) => r.pr_opened === true).length;
   const prPost = prDenomPost.filter((r) => r.pr_opened === true).length;
@@ -252,27 +216,41 @@ function renderHeadline(records: TaskRecord[], meta: ReportMeta): string {
     `| Resolve rate (oracle) | ${absCell(resolvedOff, webOff.length)} | ${deltaCell(resolvedOff, webOff.length, resolvedOn, webOn.length)} | ${absCell(resolvedPost, postCutoff.length)} |`,
   );
   lines.push(
-    `| ${CLEAN_TICKET_LABEL} | ${absCell(resolvedCleanOff, cleanOff.length)} | ${deltaCell(resolvedCleanOff, cleanOff.length, resolvedCleanOn, cleanOn.length)} | ${absCell(resolvedCleanPost, cleanPost.length)} |`,
+    `| ${OVERLAP_SUBSET_LABEL} | ${absCell(resolvedCleanOff, cleanOff.length)} | ${deltaCell(resolvedCleanOff, cleanOff.length, resolvedCleanOn, cleanOn.length)} | ${absCell(resolvedCleanPost, cleanPost.length)} |`,
   );
   lines.push(
-    `| Self-report gap (opened-unresolved) | ${absCell(gapOff, webOff.length)} | ${deltaCell(gapOff, webOff.length, gapOn, webOn.length)} | ${absCell(gapPost, postCutoff.length)} |`,
+    `| Self-report gap (opened-unresolved) | ${absCell(gapOff, webOff.filter(hasPrVerdict).length)} | ${deltaCell(gapOff, webOff.filter(hasPrVerdict).length, gapOn, webOn.filter(hasPrVerdict).length)} | ${absCell(gapPost, postCutoff.filter(hasPrVerdict).length)} |`,
   );
   lines.push(
     `| PR-opened rate | ${absCell(prOff, prDenomOff.length)} | ${deltaCell(prOff, prDenomOff.length, prOn, prDenomOn.length)} | ${absCell(prPost, prDenomPost.length)} |`,
   );
   lines.push("");
 
+  lines.push(
+    "Oracle rates use only measured candidate verdicts; PR rates use all known PR states. The opened-unresolved rate uses records with both observations. Zero overlap is a lexical subset, not proof that tickets contain no solution.",
+  );
+  lines.push("");
+  for (const cohort of ["web-off", "web-on"] as const) {
+    const rs = records.filter((r) => r.cohort === cohort);
+    if (!rs.length) continue;
+    const m = measurePopulation(rs);
+    lines.push(
+      `- ${cohort} coverage: ${m.recorded} recorded · ${m.qualified} control-qualified · ${m.submitted} submitted · ${m.oracleResolved.denominator} measured candidate verdicts · ${m.qualificationUnknown} qualification unknown.`,
+    );
+    lines.push(
+      `- ${cohort} confirmed ticket-to-PR delivery / control-qualified runs: ${absCell(m.confirmedDelivery.numerator, m.confirmedDelivery.denominator)}. Requires both an opened PR and an oracle-resolved patch; unmeasured runs are not confirmed successes.`,
+    );
+  }
+  lines.push("");
+
   // Unknown scores can be candidate-caused. Show bounds over the original
   // submitted attempts so exclusion cannot silently inflate the headline.
   for (const cohort of ["web-off", "web-on"] as const) {
     const cohortRecords = records.filter((r) => r.cohort === cohort);
-    // Attempt membership cannot depend on the scoring outcome. Parked runs are
-    // excluded from the headline but still submitted: include them in these
-    // bounds whether they return a boolean or an unknown. Taxonomy fallback
+    // Attempt membership cannot depend on the scoring outcome. Include submitted
+    // parked runs whether they return a boolean or an unknown. Taxonomy fallback
     // recognizes older records written before explicit submission provenance.
-    const submitted = cohortRecords.filter(
-      (r) => r.score_attempted === true || r.taxonomy === "oracle-unmeasured" || inResolveDenom(r),
-    );
+    const submitted = cohortRecords.filter(wasSubmitted);
     const measured = submitted.filter((r) => r.resolved !== null);
     const unknown = submitted.filter((r) => r.resolved === null);
     if (unknown.length === 0) continue;
@@ -327,7 +305,7 @@ function renderGrid(records: TaskRecord[]): string {
   lines.push(`| by-diff | ${byDiff[0]} | ${byDiff[1]} | ${byDiff[2]} | |`);
   lines.push("");
   lines.push(
-    "⚠ marks a cell containing a `probe` finding (an unusable `styre setup` profile) — read as detector-coverage, not loop performance; `probe` instances are excluded from the N/total shown.",
+    "⚠ marks a cell containing a `probe` finding (an explicitly recorded `styre setup` failure) — read as detector-coverage, not loop performance; `probe` instances are excluded from the N/total shown.",
   );
   lines.push("");
 
@@ -401,12 +379,19 @@ function renderLoopEconomics(records: TaskRecord[]): string {
 const AB_EXCLUDED = new Set<TaskRecord["ab_preference"]>(["invalid", null]);
 
 /** Whether a blind-quality verdict predicts the oracle will call the instance resolved.
- * Only `"addresses-issue"` predicts resolved=true; every other verdict (partial,
- * does-not-address, test-gaming-suspected, unparsed, ...) predicts resolved=false. This
+ * Only `"addresses-issue"` predicts resolved=true. Recognized negative/partial labels
+ * predict false; unparsed and unknown labels provide no prediction. This
  * mapping is this renderer's own scoring convention (§8 does not pin one down), documented
  * here so it's auditable rather than implicit. */
-function blindQualityPredictsResolved(verdict: string): boolean {
-  return verdict === "addresses-issue";
+function blindQualityPredictsResolved(verdict: string): boolean | null {
+  if (verdict === "addresses-issue") return true;
+  if (
+    ["partial", "addresses-issue-partial", "does-not-address", "test-gaming-suspected"].includes(
+      verdict,
+    )
+  )
+    return false;
+  return null;
 }
 
 function renderJudgmentQuality(records: TaskRecord[]): string {
@@ -420,7 +405,9 @@ function renderJudgmentQuality(records: TaskRecord[]): string {
   // need an oracle verdict to have run).
   const reviewed = records.filter(
     (r): r is TaskRecord & { blind_quality: string } =>
-      r.blind_quality !== null && r.resolved !== null,
+      r.blind_quality !== null &&
+      hasOracleVerdict(r) &&
+      blindQualityPredictsResolved(r.blind_quality) !== null,
   );
   const agreementMatches = reviewed.filter(
     (r) => blindQualityPredictsResolved(r.blind_quality) === r.resolved,
@@ -430,7 +417,7 @@ function renderJudgmentQuality(records: TaskRecord[]): string {
       `- Review↔oracle agreement: ${fmt2(agreementMatches / reviewed.length)} (blind reviewer predicts ground truth ${pctStr(agreementMatches, reviewed.length)} of the time, n=${reviewed.length})`,
     );
   } else {
-    lines.push("- Review↔oracle agreement: n/a (no blind-quality reviews recorded)");
+    lines.push("- Review↔oracle agreement: n/a (no comparable parsed review and oracle verdict)");
   }
 
   const abEligible = records.filter((r) => !AB_EXCLUDED.has(r.ab_preference));
@@ -505,10 +492,7 @@ function renderTaxonomy(records: TaskRecord[]): string {
 // ---------------------------------------------------------------------------------------
 
 function renderValidityPanel(records: TaskRecord[]): string {
-  const webOnAll = records.filter((r) => r.cohort === "web-on");
   const webOffDenom = records.filter((r) => r.cohort === "web-off").filter(inResolveDenom);
-
-  const leakCount = webOnAll.filter((r) => r.suspected_leak).length;
 
   const preCutoff = webOffDenom.filter((r) => r.post_cutoff === false);
   const postCutoff = webOffDenom.filter((r) => r.post_cutoff === true);
@@ -526,8 +510,6 @@ function renderValidityPanel(records: TaskRecord[]): string {
   const totalDropped =
     goldUnresolved + basePasses + baseUnstable + flakyDropped + unmeasuredControls;
 
-  const scanNotRun = records.filter((r) => r.leak_reasons.includes("transcript-unavailable"));
-
   // Bench-validity, not styre-performance: see `isPrReportDisagreement`. Counted over ALL
   // records, not just the resolve denominator — a reader that is broken on a dropped instance
   // is broken on a scored one too, and we want to hear about it at the first occurrence.
@@ -536,12 +518,42 @@ function renderValidityPanel(records: TaskRecord[]): string {
 
   const lines: string[] = [];
   lines.push("## Validity panel");
-  if (webOnAll.length > 0) {
+  for (const cohort of ["web-off", "web-on"] as const) {
+    const rs = records.filter((r) => r.cohort === cohort);
+    const assessed = rs.filter((r) => r.leak_check?.status === "completed");
+    const flagged = rs.filter((r) => r.suspected_leak === true);
     lines.push(
-      `- web-on suspected-leak: ${leakCount}/${webOnAll.length} (${pctStr(leakCount, webOnAll.length)})`,
+      `- ${cohort} heuristic flags: ${flagged.length} recorded; ${assessed.length}/${rs.length} detector assessments explicitly completed. Flags are uncalibrated observations, not proof of solution retrieval or exposure.`,
     );
-  } else {
-    lines.push("- web-on suspected-leak: n/a (no web-on cohort in this run)");
+    const retrospective = assessed.filter(
+      (r) => r.leak_check?.status === "completed" && r.leak_check.scope === "transcript-only",
+    );
+    if (retrospective.length)
+      lines.push(
+        `- ${cohort}: ${retrospective.length} assessments are retrospective transcript-only scans of retained artifacts. They do not establish original scan completion, complete run capture, or successful network retrieval. Original assessments remain in prior_leak_assessment and the source report.`,
+      );
+    for (const r of flagged)
+      lines.push(
+        `- Heuristic observation: ${r.instance} — ${r.leak_reasons.join(", ") || "legacy flag without recorded reason"}.`,
+      );
+    const counts = new Map<string, number>();
+    for (const r of rs) {
+      const status =
+        r.leak_check?.status === "completed"
+          ? (r.leak_check.transcript_scan?.status ?? "unknown")
+          : (r.leak_check?.status ?? "legacy-unknown");
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    lines.push(
+      `- ${cohort} transcript-scan coverage: ${[...counts].map(([k, v]) => `${k} ${v}`).join(" · ") || "no records"}. No findings does not establish scan completion or absence of leakage.`,
+    );
+    for (const r of rs)
+      for (const note of r.reporting_notes ?? [])
+        lines.push(`- Evidence note: ${r.instance} — ${note}`);
+    for (const r of rs.filter((r) => r.leak_check?.status === "error"))
+      lines.push(
+        `- Detector failure: ${r.instance} — ${r.leak_check?.reason ?? "reason not recorded"}`,
+      );
   }
   lines.push(
     `- pre-cutoff ${preRate} vs post-cutoff ${postRate} resolve (n=${preCutoff.length}/${postCutoff.length})`,
@@ -563,7 +575,12 @@ function renderValidityPanel(records: TaskRecord[]): string {
       `- **⚠ PR ground-truth vs self-report DISAGREE on ${prDisagree.length} instance(s): ${names.join(" · ")}.** One of the two readers is wrong; the PR-opened rate and the self-report gap are both suspect until it is identified.`,
     );
   } else {
-    lines.push("- PR ground-truth vs self-report: agree on every instance");
+    const compared = records.filter(
+      (r) => typeof r.pr_opened === "boolean" && typeof r.pr_self_reported === "boolean",
+    ).length;
+    lines.push(
+      `- PR ground-truth vs self-report: ${compared ? `agree on ${compared} comparable instance(s)` : "n/a (no comparable observations)"}; ${records.length - compared} not compared.`,
+    );
   }
   if (prUnknown.length > 0) {
     lines.push(
@@ -571,13 +588,6 @@ function renderValidityPanel(records: TaskRecord[]): string {
         .map((r) => `${r.instance} — ${r.pr_lookup_error ?? "reason not recorded"}`)
         .join(" · ")}`,
     );
-  }
-  if (scanNotRun.length > 0) {
-    lines.push(
-      `- URL-scan: did NOT run for ${scanNotRun.length} instance(s) (transcript-unavailable) — leak status for these is UNKNOWN, not assumed clean.`,
-    );
-  } else {
-    lines.push("- URL-scan: ran for all instances.");
   }
   lines.push("");
 
@@ -588,12 +598,12 @@ function renderValidityPanel(records: TaskRecord[]): string {
  * Turns the collected `TaskRecord`s into the §8a markdown report + a machine-readable JSON
  * export. Pure aggregation + string templating — no I/O, no external deps.
  *
- * DENOMINATOR HYGIENE (see `EXCLUDED_FROM_RESOLVE_DENOM`): `dropped-flaky` / `probe` /
- * `infra` / `parked` instances never reached a trustworthy oracle verdict and are excluded
- * from every resolve-rate-style denominator; their counts are reported separately in the
- * taxonomy histogram and validity panel instead of silently vanishing.
+ * Each metric uses its own evidence population (report/measurement.ts); taxonomy alone
+ * cannot establish a candidate verdict, PR state or a completed detector scan.
  */
-export function renderReport(records: TaskRecord[], meta: ReportMeta): RenderReportResult {
+export function renderReport(inputRecords: TaskRecord[], meta: ReportMeta): RenderReportResult {
+  ReportMetaSchema.parse(meta);
+  const records = inputRecords.map(normalizeReportRecord);
   const sections = [
     renderHeadline(records, meta),
     renderGrid(records),
@@ -606,5 +616,9 @@ export function renderReport(records: TaskRecord[], meta: ReportMeta): RenderRep
   return {
     markdown: sections.join("\n"),
     json: records,
+    metrics: {
+      webOff: measurePopulation(records.filter((r) => r.cohort === "web-off")),
+      webOn: measurePopulation(records.filter((r) => r.cohort === "web-on")),
+    },
   };
 }

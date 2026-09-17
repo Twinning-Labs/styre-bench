@@ -1,4 +1,5 @@
 import type { TicketFixOverlap } from "./firewall";
+import type { LeakCheck } from "./leak-contract";
 
 export type Cohort = "web-off" | "web-on";
 export type Difficulty = "easy" | "medium" | "hard";
@@ -79,11 +80,7 @@ export interface TaskRecord {
   styre_commit: string;
   cohort: Cohort;
   post_cutoff: boolean | null;
-  /** `null` iff no oracle verdict exists for this record — currently only `taxonomy:
-   *  "unscored"` (SMOKE=2 Option-B oracle-bypass, `orchestrator/pipeline.ts`'s `runInstance`
-   *  bypass branch): the Linux-only oracle never ran, so there is nothing to report `true`/
-   *  `false` from. Every other taxonomy still sets a real `boolean` (including the
-   *  `false` default on `dropped-flaky`/`probe`/`infra`/`parked` — see `blankRecord`). */
+  /** A boolean only after a candidate oracle measurement; null on every unmeasured path. */
   resolved: boolean | null;
   /** GROUND TRUTH (CLAUDE.md move 5): whether a pull request actually exists on the seeded
    *  throwaway repo, read from the forge by `pipeline.ts`'s `lookupPrOpened`.
@@ -134,10 +131,16 @@ export interface TaskRecord {
   blind_quality: string | null;
   ab_preference: "A(styre)" | "B(human)" | "tie" | "invalid" | null;
   ab_notes: string | null;
-  suspected_leak: boolean;
+  /** Compatibility heuristic flag, never proof of solution exposure; null if not assessed. */
+  suspected_leak: boolean | null;
+  leak_check?: LeakCheck;
+  /** Preserved original assessment when an offline transcript scan supersedes its interpretation. */
+  prior_leak_assessment?: { suspected: boolean | null; reasons: string[] };
+  reporting_notes?: string[];
+  test_configuration?: { status: "declared" | "none"; components: string[] };
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "containment-uninformative" | "web-tool-used" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "transcript-unstructured-scan" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran. Issue/PR numbers the HARNESS supplied (via `instance_id` or the problem statement, which for MSB is the upstream PR body) are excused — repeating an identifier you were handed is not evidence of looking one up. NOTE: "containment-uninformative" and "transcript-unstructured-scan" report that a signal could not be assessed; like "transcript-unavailable"/"similarity-unavailable" they never set `suspected` on their own
   /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
-   *  `EXCLUDED_FROM_RESOLVE_DENOM` for the canonical known values: "resolved" |
+   *  measurement contracts for the canonical known values: "resolved" |
    *  "opened-but-unresolved" | "loop-exhausted" | "probe" | "parked" | "infra" |
    *  "dropped-gold-unresolved" | "dropped-base-passes" | "dropped-flaky" | "unscored"
    *  (SMOKE=2 Option-B oracle-bypass — a successful bypass run with no oracle verdict;
@@ -158,19 +161,21 @@ export interface TaskRecord {
   score_attempted?: boolean;
   /** Scorer retries reuse the collected diff and never spend another agent attempt. */
   scorer_retries?: number;
-  /** ENG-411: how much of the accepted fix / held-out tests the corpus's OWN issue text
-   *  already contained, measured by `firewall.ts`'s `measureTicketOverlap`. A record with
-   *  `fix_lines === 0 && test_lines === 0` is a "clean ticket" and counts toward the report's
-   *  clean-subset resolve rate; the headline rate counts every record, so it stays comparable
-   *  with published SWE-bench numbers.
-   *
-   *  `null` means NOT MEASURED (a record that never got as far as seeding — probe/infra/
-   *  parked), which is NOT the same claim as "measured zero" and must never be folded into
-   *  the clean subset. Optional so pre-ENG-411 fixtures stay valid. */
+  /** Host-side lexical overlap with added patch lines, not a solution exposure judgment.
+   *  The optional method distinguishes historical substring matching from exact-line v2.
+   *  null/absent means unmeasured, never zero. Zero matches defines only a lexical subset. */
   ticket_fix_overlap?: TicketFixOverlap | null;
   /** Task 11: count of whole-instance infra-retries consumed before this record was
    *  finalized (0 if none). Optional/additive — pre-Task-11 code (e.g. report.test.ts's
    *  hand-built fixtures) never sets this and remains valid; `renderReport` does not read
    *  it today. */
   infra_retries?: number;
+}
+
+/** Coverage is recorded by the detector, never inferred from absence of findings. */
+export interface TranscriptScan {
+  status: "complete" | "partial" | "unstructured" | "unavailable";
+  assistant_messages: number;
+  unparsed_lines: number;
+  unknown_entries: number;
 }
