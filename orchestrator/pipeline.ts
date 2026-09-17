@@ -333,9 +333,9 @@ export async function defaultCollectStage(
       addedTestPaths: [],
       transcript,
       // styre setup failed, so `styre run` never started: there was no PR to open and no
-      // claim to make. Both are MEASURED false here, not unknown.
+      // claim to make. No PR is known; there is no self-report to compare.
       pr_opened: false,
-      pr_self_reported: false,
+      pr_self_reported: null,
       pr_lookup_error: null,
     };
   }
@@ -526,10 +526,10 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     resolved: null,
     score_attempted: false,
     // styre never ran for a record that keeps these defaults (a control drop, a seed
-    // failure), so "no PR, and no claim of one" is MEASURED here, not assumed. A record that
+    // failure), so no PR is known but no self-report exists. A record that
     // did reach collect has all three overwritten from the `CollectStageResult`.
     pr_opened: false,
-    pr_self_reported: false,
+    pr_self_reported: null,
     pr_lookup_error: null,
     self_authored_test: null,
     self_test_passed: null,

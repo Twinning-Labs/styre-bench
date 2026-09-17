@@ -6,6 +6,8 @@ const count = z.number().int().nonnegative();
 const RecordSchema = z.object({
   instance: z.string().min(1),
   taxonomy: z.string().min(1),
+  outcome: z.string(),
+  evidence_dir: z.string().nullable(),
   cohort: z.enum(["web-off", "web-on"]),
   language: z.enum(["ts", "python"]),
   difficulty: z.enum(["easy", "medium", "hard"]),
@@ -87,17 +89,28 @@ export function normalizeReportRecord(r: TaskRecord): TaskRecord {
   RecordSchema.parse(r);
   if (r.score_attempted === false && r.resolved !== null)
     throw new Error(`${r.instance}: oracle verdict conflicts with score_attempted=false`);
-  if (r.leak_check?.status === "completed" && !r.leak_check.transcript_scan)
-    throw new Error(`${r.instance}: completed leak check lacks transcript coverage`);
-  if (hasOracleVerdict(r) || r.resolved === null) return { ...r };
-  return {
-    ...r,
-    resolved: null,
-    reporting_notes: [
-      ...(r.reporting_notes ?? []),
-      "Legacy resolved default discarded: no candidate oracle measurement provenance.",
-    ],
-  };
+  if (
+    r.leak_check &&
+    (r.leak_check.status === "completed") !== (typeof r.suspected_leak === "boolean")
+  )
+    throw new Error(`${r.instance}: detector status conflicts with heuristic assessment`);
+  const normalized = { ...r };
+  const notes = [...(r.reporting_notes ?? [])];
+  if (!hasOracleVerdict(r) && r.resolved !== null) {
+    normalized.resolved = null;
+    notes.push("Legacy resolved default discarded: no candidate oracle measurement provenance.");
+  }
+  if (
+    r.taxonomy.startsWith("dropped-") &&
+    r.evidence_dir === null &&
+    r.outcome === "" &&
+    r.pr_self_reported === false
+  ) {
+    normalized.pr_self_reported = null;
+    notes.push("Pre-run control drop: no Styre self-report exists to compare with PR state.");
+  }
+  if (notes.length) normalized.reporting_notes = notes;
+  return normalized;
 }
 
 export type Rate = { numerator: number; denominator: number };

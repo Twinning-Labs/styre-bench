@@ -902,3 +902,13 @@ def test_unknown_json_is_not_supported_transcript_coverage():
 def test_recognized_cli_banner_is_framing_not_a_parser_hole():
     result = detect_leak(None, None, "2.0.1 (Claude Code)\n" + _assistant_blocks([{"type": "text", "text": "Working"}]))
     assert result["transcript_scan"] == {"status": "complete", "assistant_messages": 1, "unparsed_lines": 0, "unknown_entries": 0}
+
+
+def test_supplied_url_cannot_exempt_a_different_prefix_url():
+    for supplied, observed in [
+        ("https://github.com/example/project/pull/123", "https://github.com/example/project/pull/12"),
+        ("https://example.invalid/docs/long-page", "https://example.invalid/docs"),
+    ]:
+        result = detect_leak(None, None, _assistant_blocks([{"type": "text", "text": observed}]), problem_statement=supplied)
+        assert result["suspected"] is True
+        assert any(reason in result["reasons"] for reason in ["pr-url-in-transcript", "url-in-transcript"])

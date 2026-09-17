@@ -108,6 +108,21 @@ describe("report evidence populations", () => {
     rs[0] = record({ resolved: true, score_attempted: true, pr_opened: true, taxonomy: "parked" });
     expect(measurePopulation(rs).oracleResolved).toEqual({ numerator: 1, denominator: 3 });
   });
+  test("no-run defaults do not create a negative Styre self-report", () => {
+    const dropped = record({
+      instance: "not-run",
+      taxonomy: "dropped-flaky",
+      evidence_dir: null,
+      outcome: "",
+      pr_self_reported: false,
+    });
+    const observed = record({ instance: "real-negative", pr_self_reported: false });
+    const result = renderReport([dropped, observed], meta);
+    expect(result.json[0]?.pr_self_reported).toBeNull();
+    expect(result.json[1]?.pr_self_reported).toBe(false);
+    expect(result.markdown).toContain("agree on 1 comparable instance(s); 1 not compared");
+    expect(result.metrics.webOff.prOpened.denominator).toBe(2);
+  });
   test("unknown PR state leaves both sides of the opened-unresolved comparison", () => {
     expect(
       measurePopulation([record({ resolved: false, score_attempted: true, pr_opened: null })])

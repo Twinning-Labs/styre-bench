@@ -101,8 +101,7 @@ DEFAULT_MIN_FIX_CHANGED_LINES = 10
 _HUNK_NOISE_PREFIXES = ("+++", "---", "@@")
 _FILE_HEADER_PREFIXES = ("diff --git", "index ", "new file mode", "deleted file mode", "similarity index", "rename from", "rename to")
 
-# Tools whose USE is direct evidence the agent went to the network. Unlike a URL appearing in
-# text, a tool_use entry cannot be repo content.
+# Typed requests for network tools. A request does not establish execution or retrieval.
 _WEB_TOOLS = frozenset({"WebFetch", "WebSearch"})
 # A shell fetch inside a Bash tool_use input -- the other way an agent reaches the network.
 _NET_CMD_RE = re.compile(r"\b(?:curl|wget)\b[^\n]*https?://", re.IGNORECASE)
@@ -372,9 +371,11 @@ def _scan_transcript(
     """
     text = transcript.replace("\\/", "/")
     supplied = harness_text.replace("\\/", "/") if harness_text else ""
+    supplied_prs = {m.group(0) for m in _PR_URL_RE.finditer(supplied)}
+    supplied_urls = {m.group(0) for m in _URL_RE.finditer(supplied)}
     reasons: list[str] = []
     for match in _PR_URL_RE.finditer(text):
-        if not supplied or match.group(0) not in supplied:
+        if match.group(0) not in supplied_prs:
             reasons.append("pr-url-in-transcript")
             break
     for match in _PR_HASH_RE.finditer(text):
@@ -386,7 +387,7 @@ def _scan_transcript(
     # A neutral reference must not suppress a separate URL indicator. Exact supplied URLs
     # are exempt from both URL scans; their repetition says nothing about retrieval.
     if "pr-url-in-transcript" not in reasons and any(
-        not supplied or m.group(0) not in supplied for m in _URL_RE.finditer(text)
+        m.group(0) not in supplied_urls for m in _URL_RE.finditer(text)
     ):
         reasons.append("url-in-transcript")
     return reasons

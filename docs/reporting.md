@@ -15,7 +15,8 @@ human-readable Markdown and `metrics.json` with explicit numerators and denomina
   a candidate. It measures confirmed end-to-end success, not a substitute oracle rate.
 - **PR-opened rate:** opened PRs / all records whose PR state is known. This includes records
   outside the oracle population. A pre-run drop has known no-run/no-PR state; a failed forge
-  lookup is unknown and excluded.
+  lookup is unknown and excluded. No-run records have no Styre self-report and cannot
+  count as agreement with one.
 - **Opened-unresolved (historically “self-report gap”):** opened, oracle-unresolved candidates /
   records with both a measured oracle verdict and known PR state. PR existence is not itself
   a test-pass claim. The separate PR self-report comparison checks Styre telemetry against

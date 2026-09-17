@@ -257,6 +257,7 @@ describe("runInstance: FAIL-CLOSED DROP CONTRACT (Task-3 crux)", () => {
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
 
     expect(rec.taxonomy).toBe("dropped-flaky");
+    expect(rec.pr_self_reported).toBeNull();
     expect(rec.score_attempted).toBe(false);
     expect(rec.resolved).toBeNull();
     expect(calls.runControls).toBe(1);
@@ -401,6 +402,7 @@ describe("defaultCollectStage: styre-setup-failure -> probe (not infra)", () => 
     expect(record.record.status).toMatch(/setup/i);
     expect(record.record.self_authored_test).toBeNull();
     expect(record.pr_opened).toBe(false);
+    expect(record.pr_self_reported).toBeNull();
     expect(record.diff).toBe("");
   });
 });
