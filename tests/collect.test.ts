@@ -111,25 +111,25 @@ describe("collect: summary parsing", () => {
     expect(rec.parked).toBe(false);
   });
 
-  test("profile whose only component's commands.test is {unavailable} -> taxonomy probe", () => {
+  test("profile whose only component's commands.test is {unavailable} does not imply setup failure", () => {
     const ndjson = summaryLine({ outcome: "pr-ready" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, { language: "ts", pr_opened: true });
-    expect(rec.taxonomy).toBe("probe");
+    expect(rec.taxonomy).toBeUndefined();
   });
 
-  test("profile whose only component has no commands.test key at all -> taxonomy probe", () => {
+  test("profile whose only component has no commands.test key at all does not imply setup failure", () => {
     const ndjson = summaryLine({ outcome: "pr-ready" });
     const rec = collect(ndjson, PR_DIFF, ABSENT_TEST_CMD_PROFILE, {
       language: "ts",
       pr_opened: true,
     });
-    expect(rec.taxonomy).toBe("probe");
+    expect(rec.taxonomy).toBeUndefined();
   });
 
-  test("profile with no components at all -> taxonomy probe", () => {
+  test("profile with no components at all does not imply setup failure", () => {
     const ndjson = summaryLine({ outcome: "pr-ready" });
     const rec = collect(ndjson, PR_DIFF, { components: [] }, { language: "ts", pr_opened: true });
-    expect(rec.taxonomy).toBe("probe");
+    expect(rec.taxonomy).toBeUndefined();
   });
 });
 
@@ -263,18 +263,18 @@ describe("collect: docs/plans/ stripping + per-language self_authored_test", () 
 });
 
 describe("collect: self_test_passed derivation", () => {
-  test("self_authored_test && pr_opened -> self_test_passed true", () => {
+  test("self_authored_test && pr_opened does not measure self_test_passed", () => {
     const ndjson = summaryLine({ outcome: "pr-ready" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: true });
     expect(rec.self_authored_test).toBe(true);
-    expect(rec.self_test_passed).toBe(true);
+    expect(rec.self_test_passed).toBeNull();
   });
 
-  test("self_authored_test but NOT pr_opened -> self_test_passed false", () => {
+  test("self_authored_test but NOT pr_opened does not measure self_test_passed", () => {
     const ndjson = summaryLine({ outcome: "pr-ready" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
     expect(rec.self_authored_test).toBe(true);
-    expect(rec.self_test_passed).toBe(false);
+    expect(rec.self_test_passed).toBeNull();
   });
 
   test("not applicable (no self-authored test) -> self_test_passed null", () => {
@@ -386,13 +386,12 @@ describe("collect: no-summary / malformed-summary -> taxonomy infra", () => {
 
   test("ndjson whose only summary line lacks `outcome` -> taxonomy infra, not a bogus record", () => {
     const malformedSummary = JSON.stringify({ type: "summary", ticks: 5, status: "ok" });
-    const rec = collect(malformedSummary, PR_DIFF, RUNNABLE_PROFILE, {
-      language: "ts",
-      pr_opened: false,
-    });
-    expect(rec.taxonomy).toBe("infra");
-    expect(rec.outcome).toBeUndefined();
-    expect(rec.ticks).toBeUndefined();
+    expect(() =>
+      collect(malformedSummary, PR_DIFF, RUNNABLE_PROFILE, {
+        language: "ts",
+        pr_opened: false,
+      }),
+    ).toThrow();
   });
 
   test("a corrupt (non-JSON) line among otherwise-valid lines is skipped, collection still succeeds", () => {
@@ -406,23 +405,23 @@ describe("collect: no-summary / malformed-summary -> taxonomy infra", () => {
   });
 });
 
-describe("collect: taxonomy ordering — probe before loop-exhausted", () => {
-  test("unrunnable profile + paused/needs_you -> taxonomy probe, not loop-exhausted", () => {
+describe("collect: workflow outcome is independent of test declarations", () => {
+  test("unrunnable profile + paused/needs_you does not imply setup failure, not loop-exhausted", () => {
     const ndjson = summaryLine({ outcome: "paused", reason: "needs_you" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
       language: "ts",
       pr_opened: false,
     });
-    expect(rec.taxonomy).toBe("probe");
+    expect(rec.taxonomy).toBe("loop-exhausted");
   });
 
-  test("unrunnable profile + abandoned -> taxonomy probe, not loop-exhausted", () => {
+  test("unrunnable profile + abandoned does not imply setup failure, not loop-exhausted", () => {
     const ndjson = summaryLine({ outcome: "abandoned" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
       language: "ts",
       pr_opened: false,
     });
-    expect(rec.taxonomy).toBe("probe");
+    expect(rec.taxonomy).toBe("loop-exhausted");
   });
 
   test("a budget pause outranks an unrunnable profile (parked before probe)", () => {
@@ -505,5 +504,36 @@ describe("self_test_passed: an undetermined PR lookup never reads as a failure",
     });
     expect(rec.self_authored_test).toBe(true);
     expect(rec.self_test_passed).toBeNull();
+  });
+});
+
+describe("test declaration and terminal-summary contracts", () => {
+  test("fixture, example and vendored launchers are not primary declarations", () => {
+    const profile = {
+      components: (["fixture", "example", "vendored"] as const).map((role) => ({
+        role,
+        commands: { test: "runner" },
+      })),
+    };
+    const rec = collect(summaryLine({ outcome: "paused", reason: "needs_you" }), "", profile, {
+      language: "ts",
+      pr_opened: false,
+    });
+    expect(rec.test_configuration).toEqual({ status: "none", components: [] });
+    expect(rec.taxonomy).toBe("loop-exhausted");
+  });
+  test("the final summary is authoritative even when an earlier summary is malformed", () => {
+    const ndjson = [summaryLine({ ticks: "broken" }), summaryLine({ ticks: 7 })].join("\n");
+    expect(collect(ndjson, "", RUNNABLE_PROFILE, { language: "ts", pr_opened: true }).ticks).toBe(
+      7,
+    );
+    expect(() =>
+      collect(
+        [summaryLine({ ticks: 7 }), summaryLine({ ticks: "broken" })].join("\n"),
+        "",
+        RUNNABLE_PROFILE,
+        { language: "ts", pr_opened: true },
+      ),
+    ).toThrow();
   });
 });

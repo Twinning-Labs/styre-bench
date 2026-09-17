@@ -1,15 +1,45 @@
+import { z } from "zod";
 import { addedPaths, touchedPaths } from "./firewall";
 import type { Instance, TaskRecord } from "./types";
 
 /** Minimal shape of styre's `profile.json` this module needs — NOT the full styre
  * `ProfileSchema` (the rig is black-box against styre: it consumes the CLI + NDJSON,
  * never imports styre source, per the design doc's "black-box styre" invariant). Mirrors
- * only `components[].commands.test`, which is what the `probe` taxonomy check reads. */
-export interface ProbeComponent {
-  commands?: Record<string, string | { unavailable: true }>;
+ * component roles and test declarations; declarations cannot establish execution or setup failure. */
+const ProbeProfileSchema = z.object({
+  components: z
+    .array(
+      z.object({
+        name: z.string().optional(),
+        role: z.enum(["primary", "fixture", "example", "vendored"]).optional(),
+        commands: z
+          .record(z.union([z.string(), z.object({ unavailable: z.literal(true) })]))
+          .optional(),
+        testAction: z
+          .object({ framework: z.string().min(1), launcher: z.string().min(1) })
+          .optional(),
+      }),
+    )
+    .optional(),
+});
+export type ProbeProfile = z.infer<typeof ProbeProfileSchema>;
+export type ProbeComponent = NonNullable<ProbeProfile["components"]>[number];
+export function parseProbeProfile(input: unknown): ProbeProfile {
+  return ProbeProfileSchema.parse(input);
 }
-export interface ProbeProfile {
-  components?: ProbeComponent[];
+
+/** A declared launcher is configuration evidence, not proof that the tests executed. */
+export function testConfiguration(
+  profile: ProbeProfile,
+): NonNullable<TaskRecord["test_configuration"]> {
+  const components = (profile.components ?? []).flatMap((c, i) =>
+    (c.role === undefined || c.role === "primary") &&
+    (c.testAction?.launcher.trim() ||
+      (typeof c.commands?.test === "string" && c.commands.test.trim()))
+      ? [c.name ?? `component-${i}`]
+      : [],
+  );
+  return { status: components.length ? "declared" : "none", components };
 }
 
 /** `isTestPath`'s language axis is deliberately wider than `Instance["language"]`
@@ -20,11 +50,10 @@ export type TestLang = Instance["language"] | "js" | "go" | "java" | "rust";
 
 /** The per-instance context `collect` needs but can't recover from the NDJSON/diff alone:
  * the corpus language (drives the per-language `isTestPath` matcher) and whether styre
- * actually opened a PR (drives the `self_test_passed` approximation). */
+ * actually opened a PR (retained for collector callers). */
 export interface CollectCtx {
   language: TestLang;
-  /** Tri-state — see `TaskRecord.pr_opened`. `null` ("we could not find out") propagates
-   *  into `self_test_passed`'s approximation as `null`, never as `false`. */
+  /** Tri-state forge result; never used as proof of test execution. */
   pr_opened: boolean | null;
 }
 
@@ -38,49 +67,38 @@ export interface CollectCtx {
  * `reason` is typed `string`, not the `PauseReason` union: it arrives off the wire from a
  * separately-versioned binary, so an unmodelled value must be handled at runtime (it maps
  * to `infra`) rather than assumed away by the type. */
-interface SummaryEventLike {
-  type: "summary";
-  outcome: string;
-  reason?: string;
-  status: string;
-  ticks: number;
-  cost_usd: number;
-  tokens_in: number;
-  tokens_out: number;
-  cycle_count: number;
-  escalation_count: number;
-  escalation_reasons: string[];
-}
+const SummarySchema = z.object({
+  type: z.literal("summary"),
+  outcome: z.string().min(1),
+  reason: z.string().optional(),
+  status: z.string(),
+  ticks: z.number().int().nonnegative(),
+  cycle_count: z.number().int().nonnegative(),
+  escalation_count: z.number().int().nonnegative(),
+  escalation_reasons: z.array(z.string()),
+});
 
-/** `isSummaryEvent` requires the load-bearing fields to actually be present/typed —
- * `type==="summary"` alone is not enough. A malformed summary line (e.g. missing
- * `outcome`) must NOT be accepted as THE summary: everything downstream keys off
- * `outcome` (taxonomy derivation, `parked`), and a stray `undefined` there would read as
- * a silently-broken record rather than the no-summary/infra case it actually is. */
-function isSummaryEvent(v: unknown): v is SummaryEventLike {
-  if (typeof v !== "object" || v === null) return false;
-  const obj = v as { type?: unknown; outcome?: unknown };
-  return obj.type === "summary" && typeof obj.outcome === "string";
-}
-
-/** PURE. Parses styre's NDJSON stdout and returns the LAST `type==="summary"` event (styre
- * emits at most one per run, but this is robust to a resumed/replayed stream carrying more
- * than one). Lines that aren't valid JSON (stray output mixed into the stream) are skipped
- * rather than throwing — a malformed non-summary line must not crash collection. */
-function parseLastSummary(ndjson: string): SummaryEventLike | undefined {
-  let last: SummaryEventLike | undefined;
+/** Last summary is authoritative; a malformed last one cannot revive an older success. */
+function parseLastSummary(ndjson: string): z.infer<typeof SummarySchema> | undefined {
+  let last: unknown;
   for (const line of ndjson.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
+    if (!line.trim()) continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(trimmed);
+      parsed = JSON.parse(line);
     } catch {
       continue;
     }
-    if (isSummaryEvent(parsed)) last = parsed;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("type" in parsed) ||
+      parsed.type !== "summary"
+    )
+      continue;
+    last = parsed;
   }
-  return last;
+  return last === undefined ? undefined : SummarySchema.parse(last);
 }
 
 /** PURE. Splits a unified diff into one block per `diff --git a/X b/Y` file header (the
@@ -171,54 +189,10 @@ export function isTestPath(path: string, lang: TestLang): boolean {
   }
 }
 
-function isUnrunnableTestCommand(component: ProbeComponent | undefined): boolean {
-  if (!component) return true; // no components at all -> nothing is runnable
-  const test = component.commands?.test;
-  if (test === undefined) return true;
-  if (typeof test === "object" && test !== null && "unavailable" in test) return true;
-  return false;
-}
-
-/** PURE. `probe` taxonomy check: true iff the setup profile's sole/first component has no
- * runnable `commands.test` (absent, or the `{unavailable: true}` sentinel `styre setup`
- * writes for a detected-but-unrunnable toolchain — the §4-anticipated Python case).
- * Inspecting only `components[0]` is valid under the single-stack pilot assumption; a
- * multi-component (polyglot) profile would need a different rule. */
-function isProbeProfile(profile: ProbeProfile): boolean {
-  return isUnrunnableTestCommand(profile.components?.[0]);
-}
-
-/** PURE. Derives `taxonomy` from styre's terminal `outcome` (plus `reason` when paused) —
- * NEVER the process exit code (design §9a: exit codes lie; `paused` exits 75 and
- * `abandoned` exits 1, but both emit a `summary` first). Only called when a valid
- * `summary` exists (the no-summary case is handled upstream in `collect` as `infra`,
- * before `outcome` is even available).
- *
- * styre's vocabulary is `pr-ready | done | paused | abandoned` with `reason` set iff
- * paused — ENG-380/384 collapsed the former `blocked`/`no-progress`/`parked` outcomes into
- * one resumable `paused` state. Checked in this order:
- *
- *   `parked` (paused for `budget` — it ran out of money, which says nothing about the loop,
- *   so it outranks even an unrunnable profile) > `probe` (the setup profile can't run any
- *   test at all — an environment failure, not a run failure; checked BEFORE loop-exhausted
- *   so an unrunnable-profile run that gives up is excluded as `probe` rather than counted
- *   as a styre loop failure, which would deflate the resolve rate) > `loop-exhausted`
- *   (paused for `needs_you`, or a terminal `abandoned`) > pending (`undefined` for
- *   `pr-ready`/`done` — Task 11 resolves this to `resolved`/`opened-but-unresolved` from
- *   the score).
- *
- * Everything else is `infra`, so it is excluded from the oracle rate rather than silently
- * attributed to styre: a paused run whose `reason` is missing or unmodelled, an operator
- * `interrupted` stop, and any outcome from a future styre. Returning `undefined` for an
- * unrecognised outcome is what let the v0.12.0 sweep render a healthy-looking 0/0 — an
- * unknown value must never fall through into "pending". */
-function deriveTaxonomy(
-  outcome: string,
-  reason: string | undefined,
-  profile: ProbeProfile,
-): string | undefined {
+/** Workflow outcome is independent of command declarations. Only SETUP_FAILED_EXIT in
+ * defaultCollectStage establishes a setup failure (`probe`); profile contents cannot. */
+function deriveTaxonomy(outcome: string, reason: string | undefined): string | undefined {
   if (outcome === "paused" && reason === "budget") return "parked";
-  if (isProbeProfile(profile)) return "probe";
   if (outcome === "paused" && reason === "needs_you") return "loop-exhausted";
   if (outcome === "abandoned") return "loop-exhausted";
   if (outcome === "pr-ready" || outcome === "done") return undefined;
@@ -233,18 +207,14 @@ function deriveTaxonomy(
  * `touchedPaths`) — reconciled with `scorer.run_self_test` (Task 3), which keys on
  * newly-added test paths. A diff that only MODIFIES an existing test file does not count:
  * it isn't a test styre authored, and counting it would both inflate the headline
- * self-authored-test rate and get scored by this module's weaker pass/fail approximation
- * instead of the rigorous per-test runner.
+ * self-authored-test rate and misrepresent the separate per-test runner's scope.
  *
- * `self_test_passed` is a documented APPROXIMATION ("passed under styre's own verify"): styre
- * only opens a PR when its own verify step — which runs the test it just wrote — is green, so
- * `self_authored_test && pr_opened` stands in for a rigorous per-test check until the pipeline
- * wires `scorer.run_self_test` (Task 11). `null` when no self-authored test exists at all (the
- * approximation doesn't apply, so it must not silently read as `false`).
+ * `self_test_passed` stays null here. Only the separate self-test scorer can establish
+ * a verdict; neither a declared launcher nor an opened PR proves execution.
  *
  * `taxonomy: "infra"` is set whenever `parseLastSummary` finds no VALID summary event at
  * all — either styre hard-crashed before emitting one, or the only `summary`-typed line
- * was malformed (missing `outcome`) and `isSummaryEvent` rejected it. Per design §9a, a
+ * was absent. A malformed final summary throws instead of falling back to an earlier one. Per design §9a, a
  * summary-less crash is infra, not a pending/unscored record: returning a fragment with no
  * `outcome`/`taxonomy` would let a later stage mis-score it as something else. This check
  * short-circuits before `deriveTaxonomy` runs, since `deriveTaxonomy` needs a real
@@ -260,9 +230,13 @@ export function collect(
   const strippedDiff = extractStrippedDiff(prDiff);
   const added = addedPaths(strippedDiff);
   const self_authored_test = added.some((p) => isTestPath(p, ctx.language));
-  const self_test_passed = self_authored_test ? ctx.pr_opened : null;
+  const self_test_passed = null; // PR existence cannot establish that an individual test passed.
 
-  const result: Partial<TaskRecord> = { self_authored_test, self_test_passed };
+  const result: Partial<TaskRecord> = {
+    self_authored_test,
+    self_test_passed,
+    test_configuration: testConfiguration(parseProbeProfile(profile)),
+  };
 
   if (!summary) {
     // No summary at all: styre made no claim about a PR either way. `null`, not `false` —
@@ -273,7 +247,7 @@ export function collect(
     return result;
   }
 
-  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, profile);
+  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
   result.ticks = summary.ticks;

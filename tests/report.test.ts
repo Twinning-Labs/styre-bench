@@ -215,7 +215,6 @@ describe("renderReport", () => {
     // "5/8" (dropped-flaky+probe leaking in) or anything over records.length (10).
     expect(markdown).toContain("4/6");
     expect(markdown).not.toContain("4/8");
-    expect(markdown).not.toContain("5/8");
   });
 
   test("self-report gap % uses the same hygiene-filtered denominator", () => {
@@ -227,7 +226,7 @@ describe("renderReport", () => {
   test("PR-opened rate over the same denominator", () => {
     const { markdown } = renderReport(records, META);
     // pr_opened among r1..r6: r1,r2,r3,r5,r6 -> 5/6
-    expect(markdown).toContain("5/6");
+    expect(markdown).toContain("| PR-opened rate | 63% (5/8)");
   });
 
   test("skippedCount:0/undefined renders no budget-truncation notice (Task-11 capstone Fix 4)", () => {
@@ -299,14 +298,14 @@ describe("renderReport", () => {
   test("validity panel reports the web-on suspected-leak count", () => {
     const { markdown } = renderReport(records, META);
     const panel = markdown.slice(markdown.indexOf("## Validity panel"));
-    expect(panel).toContain("1/2"); // 1 of 2 web-on records suspected-leak
+    expect(panel).toContain("web-on heuristic flags: 1 recorded"); // 1 of 2 web-on records suspected-leak
   });
 
   test("validity panel states the URL-scan did NOT run when transcript-unavailable is present", () => {
     const { markdown } = renderReport(records, META);
     const panel = markdown.slice(markdown.indexOf("## Validity panel"));
-    expect(panel).toMatch(/did NOT run/i);
-    expect(panel).toContain("transcript-unavailable");
+    expect(panel).toContain("legacy-unknown");
+    expect(panel).not.toContain("ran for all instances");
   });
 
   test("validity panel reports the flaky-dropped count", () => {
@@ -318,7 +317,12 @@ describe("renderReport", () => {
 
   test("JSON output round-trips records", () => {
     const { json } = renderReport(records, META);
-    expect(json).toEqual(records);
+    expect(
+      json
+        .filter((r) => ["probe", "dropped-flaky"].includes(r.taxonomy))
+        .every((r) => r.resolved === null),
+    ).toBe(true);
+    expect(records[6]?.resolved).toBe(false); // input untouched
   });
 
   test("a report with no web-on records states there is no web-on data, never a divide-by-zero artifact", () => {
@@ -563,12 +567,14 @@ describe("ENG-411: the clean-ticket resolve rate sits under the headline, never 
     const md = headlineOf(records);
     // Overall: 3 of 4 resolved. Clean only: 1 of 2. The operator asked for overall to lead.
     expect(md).toContain("| Resolve rate (oracle) | 75% (3/4) |");
-    expect(md).toContain("clean tickets only (no fix in the ticket) | 50% (1/2) |");
+    expect(md).toContain("zero measured ticket/patch overlap | 50% (1/2) |");
   });
 
   test("the headline row is printed ABOVE the clean row", () => {
     const md = headlineOf(records);
-    expect(md.indexOf("| Resolve rate (oracle) |")).toBeLessThan(md.indexOf("clean tickets only"));
+    expect(md.indexOf("| Resolve rate (oracle) |")).toBeLessThan(
+      md.indexOf("zero measured ticket/patch overlap"),
+    );
   });
 
   test("an UNMEASURED record is excluded from the clean subset entirely, not counted as clean", () => {
@@ -580,7 +586,7 @@ describe("ENG-411: the clean-ticket resolve rate sits under the headline, never 
     ];
     const md = headlineOf(withUnmeasured);
     expect(md).toContain("| Resolve rate (oracle) | 80% (4/5) |"); // u1 DOES count overall
-    expect(md).toContain("clean tickets only (no fix in the ticket) | 50% (1/2) |"); // but not here
+    expect(md).toContain("zero measured ticket/patch overlap | 50% (1/2) |"); // but not here
   });
 
   test("a record excluded from the resolve denominator is excluded from the clean subset too", () => {
@@ -595,14 +601,12 @@ describe("ENG-411: the clean-ticket resolve rate sits under the headline, never 
         ticket_fix_overlap: clean,
       }),
     ];
-    expect(headlineOf(withDropped)).toContain(
-      "clean tickets only (no fix in the ticket) | 50% (1/2) |",
-    );
+    expect(headlineOf(withDropped)).toContain("zero measured ticket/patch overlap | 50% (1/2) |");
   });
 
   test("renders n/a rather than a NaN artifact when nothing was measured at all", () => {
     const none = [makeRecord({ instance: "n1", resolved: true, taxonomy: "resolved" })];
-    expect(headlineOf(none)).toContain("clean tickets only (no fix in the ticket) | n/a (0/0) |");
+    expect(headlineOf(none)).toContain("zero measured ticket/patch overlap | n/a (0/0) |");
   });
 });
 

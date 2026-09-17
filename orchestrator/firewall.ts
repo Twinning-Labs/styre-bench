@@ -164,11 +164,13 @@ export function assertNoHeldOut(
  * is NEVER placed in front of styre.
  */
 export interface TicketFixOverlap {
+  /** Versioned lexical rule. Omitted on historical substring measurements. */
+  method?: "exact-trimmed-added-lines-v2";
   /** Distinct non-trivial lines of the accepted fix the ticket already contained. */
   fix_lines: number;
   /** Same, for the held-out regression tests. */
   test_lines: number;
-  /** Up to 3 offending lines, each truncated to 80 chars — evidence, not a patch. */
+  /** Up to 3 lexical matches, each truncated to 80 chars — host-side evidence, not an exposure judgment. */
   sample: string[];
 }
 
@@ -186,12 +188,13 @@ const OVERLAP_SAMPLE_LIMIT = 3;
  * ultimately merged. Nothing leaked there; the corpus is simply built from public issues,
  * and every harness that scores SWE-bench Verified feeds exactly that text. Refusing to run
  * cannot un-write a 2022 issue — it only discards a fifth of the corpus and makes the
- * resolve rate incomparable with published numbers. So: run it, and record what the ticket
- * gave away, so the report can state the rate both ways.
+ * resolve rate incomparable with published numbers. So: run it, and measure lexical matches, so the report can state both the full
+ * measured rate and a lexical-subset rate without claiming the ticket revealed a solution.
  *
- * Shares `heldOutLines` with `assertNoHeldOut` deliberately — "what counts as a held-out
- * line" must have exactly one definition, or the gate and the measurement drift apart and
- * the clean subset stops meaning what it says.
+ * Shares added-line extraction with `assertNoHeldOut`, but uses exact trimmed-line equality.
+ * The guard remains conservative substring matching; the measurement must not count an
+ * added fix fragment embedded in a longer buggy expression as an exact match. Neither
+ * zero nor nonzero lexical overlap proves whether the issue supplies a solution.
  */
 export function measureTicketOverlap(
   text: string,
@@ -204,13 +207,15 @@ export function measureTicketOverlap(
   assertParseable(inst.fix_patch, "fix_patch", inst);
   assertParseable(inst.test_patch, "test_patch", inst);
 
+  const ticketLines = new Set(text.split(/\r?\n/).map((line) => line.trim()));
   const hits = (patch: string): string[] => [
-    ...new Set(heldOutLines(patch, minLineLength).filter((line) => text.includes(line))),
+    ...new Set(heldOutLines(patch, minLineLength).filter((line) => ticketLines.has(line))),
   ];
   const fixHits = hits(inst.fix_patch);
   const testHits = hits(inst.test_patch);
 
   return {
+    method: "exact-trimmed-added-lines-v2",
     fix_lines: fixHits.length,
     test_lines: testHits.length,
     sample: [...fixHits, ...testHits]

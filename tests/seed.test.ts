@@ -497,6 +497,7 @@ describe("measureTicketOverlap (pure, ENG-411): counts what the ticket gave away
   test("a clean ticket measures zero on both patches", () => {
     const inst = makeInstance();
     expect(measureTicketOverlap("nothing incriminating here at all", inst)).toEqual({
+      method: "exact-trimmed-added-lines-v2",
       fix_lines: 0,
       test_lines: 0,
       sample: [],

@@ -1,3 +1,5 @@
+import { type LeakResult, LeakResultSchema } from "./leak-contract";
+export type { LeakResult } from "./leak-contract";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -13,7 +15,12 @@ import muiProfile from "../scoring/profiles/mui-timeouts-v1.json";
 import { buildStyre } from "./build-styre";
 import type { BuildStyreConfig, BuildStyreResult, StyreBinaries } from "./build-styre";
 import { cleanup as tearDown } from "./cleanup";
-import { collect as collectPure, extractStrippedDiff } from "./collect";
+import {
+  collect as collectPure,
+  extractStrippedDiff,
+  isTestPath,
+  parseProbeProfile,
+} from "./collect";
 import type { CollectCtx, ProbeProfile } from "./collect";
 import type { Family } from "./corpus";
 import { loadInstances } from "./corpus";
@@ -74,10 +81,6 @@ export type RunControlsResult = import("./types").OracleControls;
 export type ScoreResult = import("./types").OracleScore;
 export interface SelfTestResult {
   passed: boolean | null;
-}
-export interface LeakResult {
-  suspected: boolean;
-  reasons: string[];
 }
 
 /** Shells out to a python JSON-stdio script (`scorer/score.py <command>` or
@@ -338,16 +341,11 @@ export async function defaultCollectStage(
   }
 
   const [ndjson, profileText, transcript] = await Promise.all([
-    readFile(result.ndjsonPath, "utf8").catch(() => ""),
-    readFile(result.profilePath, "utf8").catch(() => "{}"),
+    readFile(result.ndjsonPath, "utf8"),
+    readFile(result.profilePath, "utf8"),
     readFile(result.transcriptPath, "utf8").catch(() => ""),
   ]);
-  let profile: ProbeProfile;
-  try {
-    profile = JSON.parse(profileText || "{}") as ProbeProfile;
-  } catch {
-    profile = {};
-  }
+  const profile = parseProbeProfile(JSON.parse(profileText));
 
   // The forge is consulted ONLY for `pr_opened`. Its diff is deliberately NOT fetched: the
   // PR's merge-base is the clean upstream base_commit, so a PR diff re-admits the image's own
@@ -365,14 +363,14 @@ export async function defaultCollectStage(
     );
   }
   // THE scoring input: styre's changes against the run-start baseline, captured in-container.
-  // Absent/unreadable reads as empty, which collect already treats as "no work delivered" —
-  // never silently fall back to the PR diff, which would reinstate the defect above.
-  const rawDiff = await readFile(result.rawCandidateDiffPath, "utf8").catch(() => "");
+  // Missing/unreadable is a collection failure, not an observed empty candidate.
+  // Never fall back to the PR diff, which would reinstate the defect above.
+  const rawDiff = await readFile(result.rawCandidateDiffPath, "utf8");
 
   const ctx: CollectCtx = { language: inst.language, pr_opened };
   const record = collectPure(ndjson, rawDiff, profile, ctx);
   const strippedDiff = extractStrippedDiff(rawDiff);
-  const addedTestPaths = addedPaths(strippedDiff);
+  const addedTestPaths = addedPaths(strippedDiff).filter((p) => isTestPath(p, inst.language));
 
   // ENG-390: styre's summary reports null cost/tokens for every dispatch, because the
   // container's `claude` wrapper hands it plain text (see usage.ts). The real numbers are in
@@ -525,7 +523,8 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     styre_commit: cfg.styreCommit,
     cohort: cfg.cohort,
     post_cutoff: tagCutoff(inst, cfg.modelCutoff),
-    resolved: false,
+    resolved: null,
+    score_attempted: false,
     // styre never ran for a record that keeps these defaults (a control drop, a seed
     // failure), so "no PR, and no claim of one" is MEASURED here, not assumed. A record that
     // did reach collect has all three overwritten from the `CollectStageResult`.
@@ -550,7 +549,8 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
     blind_quality: null,
     ab_preference: null,
     ab_notes: null,
-    suspected_leak: false,
+    suspected_leak: null,
+    leak_check: { status: "not-run", reason: "judgment stage not reached" },
     leak_reasons: [],
     taxonomy: "",
     ticket_fix_overlap: ticketFixOverlapOf(inst),
@@ -566,7 +566,7 @@ function blankRecord(inst: Instance, cfg: PipelineConfig): TaskRecord {
  * Returns `null` — "not measured" — only when the measurement itself could not be made
  * (an unparseable corpus patch, which `measureTicketOverlap` fails closed on). That is a
  * different claim from "measured zero", and the report must not fold it into the clean
- * subset: a ticket we failed to read is not a ticket we proved clean.
+ * subset: a ticket we failed to read has no measured lexical result.
  */
 function ticketFixOverlapOf(inst: Instance): TicketFixOverlap | null {
   try {
@@ -665,7 +665,8 @@ export interface RunInstanceOpts {
 }
 
 interface JudgmentStagesResult {
-  suspectedLeak: boolean;
+  suspectedLeak: boolean | null;
+  leakCheck: TaskRecord["leak_check"];
   leakReasons: string[];
   blindVerdict: string | null;
   abPreference: TaskRecord["ab_preference"];
@@ -686,24 +687,37 @@ async function runJudgmentStages(
 ): Promise<JudgmentStagesResult> {
   const issue = inst.problem_statement;
 
-  let suspectedLeak = false;
+  let suspectedLeak: boolean | null = null;
+  let leakCheck: TaskRecord["leak_check"];
   let leakReasons: string[] = [];
   try {
-    const leak = await deps.detectLeak(
-      stage.diff,
-      inst.fix_patch,
-      stage.transcript,
-      inst.id,
-      inst.problem_statement,
+    const leak = LeakResultSchema.parse(
+      await deps.detectLeak(
+        stage.diff,
+        inst.fix_patch,
+        stage.transcript,
+        inst.id,
+        inst.problem_statement,
+      ),
     );
+    leakCheck = {
+      status: "completed",
+      scope: "full",
+      network_indicators: leak.network_indicators,
+      exposure: leak.exposure,
+      transcript_scan: leak.transcript_scan,
+      similarity: leak.similarity,
+      containment: leak.containment,
+      fix_changed_lines: leak.fix_changed_lines,
+    };
     suspectedLeak = leak.suspected;
     leakReasons = leak.reasons;
-  } catch {
-    // See the doc on the equivalent inline try/catch this replaces (in `runInstance`, git
-    // blame) — reuses the canonical "transcript-unavailable" `leak_reasons` value rather than
-    // inventing a new taxonomy: a crashed detector means the scan did not complete.
-    suspectedLeak = false;
-    leakReasons = ["transcript-unavailable"];
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[leak-check] ${inst.id}: ${reason}`);
+    leakCheck = { status: "error", reason };
+    suspectedLeak = null;
+    leakReasons = ["detector-failed"];
   }
 
   let blindVerdict: string | null = null;
@@ -726,7 +740,7 @@ async function runJudgmentStages(
     abNotes = null;
   }
 
-  return { suspectedLeak, leakReasons, blindVerdict, abPreference, abNotes };
+  return { suspectedLeak, leakReasons, leakCheck, blindVerdict, abPreference, abNotes };
 }
 
 /**
@@ -744,7 +758,7 @@ async function runJudgmentStages(
  *    against `cfg.perTaskCostCapUsd`; once that cap would be exceeded, retrying stops even if
  *    `maxInfraRetries` hasn't been reached yet (enforces `perTaskCostCapUsd`, per the brief).
  * 3. probe short-circuit: if the final attempt's `taxonomy === "probe"` (an unrunnable
- *    `styre setup` profile — Task 7), score/self-test/leak/review are all skipped; the record
+ *    `styre setup` failure — Task 7), score/self-test/leak/review are all skipped; the record
  *    is returned as-is.
  * 4. Otherwise: `score` (oracle) -> `run_self_test` (only when `addedTestPaths` is non-empty;
  *    a TRANSPORT ERROR here is caught and recorded as `self_test_passed: null` — NEVER a
@@ -761,8 +775,7 @@ async function runJudgmentStages(
  * never another authoring attempt. `run_self_test`/`detect_leak`/`blindQuality`/`abReview` run
  * strictly AFTER `score()` has already produced a `resolved` verdict for this attempt — each
  * is wrapped in its OWN try/catch, so a crash in any one of them degrades ONLY that signal
- * (`self_test_passed: null` / `suspected_leak: false` + `leak_reasons: ["transcript-
- * unavailable"]` / `blind_quality: null` / `ab_preference: null`) and NEVER discards the
+ * (`self_test_passed: null` / `suspected_leak: null` + explicit detector error / `blind_quality: null` / `ab_preference: null`) and NEVER discards the
  * `resolved` verdict, the diff, or the rest of the record.
  *
  * COST CONTRACT (Task-11 capstone reviews, Fix 2): the returned `cost_usd` is
@@ -862,6 +875,8 @@ export async function runInstance(
     return {
       ...base,
       ...stage.record,
+      resolved: null,
+      score_attempted: false,
       taxonomy: "infra",
       pr_opened: stage.pr_opened,
       pr_self_reported: stage.pr_self_reported,
@@ -875,6 +890,8 @@ export async function runInstance(
   const withCollect: TaskRecord = {
     ...base,
     ...stage.record,
+    resolved: null,
+    score_attempted: false,
     pr_opened: stage.pr_opened,
     pr_self_reported: stage.pr_self_reported,
     pr_lookup_error: stage.pr_lookup_error,
@@ -894,7 +911,7 @@ export async function runInstance(
     // UNLESS `collect` already assigned a terminal taxonomy (e.g. "parked"/"loop-exhausted"),
     // which — same as the normal path below — is preserved as-is. detectLeak/blindQuality/
     // abReview still ran normally (they need ANTHROPIC + the diff, not the oracle), and
-    // `self_test_passed` keeps collect's own approximation untouched (no `runSelfTest` call).
+    // `self_test_passed` stays unknown (no `runSelfTest` call).
     const judgment = await runJudgmentStages(inst, stage, cfg, deps);
     return {
       ...withCollect,
@@ -902,6 +919,7 @@ export async function runInstance(
       taxonomy: stage.record.taxonomy ?? "unscored",
       suspected_leak: judgment.suspectedLeak,
       leak_reasons: judgment.leakReasons,
+      leak_check: judgment.leakCheck,
       blind_quality: judgment.blindVerdict,
       ab_preference: judgment.abPreference,
       ab_notes: judgment.abNotes,
@@ -912,6 +930,8 @@ export async function runInstance(
   for (;;) {
     try {
       scoreResult = await deps.score(inst, stage.diff);
+      if (scoreResult?.resolved !== null && typeof scoreResult?.resolved !== "boolean")
+        throw new Error("score response lacks a boolean-or-null oracle verdict");
       break;
     } catch (err) {
       if (scorerRetries < maxInfraRetries) {
@@ -989,6 +1009,7 @@ export async function runInstance(
     self_test_passed: selfTestPassed,
     suspected_leak: judgment.suspectedLeak,
     leak_reasons: judgment.leakReasons,
+    leak_check: judgment.leakCheck,
     blind_quality: judgment.blindVerdict,
     ab_preference: judgment.abPreference,
     ab_notes: judgment.abNotes,
@@ -1135,6 +1156,7 @@ async function defaultWriteReport(result: RenderReportResult, outDir: string): P
   await Promise.all([
     writeFile(path.join(outDir, "report.md"), result.markdown, "utf8"),
     writeFile(path.join(outDir, "report.json"), JSON.stringify(result.json, null, 2), "utf8"),
+    writeFile(path.join(outDir, "metrics.json"), JSON.stringify(result.metrics, null, 2), "utf8"),
   ]);
 }
 

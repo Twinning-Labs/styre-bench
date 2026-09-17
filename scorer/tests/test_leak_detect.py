@@ -276,8 +276,8 @@ def test_transcript_with_pr_url_flags_pr_reason():
 
 def test_transcript_with_hash_pr_reference_flags_pr_reason():
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, PR_HASH_TRANSCRIPT)
-    assert result["suspected"] is True
-    assert "pr-url-in-transcript" in result["reasons"]
+    assert result["suspected"] is False
+    assert "reference-in-transcript" in result["reasons"]
 
 
 def test_transcript_with_generic_url_flags_url_reason_not_pr():
@@ -409,8 +409,8 @@ def test_ranked_list_hash_not_flagged():
 
 def test_fixes_hash_reference_flagged():
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, "Same root cause as fixes #123.")
-    assert "pr-url-in-transcript" in result["reasons"]
-    assert result["suspected"] is True
+    assert "reference-in-transcript" in result["reasons"]
+    assert result["suspected"] is False
 
 
 def test_real_pr_url_flagged():
@@ -555,7 +555,7 @@ def test_curl_in_a_bash_input_is_flagged():
         }
     )
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
-    assert "web-tool-used" in result["reasons"]
+    assert "shell-network-pattern" in result["reasons"]
     assert result["suspected"] is True
 
 
@@ -617,8 +617,8 @@ def test_a_DIFFERENT_issue_number_is_still_a_leak():
     result = detect_leak(
         INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="astropy__astropy-12907"
     )
-    assert "pr-url-in-transcript" in result["reasons"]
-    assert result["suspected"] is True
+    assert "reference-in-transcript" in result["reasons"]
+    assert result["suspected"] is False
 
 
 def test_explicit_upstream_url_is_a_leak_even_for_the_own_number():
@@ -657,8 +657,8 @@ def test_without_instance_id_nothing_is_excused():
         }
     )
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript)
-    assert "pr-url-in-transcript" in result["reasons"]
-    assert result["suspected"] is True
+    assert "reference-in-transcript" in result["reasons"]
+    assert result["suspected"] is False
 
 
 # -- numbers the problem statement itself supplied (false-positive fix) --------
@@ -711,8 +711,8 @@ def test_a_number_NOT_supplied_anywhere_is_still_a_leak():
         instance_id="darkreader__darkreader-7241",
         problem_statement=PS_WITH_ISSUE_REF,
     )
-    assert "pr-url-in-transcript" in result["reasons"]
-    assert result["suspected"] is True
+    assert "reference-in-transcript" in result["reasons"]
+    assert result["suspected"] is False
 
 
 def test_only_issue_reference_shapes_are_harvested_not_every_integer():
@@ -733,7 +733,7 @@ def test_only_issue_reference_shapes_are_harvested_not_every_integer():
         instance_id="o__r-1",
         problem_statement="This affects 42 users on version 42 of the extension.",
     )
-    assert "pr-url-in-transcript" in result["reasons"]
+    assert "reference-in-transcript" in result["reasons"]
 
 
 def test_issues_and_pull_url_forms_in_the_problem_statement_are_harvested():
@@ -836,3 +836,69 @@ def test_boilerplate_stripping_never_hides_a_web_tool_call():
     result = detect_leak(INDEPENDENT_DIFF, FIX_PATCH, transcript, instance_id="o__r-1")
     assert "web-tool-used" in result["reasons"]
     assert result["suspected"] is True
+
+
+def _assistant_blocks(blocks):
+    import json
+    return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": blocks}})
+
+
+def test_neutral_reference_cannot_hide_independent_url_indicator():
+    result = detect_leak(None, None, _assistant_blocks([
+        {"type": "text", "text": "Issue #999. See https://example.invalid/source"}
+    ]))
+    assert result["suspected"] is True
+    assert "reference-in-transcript" in result["reasons"]
+    assert "url-in-transcript" in result["reasons"]
+
+
+def test_exact_supplied_url_is_exempt_from_both_url_scans():
+    url = "https://github.com/example/project/pull/123"
+    result = detect_leak(None, None, _assistant_blocks([{"type": "text", "text": url}]), problem_statement=url)
+    assert result["suspected"] is False
+    assert "pr-url-in-transcript" not in result["reasons"]
+    assert "url-in-transcript" not in result["reasons"]
+
+
+def test_prose_about_shell_commands_is_not_a_tool_request():
+    result = detect_leak(None, None, _assistant_blocks([
+        {"type": "text", "text": "Do not run curl https://example.invalid/source"}
+    ]))
+    assert result["network_indicators"] == []
+    assert "shell-network-pattern" not in result["reasons"]
+    assert "web-tool-used" not in result["reasons"]
+
+
+def test_blocked_network_request_does_not_establish_solution_exposure():
+    import json
+    transcript = _assistant_blocks([{"type": "tool_use", "id": "blocked", "name": "Bash", "input": {
+        "command": "curl https://github.com/example/project/pull/123.diff"}}])
+    transcript += "\n" + json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "blocked", "is_error": True, "content": "This command requires approval"}]}})
+    result = detect_leak(None, None, transcript)
+    assert result["network_indicators"] == ["shell-network-pattern"]
+    assert result["exposure"] == "unknown"
+    assert result["transcript_scan"]["status"] == "complete"
+
+
+def test_malformed_tool_input_and_truncated_tail_cannot_claim_complete_coverage():
+    malformed = _assistant_blocks([{"type": "tool_use", "name": "WebFetch", "input": None}])
+    result = detect_leak(None, None, malformed)
+    assert result["transcript_scan"]["status"] == "partial"
+    assert result["transcript_scan"]["unknown_entries"] == 1
+    assert result["network_indicators"] == []
+    truncated = _assistant_blocks([{"type": "text", "text": "Working"}]) + '\n{"type":'
+    result = detect_leak(None, None, truncated)
+    assert result["transcript_scan"]["status"] == "partial"
+    assert result["transcript_scan"]["unparsed_lines"] == 1
+
+
+def test_unknown_json_is_not_supported_transcript_coverage():
+    result = detect_leak(None, None, '{"different_schema": true}')
+    assert result["transcript_scan"]["status"] == "unstructured"
+    assert result["suspected"] is False
+
+
+def test_recognized_cli_banner_is_framing_not_a_parser_hole():
+    result = detect_leak(None, None, "2.0.1 (Claude Code)\n" + _assistant_blocks([{"type": "text", "text": "Working"}]))
+    assert result["transcript_scan"] == {"status": "complete", "assistant_messages": 1, "unparsed_lines": 0, "unknown_entries": 0}

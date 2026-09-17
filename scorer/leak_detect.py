@@ -38,22 +38,18 @@ Three independent signals, any one sufficient to set `suspected: True`:
       uncomputable, recorded as `"similarity-unavailable"` rather than
       silently skipped.
 
-  (c) transcript URL/PR scan -- any `http(s)://` URL, `github.com/.../
-      pull/<n>` reference, or contextual PR/issue `#<number>` reference
-      (see `_PR_HASH_RE`) anywhere in `transcript` is a sign the agent
-      fetched (or referenced) something off the web instead of solving
-      the issue itself. `transcript` is the `transcriptPath` stream teed
-      by the run-task `claude` wrapper (Task 6) -- a stream-json file of
-      tool-use blocks. Styre's own NDJSON summary carries no tool-call
-      transcript, so without that wrapper this scan has no data to run
-      on. `transcript` must be the RAW teed text, not a path or parsed
-      object.
+  (c) assistant transcript indicators -- URL references and typed network-tool requests.
+      Bare issue references are neutral observations. A request is not a tool result and
+      neither a URL mention nor a shell-command pattern establishes successful retrieval.
+      `exposure` stays unknown; `transcript_scan` reports parser coverage independently.
+      Complete coverage means the retained text was parsed, not that the full run was captured.
+      The input is the RAW teed stream-json text, not a path or parsed object.
 
 Fail-safe posture (load-bearing): this is a backstop, so it must never
 silently no-op. An unavailable or non-string transcript records
 `"transcript-unavailable"` rather than skipping the scan without saying so
 (and never raises) -- callers (the report's validity panel) must be able to
-tell "clean" apart from "didn't run". A malformed similarity input
+tell no observed indicators apart from an unavailable scan. A malformed similarity input
 (non-string diff, or a missing/empty `fix_patch` -- the real fix should
 never legitimately be empty) records `"similarity-unavailable"` rather than
 silently returning `suspected: False` on data it couldn't actually
@@ -230,56 +226,73 @@ def strip_tooling_boilerplate(text: str) -> str:
     return text
 
 
-def _agent_authored(transcript: str) -> tuple[str | None, list[str]]:
-    """Split a stream-json transcript into what the AGENT wrote vs what it merely OBSERVED.
+def _transcript_data(transcript: str) -> tuple[str | None, list[str], list[str], dict[str, Any]]:
+    """Read the supported Claude stream schema; report holes instead of treating them as clean.
 
-    Returns `(agent_text, tool_names)`, or `(None, [])` when no line parses as JSON.
-
-    Only assistant-authored content counts: message text and `tool_use` INPUTS. `tool_result`
-    content is excluded, because that is repo content the agent read from disk -- and scanning
-    it for URLs is what made `pr-url-in-transcript` fire on astropy, whose own CI config
-    carries lines like
-
-        # MacOS X wheels - as noted in https://github.com/astropy/astropy/pull/12379 ...
-
-    A URL the agent never sought is not evidence that it went looking.
+    Tool inputs establish requested actions, not successful retrieval or solution exposure.
+    Recognized CLI version banners are framing, not missing transcript records.
     """
     texts: list[str] = []
     tools: list[str] = []
-    parsed = 0
+    network: list[str] = []
+    assistant = malformed = unknown = recognized = 0
     for raw in transcript.splitlines():
         line = raw.strip()
-        if not line:
+        if not line or re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][^ ]+)? \(Claude Code\)", line):
             continue
         try:
             entry = json.loads(line)
         except (ValueError, TypeError):
+            malformed += 1
             continue
-        parsed += 1
-        message = entry.get("message") if isinstance(entry, dict) else None
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if not isinstance(entry, dict):
+            unknown += 1
             continue
-        content = message.get("content")
-        if isinstance(content, str):
-            texts.append(content)
-            continue
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
+        message = entry.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            assistant += 1
+            recognized += 1
+            content = message.get("content")
+            if isinstance(content, str):
+                texts.append(content)
                 continue
-            kind = block.get("type")
-            if kind == "text" and isinstance(block.get("text"), str):
-                texts.append(block["text"])
-            elif kind == "tool_use":
-                name = block.get("name")
-                if isinstance(name, str):
+            if not isinstance(content, list):
+                unknown += 1
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    unknown += 1
+                    continue
+                kind = block.get("type")
+                if kind == "text" and isinstance(block.get("text"), str):
+                    texts.append(block["text"])
+                elif kind == "tool_use" and isinstance(block.get("name"), str) and isinstance(block.get("input"), dict):
+                    name = block["name"]
                     tools.append(name)
-                # The INPUT is agent-authored (the command/url it chose); the result is not.
-                texts.append(json.dumps(block.get("input"), default=str))
-    if parsed == 0:
-        return None, []
-    return "\n".join(texts), tools
+                    tool_input = block["input"]
+                    texts.append(json.dumps(tool_input, default=str))
+                    if name in _WEB_TOOLS or (name == "Bash" and isinstance(tool_input, dict)
+                            and isinstance(tool_input.get("command"), str)
+                            and _NET_CMD_RE.search(tool_input["command"])):
+                        network.append(name if name in _WEB_TOOLS else "shell-network-pattern")
+                elif kind not in {"thinking", "redacted_thinking"}:
+                    unknown += 1
+        elif entry.get("type") in {"system", "user", "result", "rate_limit_event"} or (
+            isinstance(message, dict) and message.get("role") in {"user", "system"}
+        ):
+            recognized += 1
+        else:
+            unknown += 1
+    status = ("unavailable" if not transcript.strip() else "unstructured" if recognized == 0
+              else "partial" if malformed or unknown or assistant == 0 else "complete")
+    coverage = {"status": status, "assistant_messages": assistant,
+                "unparsed_lines": malformed, "unknown_entries": unknown}
+    return ("\n".join(texts) if recognized else None), tools, network, coverage
+
+
+def _agent_authored(transcript: str) -> tuple[str | None, list[str]]:
+    text, tools, _, _ = _transcript_data(transcript)
+    return text, tools
 
 
 def _scan_agent_transcript(
@@ -289,11 +302,11 @@ def _scan_agent_transcript(
 ) -> list[str]:
     """URL/PR + web-tool reasons drawn from AGENT-AUTHORED text only.
 
-    `web-tool-used` is the strong signal: a `tool_use` entry naming WebFetch/WebSearch, or a
-    Bash input that curls/wgets a URL, cannot be repo content. The URL/PR scans are retained
-    but confined to what the agent wrote.
+    `web-tool-used` requires a typed WebFetch/WebSearch request. Bash command patterns
+    use the weaker `shell-network-pattern` label: quoted examples or comments may match.
+    Neither is proof of execution or exposure. URL scans examine assistant-authored text.
     """
-    agent_text, tool_names = _agent_authored(transcript)
+    agent_text, tool_names, network, coverage = _transcript_data(transcript)
     reasons: list[str] = []
     if agent_text is None:
         # Not stream-json (a plain-text transcript, or a format change). Fall back to scanning
@@ -301,8 +314,12 @@ def _scan_agent_transcript(
         # SAY SO -- a fallback scan re-admits the repo-content false positive above.
         reasons.append("transcript-unstructured-scan")
         agent_text = transcript
-    if any(name in _WEB_TOOLS for name in tool_names) or _NET_CMD_RE.search(agent_text):
+    if coverage["status"] == "partial":
+        reasons.append("transcript-partial-scan")
+    if any(name in _WEB_TOOLS for name in network):
         reasons.append("web-tool-used")
+    if "shell-network-pattern" in network:
+        reasons.append("shell-network-pattern")
     # Boilerplate is stripped for the URL/PR scan only; `web-tool-used` above already ran against
     # the unmodified text and tool list.
     reasons.extend(_scan_transcript(strip_tooling_boilerplate(agent_text), own_numbers, harness_text))
@@ -355,20 +372,25 @@ def _scan_transcript(
     """
     text = transcript.replace("\\/", "/")
     supplied = harness_text.replace("\\/", "/") if harness_text else ""
+    reasons: list[str] = []
     for match in _PR_URL_RE.finditer(text):
-        # A full upstream URL stays a finding UNLESS the harness handed over that exact URL.
-        if supplied and match.group(0) in supplied:
-            continue
-        return ["pr-url-in-transcript"]
+        if not supplied or match.group(0) not in supplied:
+            reasons.append("pr-url-in-transcript")
+            break
     for match in _PR_HASH_RE.finditer(text):
         numbers = _hash_numbers(match.group(0))
-        # A reference is excused only when EVERY number in it is one the harness supplied.
         if numbers and all(n in own_numbers for n in numbers):
             continue
-        return ["pr-url-in-transcript"]
-    if _URL_RE.search(text):
-        return ["url-in-transcript"]
-    return []
+        reasons.append("reference-in-transcript")
+        break
+    # A neutral reference must not suppress a separate URL indicator. Exact supplied URLs
+    # are exempt from both URL scans; their repetition says nothing about retrieval.
+    if "pr-url-in-transcript" not in reasons and any(
+        not supplied or m.group(0) not in supplied for m in _URL_RE.finditer(text)
+    ):
+        reasons.append("url-in-transcript")
+    return reasons
+
 
 
 def detect_leak(
@@ -396,7 +418,11 @@ def detect_leak(
     """
     reasons: list[str] = []
     suspected = False
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {
+        "exposure": "unknown",
+        "transcript_scan": _transcript_data(transcript if isinstance(transcript, str) else "")[3],
+        "network_indicators": _transcript_data(transcript if isinstance(transcript, str) else "")[2],
+    }
 
     candidate_is_str = isinstance(candidate_diff, str)
     fix_patch_valid = isinstance(fix_patch, str) and bool(fix_patch.strip())
@@ -440,7 +466,7 @@ def detect_leak(
         reasons.extend(url_reasons)
         # `transcript-unstructured-scan` reports that the scan degraded, not that a leak was
         # found -- it must never set `suspected` on its own.
-        if any(r != "transcript-unstructured-scan" for r in url_reasons):
+        if any(r not in {"transcript-unstructured-scan", "transcript-partial-scan", "reference-in-transcript"} for r in url_reasons):
             suspected = True
 
     result["suspected"] = suspected
