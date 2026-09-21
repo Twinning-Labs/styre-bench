@@ -30,6 +30,8 @@ cancel() {
     return
   fi
   trap '' INT TERM
+  pending_signal=''
+  pending_status=''
   printf '%s\\n' "$signal" > "$run_result_dir/interrupted.txt"
   if [ -n "$run_child" ]; then
     kill -"$signal" "$run_child" 2>/dev/null || true

@@ -57,27 +57,30 @@ test("service shutdown grants pilot its bounded cleanup interval", () => {
   expect(() => supervisedCommand(["echo"], "relative")).toThrow();
 });
 
-test("TERM in the background-child registration gap is deferred then forwarded", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "bench-supervisor-gap-"));
-  try {
-    const child = path.join(dir, "child.ts");
-    await writeFile(
-      child,
-      `import {writeFileSync} from 'node:fs'; process.on('SIGTERM',()=>{writeFileSync(${JSON.stringify(path.join(dir, "cleaned"))},'yes');process.exit(0)});writeFileSync(${JSON.stringify(path.join(dir, "ready"))},'yes');setInterval(()=>{},1000);`,
-    );
-    const script = path.join(dir, "launch.sh");
-    const body = supervisedCommand([process.execPath, child], dir).replace(
-      "run_child=$!",
-      () => `while [ ! -f '${dir}/ready' ]; do sleep 0.01; done\nkill -TERM $$\nrun_child=$!`,
-    );
-    await writeFile(script, `#!/bin/bash\nset -euo pipefail\n${body}`);
-    const proc = Bun.spawn(["bash", script], { stdout: "pipe", stderr: "pipe" });
-    const err = await new Response(proc.stderr).text();
-    expect(err).toBe("");
-    expect(await proc.exited).toBe(143);
-    expect((await readFile(path.join(dir, "exit-code.txt"), "utf8")).trim()).toBe("143");
-    expect(await readFile(path.join(dir, "cleaned"), "utf8")).toBe("yes");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+for (const childExit of [0, 70])
+  test(`TERM in child-registration gap preserves cancellation/cleanup ${childExit}`, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "bench-supervisor-gap-"));
+    try {
+      const child = path.join(dir, "child.ts");
+      await writeFile(
+        child,
+        `import {writeFileSync} from 'node:fs'; process.on('SIGTERM',()=>{writeFileSync(${JSON.stringify(path.join(dir, "cleaned"))},'yes');process.exit(${childExit})});writeFileSync(${JSON.stringify(path.join(dir, "ready"))},'yes');setInterval(()=>{},1000);`,
+      );
+      const script = path.join(dir, "launch.sh");
+      const body = supervisedCommand([process.execPath, child], dir).replace(
+        "run_child=$!",
+        () => `while [ ! -f '${dir}/ready' ]; do sleep 0.01; done\nkill -TERM $$\nrun_child=$!`,
+      );
+      await writeFile(script, `#!/bin/bash\nset -euo pipefail\n${body}`);
+      const proc = Bun.spawn(["bash", script], { stdout: "pipe", stderr: "pipe" });
+      const err = await new Response(proc.stderr).text();
+      expect(err).toBe("");
+      expect(await proc.exited).toBe(childExit === 70 ? 70 : 143);
+      expect((await readFile(path.join(dir, "exit-code.txt"), "utf8")).trim()).toBe(
+        childExit === 70 ? "70" : "143",
+      );
+      expect(await readFile(path.join(dir, "cleaned"), "utf8")).toBe("yes");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });

@@ -125,6 +125,7 @@ export async function spawnManagedDocker(args: string[], owner: string): Promise
       );
       await cancel(70);
     }
+    if (cancelling) await new Promise<never>(() => {});
     return code;
   } finally {
     active.delete(stop);
