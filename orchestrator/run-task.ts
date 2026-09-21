@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { containerNameFor } from "./container-reaper";
+import { OWNER_LABEL, spawnManagedDocker } from "./docker-lifecycle";
 import { evidenceDirName } from "./evidence";
 import { seedGithub } from "./seed-github";
 import type { SeedGithubConfig, SeedGithubResult } from "./seed-github";
@@ -458,6 +459,8 @@ export function buildEntrypoint(input: BuildEntrypointInput): string {
 }
 
 export interface BuildDockerArgsInput {
+  /** Opaque ownership token for checked candidate cleanup. */
+  containerOwner?: string;
   image: string;
   /** `docker run --name`. Gives the container a stable, greppable identity so a reaper can find
    *  one that outlived its pilot — `--rm` only fires when the container EXITS, which a killed
@@ -495,10 +498,13 @@ export function buildDockerArgs(input: BuildDockerArgsInput): string[] {
     entrypointHostPath,
     creds,
     containerName,
+    containerOwner,
   } = input;
   return [
     "run",
     "--rm",
+    "--init",
+    ...(containerOwner ? ["--label", `${OWNER_LABEL}=${containerOwner}`] : []),
     ...(containerName ? ["--name", containerName] : []),
     // Per-instance platform (set by corpus.ts's normalizers). SWE-bench on an arm64 host uses
     // linux/arm64 to run its native arm64 image; SWE-bench on x86_64 and every Multi-SWE-bench
@@ -576,7 +582,7 @@ export interface RunStyreConfig {
 export interface RunStyreDeps {
   ensureOutDir: (outDir: string) => Promise<void>;
   writeEntrypoint: (hostPath: string, content: string) => Promise<void>;
-  spawnDocker: (args: string[], containerName?: string) => Promise<number>;
+  spawnDocker: (args: string[], containerName?: string, owner?: string) => Promise<number>;
 }
 
 const defaultDeps: RunStyreDeps = {
@@ -586,38 +592,9 @@ const defaultDeps: RunStyreDeps = {
   async writeEntrypoint(hostPath, content) {
     await writeFile(hostPath, content, { mode: 0o755 });
   },
-  async spawnDocker(args, containerName) {
-    const proc = Bun.spawn(["docker", ...args], { stdout: "inherit", stderr: "inherit" });
-    // Graceful path: Ctrl-C or an ordinary `kill` reaches these. `--rm` alone does NOT clean up a
-    // killed run — the client dies, the daemon keeps the container, and it never exits. SIGKILL
-    // cannot be trapped at all, which is what left one running for four hours; the start-of-run
-    // reaper is the answer for that case.
-    const stop = () => {
-      try {
-        proc.kill();
-      } catch {
-        /* already gone */
-      }
-      if (containerName) {
-        try {
-          Bun.spawnSync(["docker", "kill", containerName], { stdout: "ignore", stderr: "ignore" });
-        } catch {
-          /* daemon down, or the container already exited */
-        }
-      }
-    };
-    const onSignal = () => {
-      stop();
-      process.exit(130);
-    };
-    process.on("SIGINT", onSignal);
-    process.on("SIGTERM", onSignal);
-    try {
-      return await proc.exited;
-    } finally {
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
-    }
+  async spawnDocker(args, _containerName, owner) {
+    if (!owner) throw new Error("Candidate Docker launch requires an ownership token");
+    return spawnManagedDocker(args, owner);
   },
 };
 
@@ -691,7 +668,9 @@ export async function runStyre(
   await deps.writeEntrypoint(entrypointHostPath, entrypoint);
 
   const containerName = containerNameFor(path.basename(outDir));
+  const owner = randomBytes(16).toString("hex");
   const args = buildDockerArgs({
+    containerOwner: owner,
     image: inst.image,
     containerName,
     platform: inst.platform,
@@ -701,7 +680,7 @@ export async function runStyre(
     creds,
   });
 
-  const exitCode = await deps.spawnDocker(args, containerName);
+  const exitCode = await deps.spawnDocker(args, containerName, owner);
 
   return {
     ndjsonPath: path.join(outDir, "run.ndjson"),

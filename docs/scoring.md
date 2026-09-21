@@ -274,3 +274,41 @@ agent work. Qualification uses fixed repetitions and retains failures; do not
 retry until green or filter troublesome tests. A passing calibration supports
 only the measured revisions and environment; controls still run before every
 future candidate attempt.
+
+
+## Candidate startup and supervised shutdown
+
+Candidate Docker commands always include `--init`. Qualification must call the real
+`runStyre`/`buildDockerArgs` path: adding init only to a test command can conceal a
+production startup failure. This happened when a headed browser wrapper became PID1
+and waited indefinitely for Xvfb readiness.
+
+Each candidate carries a fresh opaque ownership label. The runner retains ownership until
+the Docker client has settled and a checked Docker inventory proves the owned container
+absent. Cleanup commands have deadlines; an unavailable daemon or surviving container is
+an explicit failure, not successful cleanup. Cancellation drains concurrent candidates and
+terminates the pilot with130/143 (70 if cleanup cannot be confirmed), rather than returning
+an infrastructure result that buys a retry. A disappearing `--rm` container is accepted only
+when the final inventory confirms absence.
+
+For a systemd-launched pilot, generate the final shell command using
+`supervisedCommand(argv, absoluteResultDirectory)` from `orchestrator/service-launcher.ts`
+after the operator's preflight. Use its coupled `SERVICE_LIFECYCLE` properties, especially
+`KillMode=mixed`: the main shell forwards TERM to the pilot and waits for Docker cleanup;
+after45seconds systemd still kills the entire process group. Sending TERM to the entire
+group immediately races the cleanup worker against its own termination. The supervisor
+writes an interruption marker and nonzero exit status even if the child returns0 after a
+signal. Read the final report and interruption marker; exit0 alone never proves a scored run.
+
+`RUN_CONTAINER_LIFECYCLE=1 LIFECYCLE_IMAGE=<image-with-bash-xvfb-xauth> bun test
+ tests/container-lifecycle.native.test.ts` exercises normal exits, INT/TERM, concurrent
+candidates and Docker-client death using fake credentials and harmless payloads.
+`RUN_SERVICE_LIFECYCLE=1` enables `tests/service-lifecycle.native.test.ts` on a Linux host
+with a working systemd user manager. It checks the actual service/shell/Bun/Docker chain at
+readiness and during launch. Neither command launches agents, tickets or oracle scoring.
+CI runs the Docker fixtures; the systemd cases require the benchmark host.
+
+SIGKILL of the supervisor or an unavailable Docker daemon can still prevent cleanup.
+Those paths do not establish container absence; preserve diagnostics and inspect the
+specific owned container before any replacement run. The existing startup reaper is a
+last-resort hygiene mechanism, not proof of successful cancellation.
