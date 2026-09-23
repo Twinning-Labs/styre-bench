@@ -71,7 +71,8 @@ const SummarySchema = z.object({
   type: z.literal("summary"),
   outcome: z.string().min(1),
   reason: z.string().optional(),
-  // Optional: older styre builds omit it. `merge` + needs_you marks an undelivered PR.
+  // Optional so a summary without it still parses. `merge` + needs_you (and no PR found by the
+  // forge lookup) marks an undelivered PR.
   stage: z.string().optional(),
   status: z.string(),
   ticks: z.number().int().nonnegative(),
@@ -197,11 +198,15 @@ function deriveTaxonomy(
   outcome: string,
   reason: string | undefined,
   stage: string | undefined,
+  prOpened: boolean | null,
 ): string | undefined {
   if (outcome === "paused" && reason === "budget") return "parked";
-  // Styre reaches `merge` only after review passed, and pauses there only when the PR it built was
-  // not delivered (forge rejection or exhausted retries): finished work, failed delivery.
-  if (outcome === "paused" && reason === "needs_you" && stage === "merge") return "pr-undelivered";
+  // Styre reaches `merge` only after review passed. Pausing there normally means the PR it built
+  // was not delivered (forge rejection, exhausted retries, a blocked push). But a failed tracker
+  // update escalates too and can pause a run whose PR WAS delivered, so the forge lookup decides:
+  // a PR it found is never "undelivered". A failed lookup (null) defers to Styre's own pause.
+  if (outcome === "paused" && reason === "needs_you" && stage === "merge" && prOpened !== true)
+    return "pr-undelivered";
   if (outcome === "paused" && reason === "needs_you") return "loop-exhausted";
   if (outcome === "abandoned") return "loop-exhausted";
   if (outcome === "pr-ready" || outcome === "done") return undefined;
@@ -256,7 +261,7 @@ export function collect(
     return result;
   }
 
-  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, summary.stage);
+  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, summary.stage, ctx.pr_opened);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
   result.ticks = summary.ticks;

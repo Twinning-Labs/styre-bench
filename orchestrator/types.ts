@@ -141,7 +141,8 @@ export interface TaskRecord {
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "containment-uninformative" | "web-tool-used" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "transcript-unstructured-scan" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran. Issue/PR numbers the HARNESS supplied (via `instance_id` or the problem statement, which for MSB is the upstream PR body) are excused — repeating an identifier you were handed is not evidence of looking one up. NOTE: "containment-uninformative" and "transcript-unstructured-scan" report that a signal could not be assessed; like "transcript-unavailable"/"similarity-unavailable" they never set `suspected` on their own
   /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
    *  measurement contracts for the canonical known values: "resolved" |
-   *  "opened-but-unresolved" | "loop-exhausted" | "probe" | "parked" | "infra" |
+   *  "opened-but-unresolved" | "unresolved-pr-unconfirmed" | "pr-undelivered" |
+   *  "loop-exhausted" | "probe" | "parked" | "infra" |
    *  "dropped-gold-unresolved" | "dropped-base-passes" | "dropped-flaky" | "unscored"
    *  (SMOKE=2 Option-B oracle-bypass — a successful bypass run with no oracle verdict;
    *  `resolved` is `null` on these records).

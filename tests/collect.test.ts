@@ -93,6 +93,14 @@ describe("collect: summary parsing", () => {
     expect(rec.pr_self_reported).toBe(false);
   });
 
+  // A failed tracker update also escalates, and can pause a run at merge after its PR WAS
+  // delivered. The forge lookup is the ground truth: a found PR is never "undelivered".
+  test("paused needs_you at stage merge with a PR the forge found stays loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "merge" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: true });
+    expect(rec.taxonomy).toBe("loop-exhausted");
+  });
+
   test("paused needs_you before the merge stage stays loop-exhausted", () => {
     const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "review" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });

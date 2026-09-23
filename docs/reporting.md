@@ -43,8 +43,10 @@ a valid earlier summary cannot replace it. A missing summary yields an explicit 
 A run's outcome label never claims a PR the forge did not confirm. `opened-but-unresolved`
 requires the PR lookup to have found one (`pr_opened=true`); an unresolved candidate without that
 confirmation is `unresolved-pr-unconfirmed`. A Styre run that paused `needs_you` at stage `merge`
-finished its work and failed to deliver the PR (for example GitHub rejected the PR base), so it is
-`pr-undelivered`, not `loop-exhausted`.
+while the PR lookup found no PR finished its work and failed to deliver the PR (for example GitHub
+rejected the PR base), so it is `pr-undelivered`, not `loop-exhausted`. When the lookup found a PR
+the pause had another cause (a failed tracker update also escalates), and the label stays
+`loop-exhausted`; when the lookup failed, the label relies on Styre's own pause.
 
 New unmeasured records use `resolved=null`, `score_attempted=false`. Historical records without
 submission metadata retain boolean verdicts only for the old scored terminal taxonomies
