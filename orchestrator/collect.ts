@@ -242,7 +242,9 @@ function deriveTaxonomy(
 export function collect(
   ndjson: string,
   prDiff: string,
-  profile: ProbeProfile,
+  /** `null` when profile.json could not be read under this rig's contract: the descriptive
+   *  test configuration is then recorded as `unreadable`, never guessed. */
+  profile: ProbeProfile | null,
   ctx: CollectCtx,
 ): Partial<TaskRecord> {
   const summary = parseLastSummary(ndjson);
@@ -254,7 +256,9 @@ export function collect(
   const result: Partial<TaskRecord> = {
     self_authored_test,
     self_test_passed,
-    test_configuration: testConfiguration(parseProbeProfile(profile)),
+    test_configuration: profile
+      ? testConfiguration(parseProbeProfile(profile))
+      : { status: "unreadable", components: [] },
   };
 
   if (!summary) {

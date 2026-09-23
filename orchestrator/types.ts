@@ -137,7 +137,7 @@ export interface TaskRecord {
   /** Preserved original assessment when an offline transcript scan supersedes its interpretation. */
   prior_leak_assessment?: { suspected: boolean | null; reasons: string[] };
   reporting_notes?: string[];
-  test_configuration?: { status: "declared" | "none"; components: string[] };
+  test_configuration?: { status: "declared" | "none" | "unreadable"; components: string[] };
   leak_reasons: string[]; // from detect_leak; canonical bare values (exact-match, never a formatted/suffixed variant): "high-similarity" | "high-containment" | "containment-uninformative" | "web-tool-used" | "pr-url-in-transcript" | "url-in-transcript" | "transcript-unavailable" | "transcript-unstructured-scan" | "similarity-unavailable" — Task 10 validity panel needs this to state whether the URL-scan ran. Issue/PR numbers the HARNESS supplied (via `instance_id` or the problem statement, which for MSB is the upstream PR body) are excused — repeating an identifier you were handed is not evidence of looking one up. NOTE: "containment-uninformative" and "transcript-unstructured-scan" report that a signal could not be assessed; like "transcript-unavailable"/"similarity-unavailable" they never set `suspected` on their own
   /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
    *  measurement contracts for the canonical known values: "resolved" |

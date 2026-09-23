@@ -275,9 +275,9 @@ const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
 
 function gridCell(cellAll: TaskRecord[]): string {
   const denom = cellAll.filter(inResolveDenom);
-  const hasProbe = cellAll.some((r) => r.taxonomy === "probe");
+  const flagged = cellAll.some((r) => r.taxonomy === "probe" || r.taxonomy === "collect-error");
   const base = denom.length === 0 ? "-" : `${resolvedCount(denom)}/${denom.length}`;
-  return hasProbe ? `${base} ⚠` : base;
+  return flagged ? `${base} ⚠` : base;
 }
 
 function renderGrid(records: TaskRecord[]): string {
@@ -305,7 +305,7 @@ function renderGrid(records: TaskRecord[]): string {
   lines.push(`| by-diff | ${byDiff[0]} | ${byDiff[1]} | ${byDiff[2]} | |`);
   lines.push("");
   lines.push(
-    "⚠ marks a cell containing a `probe` finding (an explicitly recorded `styre setup` failure) — read as detector-coverage, not loop performance; `probe` instances are excluded from the N/total shown.",
+    "⚠ marks a cell containing a `probe` finding (an explicitly recorded `styre setup` failure — read as detector-coverage, not loop performance) or a `collect-error` (artifacts the rig could not read under its contract; evidence kept for offline scoring); both are excluded from the N/total shown.",
   );
   lines.push("");
 

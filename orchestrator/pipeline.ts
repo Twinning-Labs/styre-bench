@@ -217,6 +217,9 @@ export interface CollectStageResult {
   /** Paths ADDED by `diff` that match the per-language test-path matcher (`addedPaths` +
    *  `isTestPath`, Task 7) — the set `run_self_test` (Task 3) runs. */
   addedTestPaths: string[];
+  /** `false` when collection failed before establishing a candidate diff: `diff` is then a
+   *  placeholder, not an observed empty diff, and must never be persisted or scored as one. */
+  diffCollected?: boolean;
   /** The `claude` wrapper's teed stream-json transcript (Task 6) — leak-detect's URL-scan
    *  source. Empty string if unavailable (not `null`) — matches `detect_leak`'s own
    *  "transcript-unavailable" handling of falsy input. */
@@ -345,11 +348,15 @@ export async function defaultCollectStage(
     readFile(result.profilePath, "utf8"),
     readFile(result.transcriptPath, "utf8").catch(() => ""),
   ]);
-  let profile: ProbeProfile;
+  // profile.json feeds only the descriptive test_configuration, never the scoring input. A shape
+  // this rig cannot read is recorded as unreadable and logged; it must not cost the verdict.
+  let profile: ProbeProfile | null = null;
   try {
     profile = parseProbeProfile(JSON.parse(profileText));
   } catch (err) {
-    throw new CollectContractError(`profile.json: ${err instanceof Error ? err.message : err}`);
+    console.error(
+      `[collect] ${inst.id}: profile.json unreadable under this rig's contract; test configuration recorded as unreadable: ${err instanceof Error ? err.message : err}`,
+    );
   }
 
   // The forge is consulted ONLY for `pr_opened`. Its diff is deliberately NOT fetched: the
@@ -373,14 +380,24 @@ export async function defaultCollectStage(
   const rawDiff = await readFile(result.rawCandidateDiffPath, "utf8");
 
   const ctx: CollectCtx = { language: inst.language, pr_opened };
+  const strippedDiff = extractStrippedDiff(rawDiff);
+  const addedTestPaths = addedPaths(strippedDiff).filter((p) => isTestPath(p, inst.language));
   let record: Partial<TaskRecord>;
   try {
     record = collectPure(ndjson, rawDiff, profile, ctx);
   } catch (err) {
-    throw new CollectContractError(`run.ndjson: ${err instanceof Error ? err.message : err}`);
+    const message = `run.ndjson: ${err instanceof Error ? err.message : err}`;
+    // A killed container (exit >= 128, e.g. 137 SIGKILL) can leave a half-written stream: that
+    // is not proof of a contract mismatch, so it stays retryable infra.
+    if (result.exitCode === null || result.exitCode >= 128) throw new Error(message);
+    throw new CollectContractError(message, {
+      diff: strippedDiff,
+      addedTestPaths,
+      transcript,
+      pr_opened,
+      pr_lookup_error,
+    });
   }
-  const strippedDiff = extractStrippedDiff(rawDiff);
-  const addedTestPaths = addedPaths(strippedDiff).filter((p) => isTestPath(p, inst.language));
 
   // ENG-390: styre's summary reports null cost/tokens for every dispatch, because the
   // container's `claude` wrapper hands it plain text (see usage.ts). The real numbers are in
@@ -586,17 +603,29 @@ function ticketFixOverlapOf(inst: Instance): TicketFixOverlap | null {
   }
 }
 
-/** Thrown by collection when an artifact the container DID produce cannot be read under the
- *  contract this rig expects (a profile or NDJSON shape it does not understand). Deterministic:
- *  re-running the paid attempt reproduces it, so it is never an infra retry. */
+/** Thrown by collection when run.ndjson, which the container DID produce and which decides the
+ *  record's outcome, cannot be read under the contract this rig expects, from a container that
+ *  exited normally. Deterministic: re-running the paid attempt reproduces it, so it is never an
+ *  infra retry. `partial` carries what collection could still establish (the stripped candidate
+ *  diff and the PR lookup), so the evidence is kept rather than discarded. */
 export class CollectContractError extends Error {
   override name = "CollectContractError";
+  constructor(
+    message: string,
+    readonly partial?: Pick<
+      CollectStageResult,
+      "diff" | "addedTestPaths" | "transcript" | "pr_opened" | "pr_lookup_error"
+    >,
+  ) {
+    super(message);
+  }
 }
 
 /** A collect failure AFTER the container ran. The container spent real money, so its measured
  *  transcript cost is charged (the per-task cap must see it) and its evidence dir is kept. A
- *  `CollectContractError` stops as `collect-error`; anything else (e.g. a missing artifact from a
- *  killed container) stays `infra`, retried only within the cap. Both are logged: never silent. */
+ *  `CollectContractError` stops as `collect-error` with its partial evidence; anything else (e.g.
+ *  a missing artifact from a killed container) stays `infra`, retried only within the cap, with
+ *  no diff collected. Both are logged: never silent. */
 async function collectFailureStage(
   inst: Instance,
   err: unknown,
@@ -610,18 +639,16 @@ async function collectFailureStage(
     `[collect] ${inst.id}: ${contract ? "artifact contract error (not retried)" : "collect failed"}: ${message} — evidence kept at ${result.outDir}`,
   );
   const stage = infraStageFromError(err, "collect");
-  return {
-    ...stage,
-    record: {
-      ...stage.record,
-      taxonomy: contract ? "collect-error" : "infra",
-      cost_usd_measured: usage.costUsd,
-      tokens_in: usage.tokensIn,
-      tokens_out: usage.tokensOut,
-      evidence_dir: result.outDir,
-    },
-    transcript,
+  const record = {
+    ...stage.record,
+    taxonomy: contract ? "collect-error" : "infra",
+    cost_usd_measured: usage.costUsd,
+    tokens_in: usage.tokensIn,
+    tokens_out: usage.tokensOut,
+    evidence_dir: result.outDir,
   };
+  if (contract && err.partial) return { ...stage, ...err.partial, record, diffCollected: true };
+  return { ...stage, record, transcript };
 }
 
 function infraStageFromError(err: unknown, where: string): CollectStageResult {
@@ -629,6 +656,7 @@ function infraStageFromError(err: unknown, where: string): CollectStageResult {
   return {
     record: { taxonomy: "infra", status: `pipeline-error(${where}): ${message}` },
     diff: "",
+    diffCollected: false,
     addedTestPaths: [],
     transcript: "",
     // The container may well have run and opened a PR before collect threw. We did not get
@@ -899,7 +927,8 @@ export async function runInstance(
     // Capture the diff BEFORE the oracle runs and before cleanup deletes the scratch repo.
     // The diff used to live only in the throwaway PR, so the success path destroyed the one
     // artifact the oracle needs; capturing it here is what makes a run scoreable afterwards.
-    await persistCandidateDiff(stage.record.evidence_dir, stage.diff);
+    if (stage.diffCollected !== false)
+      await persistCandidateDiff(stage.record.evidence_dir, stage.diff);
     // Neither the throwaway repo name nor the ticket title names the instance any more (both
     // used to, and both were readable from inside the container). This is the host-side record
     // that ties an orphaned `bench-<uuid>` repo back to its run.
