@@ -54,6 +54,24 @@ jobs:
       # fails here rather than on someone's next clone.
       - run: bun test
 
+  native-container-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: cp config/bench.config.example.ts config/bench.config.ts
+      - run: bun install --frozen-lockfile
+      - name: Build harmless display fixture
+        run: |
+          mkdir -p /tmp/styre-lifecycle-image
+          printf '%s\n' 'FROM debian:bookworm-slim' 'RUN apt-get update && apt-get install -y --no-install-recommends bash xvfb xauth && rm -rf /var/lib/apt/lists/*' > /tmp/styre-lifecycle-image/Dockerfile
+          docker build -t styre-lifecycle-fixture /tmp/styre-lifecycle-image
+      - name: Verify production container lifecycle without credentials or agent calls
+        run: RUN_CONTAINER_LIFECYCLE=1 bun test tests/container-lifecycle.native.test.ts
+
   python:
     runs-on: ubuntu-latest
     timeout-minutes: 20

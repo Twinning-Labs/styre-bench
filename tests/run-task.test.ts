@@ -413,8 +413,8 @@ describe("buildDockerArgs (pure)", () => {
     });
     expect(args).toContain("--platform");
     expect(args[args.indexOf("--platform") + 1]).toBe("linux/amd64");
-    // early, right after run/--rm
-    expect(args.slice(0, 4)).toEqual(["run", "--rm", "--platform", "linux/amd64"]);
+    // init is part of the production launch, not a native-fixture-only flag
+    expect(args.slice(0, 5)).toEqual(["run", "--rm", "--init", "--platform", "linux/amd64"]);
   });
 
   test("honors an explicit per-instance platform (SWE-bench arm64 -> linux/arm64, native, no emulation)", () => {
@@ -427,7 +427,7 @@ describe("buildDockerArgs (pure)", () => {
       creds,
     });
     expect(args[args.indexOf("--platform") + 1]).toBe("linux/arm64");
-    expect(args.slice(0, 4)).toEqual(["run", "--rm", "--platform", "linux/arm64"]);
+    expect(args.slice(0, 5)).toEqual(["run", "--rm", "--init", "--platform", "linux/arm64"]);
   });
 
   test("mounts exactly the binary (ro), the outDir (rw), and the entrypoint script (ro)", () => {
