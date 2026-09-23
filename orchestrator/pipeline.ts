@@ -219,7 +219,7 @@ export interface CollectStageResult {
   addedTestPaths: string[];
   /** `false` when collection failed before establishing a candidate diff: `diff` is then a
    *  placeholder, not an observed empty diff, and must never be persisted or scored as one. */
-  diffCollected?: boolean;
+  diffCollected: boolean;
   /** The `claude` wrapper's teed stream-json transcript (Task 6) — leak-detect's URL-scan
    *  source. Empty string if unavailable (not `null`) — matches `detect_leak`'s own
    *  "transcript-unavailable" handling of falsy input. */
@@ -333,6 +333,8 @@ export async function defaultCollectStage(
         evidence_dir: result.outDir,
       },
       diff: "",
+      // No candidate was produced: `diff` is a placeholder, never an observed empty diff.
+      diffCollected: false,
       addedTestPaths: [],
       transcript,
       // styre setup failed, so `styre run` never started: there was no PR to open and no
@@ -414,6 +416,7 @@ export async function defaultCollectStage(
       evidence_dir: result.outDir,
     },
     diff: strippedDiff,
+    diffCollected: true,
     addedTestPaths,
     transcript,
     pr_opened,

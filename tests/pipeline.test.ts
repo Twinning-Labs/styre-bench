@@ -123,6 +123,7 @@ function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): Co
       ...overrides,
     },
     diff: "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-1\n+2\n",
+    diffCollected: true,
     addedTestPaths: ["tests/y.test.ts"],
     transcript: "",
     pr_opened: true,
@@ -135,6 +136,7 @@ function infraStage(): CollectStageResult {
   return {
     record: { taxonomy: "infra", cost_usd_measured: 0.2 },
     diff: "",
+    diffCollected: false,
     addedTestPaths: [],
     transcript: "",
     pr_opened: null,
@@ -152,6 +154,7 @@ function probeStage(): CollectStageResult {
       self_test_passed: null,
     },
     diff: "",
+    diffCollected: false,
     addedTestPaths: [],
     transcript: "",
     pr_opened: false,
@@ -1565,6 +1568,19 @@ describe("defaultCollectStage: artifacts the container produced", () => {
     expect(calls.score).toBe(0);
     expect(rec.cost_usd_measured).toBe(7);
     expect(readFileSync(join(res.outDir, "candidate.diff"), "utf8")).toBe(DIFF);
+  });
+
+  // Review of a54692d (m-a): the setup-failure stage set evidence_dir with a placeholder "" diff,
+  // so a 0-byte candidate.diff was written for a run that never produced a candidate.
+  test("a setup failure (probe) writes no candidate.diff", async () => {
+    const res = { ...evidence({ diff: null }), exitCode: SETUP_FAILED_EXIT };
+    const { deps } = trackedDeps({
+      run: async () => res,
+      collect: (inst, s, r) => defaultCollectStage(inst, s, r, null),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.taxonomy).toBe("probe");
+    expect(existsSync(join(res.outDir, "candidate.diff"))).toBe(false);
   });
 
   test("a failed collect that produced no diff never writes an empty candidate.diff", async () => {

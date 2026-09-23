@@ -46,15 +46,18 @@ Collection is judged on the artifacts the container produced.
   consumes (component name, role, launcher) and treats any non-string test command as "no
   declared launcher". A profile it still cannot read (for example a role Styre adds later) is
   logged and recorded as `test_configuration.status = "unreadable"`; the candidate is collected and
-  scored as usual.
+  scored as usual. Offline reprocessing applies the same rule and notes the unreadable profile in
+  the correction record instead of aborting the batch.
 - `run.ndjson` decides the record's outcome. If its final summary breaks this rig's contract and
   the container exited normally, the record is `collect-error`: logged, never retried (re-running
   the paid attempt reproduces it), not scored, and flagged in the grid like `probe`. The stripped
   candidate diff is still written to `candidate.diff` and the PR lookup kept, so the run can be
   scored offline once the reader is fixed. From a killed container (exit >= 128) the same breakage
   may be a half-written stream, so it stays `infra`.
-- A missing artifact stays `infra` and may be retried; no `candidate.diff` is written for it, so an
-  uncollected attempt is never mistaken for an observed empty diff.
+- A missing artifact stays `infra` and may be retried. No `candidate.diff` is written for any
+  attempt that produced no candidate (infra, or a `styre setup` failure recorded as `probe`), so an
+  uncollected attempt is never mistaken for an observed empty diff; every collection stage must
+  declare whether its diff was collected.
 - Any attempt whose container ran is charged its measured transcript cost, so the per-task cost
   cap sees it.
 
