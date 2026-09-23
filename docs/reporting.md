@@ -40,6 +40,12 @@ Missing required NDJSON, profile, or candidate-diff artifacts fail collection. A
 diff is a valid observation and differs from a missing diff. A malformed final summary fails;
 a valid earlier summary cannot replace it. A missing summary yields an explicit infra outcome.
 
+A run's outcome label never claims a PR the forge did not confirm. `opened-but-unresolved`
+requires the PR lookup to have found one (`pr_opened=true`); an unresolved candidate without that
+confirmation is `unresolved-pr-unconfirmed`. A Styre run that paused `needs_you` at stage `merge`
+finished its work and failed to deliver the PR (for example GitHub rejected the PR base), so it is
+`pr-undelivered`, not `loop-exhausted`.
+
 New unmeasured records use `resolved=null`, `score_attempted=false`. Historical records without
 submission metadata retain boolean verdicts only for the old scored terminal taxonomies
 (`resolved`, `opened-but-unresolved`, `loop-exhausted`). Other legacy defaults become null with

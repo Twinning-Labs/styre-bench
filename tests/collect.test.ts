@@ -78,10 +78,25 @@ describe("collect: summary parsing", () => {
   });
 
   test("outcome:paused reason:needs_you -> taxonomy loop-exhausted, parked===true", () => {
-    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you" });
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "implement" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
     expect(rec.taxonomy).toBe("loop-exhausted");
     expect(rec.parked).toBe(true);
+  });
+
+  // Styre pauses at the merge gate when the PR it built was not delivered (e.g. GitHub rejected
+  // it as `base invalid`): the work finished, delivery did not. Not a loop that ran out.
+  test("paused needs_you at stage merge -> taxonomy pr-undelivered", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "merge" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("pr-undelivered");
+    expect(rec.pr_self_reported).toBe(false);
+  });
+
+  test("paused needs_you before the merge stage stays loop-exhausted", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "review" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
+    expect(rec.taxonomy).toBe("loop-exhausted");
   });
 
   test("outcome:paused reason:budget -> taxonomy parked, parked===true", () => {
@@ -407,7 +422,7 @@ describe("collect: no-summary / malformed-summary -> taxonomy infra", () => {
 
 describe("collect: workflow outcome is independent of test declarations", () => {
   test("unrunnable profile + paused/needs_you does not imply setup failure, not loop-exhausted", () => {
-    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you" });
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "implement" });
     const rec = collect(ndjson, PR_DIFF, UNAVAILABLE_PROFILE, {
       language: "ts",
       pr_opened: false,
@@ -515,10 +530,15 @@ describe("test declaration and terminal-summary contracts", () => {
         commands: { test: "runner" },
       })),
     };
-    const rec = collect(summaryLine({ outcome: "paused", reason: "needs_you" }), "", profile, {
-      language: "ts",
-      pr_opened: false,
-    });
+    const rec = collect(
+      summaryLine({ outcome: "paused", reason: "needs_you", stage: "implement" }),
+      "",
+      profile,
+      {
+        language: "ts",
+        pr_opened: false,
+      },
+    );
     expect(rec.test_configuration).toEqual({ status: "none", components: [] });
     expect(rec.taxonomy).toBe("loop-exhausted");
   });

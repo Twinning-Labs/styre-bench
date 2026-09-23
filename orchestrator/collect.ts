@@ -71,6 +71,8 @@ const SummarySchema = z.object({
   type: z.literal("summary"),
   outcome: z.string().min(1),
   reason: z.string().optional(),
+  // Optional: older styre builds omit it. `merge` + needs_you marks an undelivered PR.
+  stage: z.string().optional(),
   status: z.string(),
   ticks: z.number().int().nonnegative(),
   cycle_count: z.number().int().nonnegative(),
@@ -191,8 +193,15 @@ export function isTestPath(path: string, lang: TestLang): boolean {
 
 /** Workflow outcome is independent of command declarations. Only SETUP_FAILED_EXIT in
  * defaultCollectStage establishes a setup failure (`probe`); profile contents cannot. */
-function deriveTaxonomy(outcome: string, reason: string | undefined): string | undefined {
+function deriveTaxonomy(
+  outcome: string,
+  reason: string | undefined,
+  stage: string | undefined,
+): string | undefined {
   if (outcome === "paused" && reason === "budget") return "parked";
+  // Styre reaches `merge` only after review passed, and pauses there only when the PR it built was
+  // not delivered (forge rejection or exhausted retries): finished work, failed delivery.
+  if (outcome === "paused" && reason === "needs_you" && stage === "merge") return "pr-undelivered";
   if (outcome === "paused" && reason === "needs_you") return "loop-exhausted";
   if (outcome === "abandoned") return "loop-exhausted";
   if (outcome === "pr-ready" || outcome === "done") return undefined;
@@ -247,7 +256,7 @@ export function collect(
     return result;
   }
 
-  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason);
+  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, summary.stage);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
   result.ticks = summary.ticks;

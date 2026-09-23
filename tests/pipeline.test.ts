@@ -318,6 +318,21 @@ describe("runInstance: whole-instance infra-retry", () => {
     expect(calls.cleanup).toBe(2);
   });
 
+  // The 20 Sept Sphinx report said `opened-but-unresolved` with `pr_opened: false`: the label
+  // fell back on the oracle alone. Only the forge lookup can say a PR was opened.
+  test.each([false, null])(
+    "an unresolved candidate without a confirmed PR (pr_opened %p) is not labelled opened",
+    async (prOpened) => {
+      const { deps } = trackedDeps({
+        collect: async () => ({ ...pendingStage(), pr_opened: prOpened }),
+        score: async () => SCORE_UNRESOLVED,
+      });
+      const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+      expect(rec.resolved).toBe(false);
+      expect(rec.taxonomy).toBe("unresolved-pr-unconfirmed");
+    },
+  );
+
   test("a QUALITY outcome (opened-but-unresolved) is NOT retried", async () => {
     const { deps, calls } = trackedDeps({ score: async () => SCORE_UNRESOLVED });
     const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });

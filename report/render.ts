@@ -459,6 +459,8 @@ function renderJudgmentQuality(records: TaskRecord[]): string {
 const TAXONOMY_ORDER = [
   "resolved",
   "opened-but-unresolved",
+  "unresolved-pr-unconfirmed",
+  "pr-undelivered",
   "loop-exhausted",
   "probe",
   "parked",
