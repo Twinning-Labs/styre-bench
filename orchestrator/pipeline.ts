@@ -981,7 +981,15 @@ export async function runInstance(
   }
 
   const resolved = scoreResult.resolved;
-  const taxonomy = stage.record.taxonomy ?? (resolved ? "resolved" : "opened-but-unresolved");
+  // "opened" is a forge fact: only the PR lookup (`pr_opened === true`) may claim it. The oracle
+  // verdict alone said `opened-but-unresolved` for the 20 Sept Sphinx run, which opened no PR.
+  const taxonomy =
+    stage.record.taxonomy ??
+    (resolved
+      ? "resolved"
+      : stage.pr_opened === true
+        ? "opened-but-unresolved"
+        : "unresolved-pr-unconfirmed");
 
   let selfTestPassed: boolean | null = withCollect.self_test_passed ?? null;
   if (stage.addedTestPaths.length > 0) {

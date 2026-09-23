@@ -71,6 +71,9 @@ const SummarySchema = z.object({
   type: z.literal("summary"),
   outcome: z.string().min(1),
   reason: z.string().optional(),
+  // Optional so a summary without it still parses. `merge` + needs_you (and no PR found by the
+  // forge lookup) marks an undelivered PR.
+  stage: z.string().optional(),
   status: z.string(),
   ticks: z.number().int().nonnegative(),
   cycle_count: z.number().int().nonnegative(),
@@ -191,8 +194,19 @@ export function isTestPath(path: string, lang: TestLang): boolean {
 
 /** Workflow outcome is independent of command declarations. Only SETUP_FAILED_EXIT in
  * defaultCollectStage establishes a setup failure (`probe`); profile contents cannot. */
-function deriveTaxonomy(outcome: string, reason: string | undefined): string | undefined {
+function deriveTaxonomy(
+  outcome: string,
+  reason: string | undefined,
+  stage: string | undefined,
+  prOpened: boolean | null,
+): string | undefined {
   if (outcome === "paused" && reason === "budget") return "parked";
+  // Styre reaches `merge` only after review passed. Pausing there normally means the PR it built
+  // was not delivered (forge rejection, exhausted retries, a blocked push). But a failed tracker
+  // update escalates too and can pause a run whose PR WAS delivered, so the forge lookup decides:
+  // a PR it found is never "undelivered". A failed lookup (null) defers to Styre's own pause.
+  if (outcome === "paused" && reason === "needs_you" && stage === "merge" && prOpened !== true)
+    return "pr-undelivered";
   if (outcome === "paused" && reason === "needs_you") return "loop-exhausted";
   if (outcome === "abandoned") return "loop-exhausted";
   if (outcome === "pr-ready" || outcome === "done") return undefined;
@@ -247,7 +261,7 @@ export function collect(
     return result;
   }
 
-  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason);
+  const taxonomy = deriveTaxonomy(summary.outcome, summary.reason, summary.stage, ctx.pr_opened);
   if (taxonomy !== undefined) result.taxonomy = taxonomy;
 
   result.ticks = summary.ticks;
