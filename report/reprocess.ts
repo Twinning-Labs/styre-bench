@@ -56,7 +56,17 @@ export async function reprocessRecords(p: {
       if (original.taxonomy === "probe") {
         const [ndjson, profile] = await Promise.all([read("run.ndjson"), read("profile.json")]);
         if (ndjson !== null && profile !== null) {
-          const derived = collect(ndjson, "", parseProbeProfile(JSON.parse(profile)), {
+          // The profile feeds only the descriptive test_configuration: one this rig cannot read
+          // is recorded unreadable, with a note, and never aborts the batch.
+          let parsed: ReturnType<typeof parseProbeProfile> | null = null;
+          try {
+            parsed = parseProbeProfile(JSON.parse(profile));
+          } catch (err) {
+            correction.unavailable.push(
+              `profile.json: unreadable under this rig's contract: ${String(err)}`,
+            );
+          }
+          const derived = collect(ndjson, "", parsed, {
             language: record.language,
             pr_opened: record.pr_opened,
           });

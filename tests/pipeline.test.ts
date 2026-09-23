@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  CollectContractError,
   type CollectStageResult,
   type LeakResult,
   type PipelineConfig,
@@ -119,6 +123,7 @@ function pendingStage(overrides: Partial<CollectStageResult["record"]> = {}): Co
       ...overrides,
     },
     diff: "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-1\n+2\n",
+    diffCollected: true,
     addedTestPaths: ["tests/y.test.ts"],
     transcript: "",
     pr_opened: true,
@@ -131,6 +136,7 @@ function infraStage(): CollectStageResult {
   return {
     record: { taxonomy: "infra", cost_usd_measured: 0.2 },
     diff: "",
+    diffCollected: false,
     addedTestPaths: [],
     transcript: "",
     pr_opened: null,
@@ -148,6 +154,7 @@ function probeStage(): CollectStageResult {
       self_test_passed: null,
     },
     diff: "",
+    diffCollected: false,
     addedTestPaths: [],
     transcript: "",
     pr_opened: false,
@@ -1407,5 +1414,185 @@ describe("measurement boundary failures", () => {
     expect(rec.suspected_leak).toBeNull();
     expect(rec.leak_check?.status).toBe("error");
     expect(rec.leak_reasons).toEqual(["detector-failed"]);
+  });
+});
+
+// A collector that cannot read artifacts the container DID produce is deterministic: re-running a
+// paid attempt reproduces it. The 23 Sept Sphinx run re-ran a finished, pr-ready attempt twice
+// because a profile-contract error was labelled infra, and the cost cap never engaged because a
+// failed collect charged nothing. Contract errors stop loudly with the evidence kept; any attempt
+// whose container ran is charged its measured transcript cost.
+describe("runInstance: collect failures after the container ran", () => {
+  function evidenceWithCost(usd: number): RunStyreResult {
+    const dir = mkdtempSync(join(tmpdir(), "bench-collect-fail-"));
+    writeFileSync(
+      join(dir, "transcript.jsonl"),
+      `${JSON.stringify({ type: "result", total_cost_usd: usd })}\n`,
+    );
+    return { ...RUN_RESULT, outDir: dir, transcriptPath: join(dir, "transcript.jsonl") };
+  }
+
+  test("an artifact contract error is not retried, keeps its evidence and measured cost, and says why", async () => {
+    const result = evidenceWithCost(12.5);
+    const { deps, calls } = trackedDeps({
+      run: async () => result,
+      collect: async () => {
+        throw new CollectContractError(
+          "profile.json: components[3].commands.test: unexpected shape",
+        );
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(calls.run).toBe(1);
+    expect(rec.taxonomy).toBe("collect-error");
+    expect(rec.evidence_dir).toBe(result.outDir);
+    expect(rec.cost_usd_measured).toBe(12.5);
+    expect(rec.status).toContain("components[3].commands.test");
+    expect(rec.resolved).toBeNull();
+    expect(rec.score_attempted).toBe(false);
+  });
+
+  test("a transient collect failure is retried only within the cost cap, charged by its transcript", async () => {
+    const result = evidenceWithCost(16);
+    const { deps, calls } = trackedDeps({
+      run: async () => result,
+      collect: async () => {
+        throw new Error("ENOENT: run.ndjson");
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg({ perTaskCostCapUsd: 15 }), {
+      deps,
+    });
+    expect(calls.run).toBe(1); // $16 measured already exceeds the $15 cap: no second paid attempt
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.cost_usd_measured).toBe(16);
+  });
+});
+
+// Through the REAL defaultCollectStage (review of 5891049: mocked-collect tests could not see a
+// contract error re-labelled infra). Artifacts are written to disk exactly as the container does.
+describe("defaultCollectStage: artifacts the container produced", () => {
+  const seed: RunSeed = {
+    repoUrl: "https://example.invalid/x.git",
+    defaultBranch: "main",
+    ident: "BENCH-1",
+  };
+  const DIFF =
+    "diff --git a/sphinx/x.py b/sphinx/x.py\n--- a/sphinx/x.py\n+++ b/sphinx/x.py\n@@ -1 +1 @@\n-a\n+b\n";
+  const summary = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      schema_version: 2,
+      type: "summary",
+      outcome: "pr-ready",
+      stage: "merge",
+      status: "waiting",
+      ticks: 5,
+      cycle_count: 0,
+      escalation_count: 0,
+      escalation_reasons: [],
+      ...over,
+    });
+  function evidence(
+    opts: {
+      profile?: unknown;
+      ndjson?: string;
+      exitCode?: number;
+      costUsd?: number;
+      diff?: string | null;
+    } = {},
+  ): RunStyreResult {
+    const dir = mkdtempSync(join(tmpdir(), "bench-collect-real-"));
+    writeFileSync(
+      join(dir, "profile.json"),
+      JSON.stringify(
+        opts.profile ?? {
+          components: [
+            { name: "python", role: "primary", commands: { test: "python3 -m pytest" } },
+          ],
+        },
+      ),
+    );
+    writeFileSync(join(dir, "run.ndjson"), `${opts.ndjson ?? summary()}\n`);
+    if (opts.diff !== null) writeFileSync(join(dir, "candidate.raw.diff"), opts.diff ?? DIFF);
+    writeFileSync(
+      join(dir, "transcript.jsonl"),
+      `${JSON.stringify({ type: "result", total_cost_usd: opts.costUsd ?? 3 })}\n`,
+    );
+    return {
+      ndjsonPath: join(dir, "run.ndjson"),
+      transcriptPath: join(dir, "transcript.jsonl"),
+      profilePath: join(dir, "profile.json"),
+      rawCandidateDiffPath: join(dir, "candidate.raw.diff"),
+      baselineShaPath: join(dir, "baseline-sha.txt"),
+      exitCode: opts.exitCode ?? 0,
+      outDir: dir,
+    };
+  }
+
+  // The profile feeds only the descriptive test_configuration. A shape this rig cannot read
+  // (here: a role Styre might add) is recorded as unreadable, loudly, and never costs the verdict.
+  test("an unreadable profile is recorded as unreadable test configuration; the candidate is still collected", async () => {
+    const res = evidence({
+      profile: { components: [{ name: "svc", role: "sidecar", commands: { test: "pytest" } }] },
+    });
+    const stage = await defaultCollectStage(makeInstance(), seed, res, null);
+    expect(stage.record.test_configuration).toEqual({ status: "unreadable", components: [] });
+    expect(stage.record.outcome).toBe("pr-ready");
+    expect(stage.diff).toBe(DIFF);
+  });
+
+  test("a final summary that breaks the NDJSON contract is a CollectContractError carrying the diff and PR lookup", async () => {
+    const res = evidence({ ndjson: summary({ ticks: "broken" }) });
+    const err = await defaultCollectStage(makeInstance(), seed, res, null).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CollectContractError);
+    expect((err as CollectContractError).partial?.diff).toBe(DIFF);
+    expect((err as CollectContractError).partial?.pr_lookup_error).toMatch(/GITHUB_TOKEN/);
+  });
+
+  test("the same breakage from a killed container is not a contract error (it may be retried)", async () => {
+    const res = evidence({ ndjson: summary({ ticks: "broken" }), exitCode: 137 });
+    const err = await defaultCollectStage(makeInstance(), seed, res, null).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(CollectContractError);
+  });
+
+  test("runInstance through the real stage: collect-error, no retry, the stripped diff persisted for offline scoring", async () => {
+    const res = evidence({ ndjson: summary({ ticks: "broken" }), costUsd: 7 });
+    const { deps, calls } = trackedDeps({
+      run: async () => res,
+      collect: (inst, s, r) => defaultCollectStage(inst, s, r, null),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.taxonomy).toBe("collect-error");
+    expect(calls.run).toBe(1);
+    expect(calls.score).toBe(0);
+    expect(rec.cost_usd_measured).toBe(7);
+    expect(readFileSync(join(res.outDir, "candidate.diff"), "utf8")).toBe(DIFF);
+  });
+
+  // Review of a54692d (m-a): the setup-failure stage set evidence_dir with a placeholder "" diff,
+  // so a 0-byte candidate.diff was written for a run that never produced a candidate.
+  test("a setup failure (probe) writes no candidate.diff", async () => {
+    const res = { ...evidence({ diff: null }), exitCode: SETUP_FAILED_EXIT };
+    const { deps } = trackedDeps({
+      run: async () => res,
+      collect: (inst, s, r) => defaultCollectStage(inst, s, r, null),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(rec.taxonomy).toBe("probe");
+    expect(existsSync(join(res.outDir, "candidate.diff"))).toBe(false);
+  });
+
+  test("a failed collect that produced no diff never writes an empty candidate.diff", async () => {
+    const res = evidence({ diff: null });
+    const { deps } = trackedDeps({
+      run: async () => res,
+      collect: (inst, s, r) => defaultCollectStage(inst, s, r, null),
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg({ perTaskCostCapUsd: 1 }), {
+      deps,
+    });
+    expect(rec.taxonomy).toBe("infra");
+    expect(existsSync(join(res.outDir, "candidate.diff"))).toBe(false);
   });
 });

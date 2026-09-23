@@ -256,6 +256,25 @@ describe("renderReport", () => {
     expect(gridSection).toContain("⚠");
   });
 
+  // A collect-error record had a candidate the rig could not read under its contract: excluded
+  // from the N/total like probe, and flagged, so a cell never silently loses a finished run.
+  test("grid flags a cell holding only a collect-error record", () => {
+    const ce = makeRecord({
+      instance: "ce-ts-hard",
+      language: "ts",
+      difficulty: "hard",
+      resolved: null,
+      score_attempted: false,
+      pr_opened: true,
+      taxonomy: "collect-error",
+    });
+    const { markdown } = renderReport([ce], META);
+    const grid = markdown.slice(markdown.indexOf("## Resolve rate — language × difficulty"));
+    const row = grid.split("\n").find((l) => l.startsWith("| ts |")) ?? "";
+    expect(row).toContain("⚠");
+    expect(grid).toContain("collect-error");
+  });
+
   test("A/B preference distribution excludes the invalid record (r4) from the denominator", () => {
     const { markdown } = renderReport(records, META);
     // ab_preference across the fixture: r1 A(styre), r2 tie, r3 B(human), r4 invalid, r5 null,

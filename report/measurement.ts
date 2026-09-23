@@ -31,7 +31,7 @@ const RecordSchema = z.object({
     .optional(),
   reporting_notes: z.array(z.string()).optional(),
   test_configuration: z
-    .object({ status: z.enum(["declared", "none"]), components: z.array(z.string()) })
+    .object({ status: z.enum(["declared", "none", "unreadable"]), components: z.array(z.string()) })
     .refine(
       (c) => (c.status === "declared") === c.components.length > 0,
       "test configuration status must match declarations",

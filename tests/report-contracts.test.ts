@@ -283,6 +283,55 @@ describe("offline correction provenance", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  // A profile this rig cannot read is descriptive data lost, not a reason to abort a batch or a
+  // report (review of a54692d, m-b / m-c).
+  test("an unreadable test configuration is a valid report record", () => {
+    const r = record({ test_configuration: { status: "unreadable", components: [] } });
+    expect(normalizeReportRecord(r).test_configuration).toEqual({
+      status: "unreadable",
+      components: [],
+    });
+  });
+
+  test("reprocessing a probe whose profile cannot be read records it unreadable instead of aborting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "report-evidence-"));
+    try {
+      await mkdir(join(root, "run-1"));
+      await writeFile(
+        join(root, "run-1/run.ndjson"),
+        JSON.stringify({
+          type: "summary",
+          outcome: "paused",
+          reason: "needs_you",
+          status: "needs_you",
+          ticks: 3,
+          cycle_count: 0,
+          escalation_count: 0,
+          escalation_reasons: [],
+        }),
+      );
+      await writeFile(
+        join(root, "run-1/profile.json"),
+        JSON.stringify({
+          components: [{ name: "svc", role: "sidecar", commands: { test: "pytest" } }],
+        }),
+      );
+      const result = await reprocessRecords({
+        records: [record({ taxonomy: "probe", resolved: false, score_attempted: undefined })],
+        evidenceRoot: root,
+        instances: [instance],
+      });
+      expect(result.records[0]?.test_configuration).toEqual({
+        status: "unreadable",
+        components: [],
+      });
+      expect(result.records[0]?.taxonomy).toBe("loop-exhausted");
+      expect(JSON.stringify(result.corrections[0])).toContain("profile.json");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("partial negative rescan preserves previous positive evidence and exposes the coverage hole", async () => {
     const root = await mkdtemp(join(tmpdir(), "report-partial-"));
     try {

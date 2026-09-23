@@ -5,16 +5,21 @@ import type { Instance, TaskRecord } from "./types";
 /** Minimal shape of styre's `profile.json` this module needs — NOT the full styre
  * `ProfileSchema` (the rig is black-box against styre: it consumes the CLI + NDJSON,
  * never imports styre source, per the design doc's "black-box styre" invariant). Mirrors
- * component roles and test declarations; declarations cannot establish execution or setup failure. */
+ * component roles and test declarations; declarations cannot establish execution or setup failure.
+ *
+ * A TOLERANT READER: it validates what `testConfiguration` consumes (role, name, the launcher)
+ * and does not interpret other command values. Styre's command value is a union that grows
+ * (`{ unresolved }` joined it in styre#143 without a schemaVersion bump); rejecting a whole
+ * profile over a value this module never reads re-ran a finished, paid Sphinx attempt twice on
+ * 23 Sept. A non-string `commands.test` is simply "no declared launcher". An unknown `role` is
+ * data this module needs, so it still fails loudly. */
 const ProbeProfileSchema = z.object({
   components: z
     .array(
       z.object({
         name: z.string().optional(),
         role: z.enum(["primary", "fixture", "example", "vendored"]).optional(),
-        commands: z
-          .record(z.union([z.string(), z.object({ unavailable: z.literal(true) })]))
-          .optional(),
+        commands: z.record(z.unknown()).optional(),
         testAction: z
           .object({ framework: z.string().min(1), launcher: z.string().min(1) })
           .optional(),
@@ -237,7 +242,9 @@ function deriveTaxonomy(
 export function collect(
   ndjson: string,
   prDiff: string,
-  profile: ProbeProfile,
+  /** `null` when profile.json could not be read under this rig's contract: the descriptive
+   *  test configuration is then recorded as `unreadable`, never guessed. */
+  profile: ProbeProfile | null,
   ctx: CollectCtx,
 ): Partial<TaskRecord> {
   const summary = parseLastSummary(ndjson);
@@ -249,7 +256,9 @@ export function collect(
   const result: Partial<TaskRecord> = {
     self_authored_test,
     self_test_passed,
-    test_configuration: testConfiguration(parseProbeProfile(profile)),
+    test_configuration: profile
+      ? testConfiguration(parseProbeProfile(profile))
+      : { status: "unreadable", components: [] },
   };
 
   if (!summary) {

@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { collect, extractStrippedDiff, isTestPath } from "../orchestrator/collect";
+import {
+  collect,
+  extractStrippedDiff,
+  isTestPath,
+  parseProbeProfile,
+  testConfiguration,
+} from "../orchestrator/collect";
 import type { ProbeProfile } from "../orchestrator/collect";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
@@ -568,6 +574,67 @@ describe("test declaration and terminal-summary contracts", () => {
         RUNNABLE_PROFILE,
         { language: "ts", pr_opened: true },
       ),
+    ).toThrow();
+  });
+});
+
+// The 23 Sept Sphinx run: Styre's profile gives fixture components `commands.test =
+// { unresolved: "..." }` (a member of Styre's CommandValueSchema since styre#143). The collector
+// rejected the whole profile over a value it never uses, the attempt was labelled infra and the
+// instance re-run. The reader must validate what it consumes and ignore command values it does
+// not interpret; a role it cannot place is still a loud failure.
+describe("profile reader: validate what is consumed, tolerate the rest", () => {
+  const sphinxLike = {
+    schemaVersion: 4,
+    components: [
+      {
+        name: "frontend",
+        role: "primary",
+        commands: { test: "npm test", build: { unavailable: true } },
+      },
+      {
+        name: "python",
+        role: "primary",
+        commands: { test: "python3 -m tox -e py39 --current-env --no-provision" },
+      },
+      {
+        name: "tests-roots-test-setup",
+        role: "fixture",
+        commands: { test: { unresolved: "No declared Python test framework." } },
+      },
+      {
+        name: "future",
+        role: "primary",
+        commands: { test: { someFutureShape: 1 }, check: ["argv"] },
+      },
+    ],
+  };
+
+  test("Styre's current command-value shapes parse, and only primary string launchers count as declared", () => {
+    const profile = parseProbeProfile(sphinxLike);
+    expect(testConfiguration(profile)).toEqual({
+      status: "declared",
+      components: ["frontend", "python"],
+    });
+  });
+
+  // The real profile Styre 9662a21 wrote for sphinx-doc__sphinx-7590 (23 Sept, attempt 1;
+  // analyticsId replaced). Two fixture components carry `{ unresolved }` test commands.
+  test("the recorded Sphinx profile parses; its fixtures do not count as declared launchers", () => {
+    const real = JSON.parse(
+      readFileSync(join(import.meta.dir, "fixtures/styre-profile-sphinx-7590.json"), "utf8"),
+    );
+    expect(testConfiguration(parseProbeProfile(real))).toEqual({
+      status: "declared",
+      components: ["frontend", "python"],
+    });
+  });
+
+  test("an unknown component role still fails loudly", () => {
+    expect(() =>
+      parseProbeProfile({
+        components: [{ name: "x", role: "sidecar", commands: { test: "pytest" } }],
+      }),
     ).toThrow();
   });
 });
