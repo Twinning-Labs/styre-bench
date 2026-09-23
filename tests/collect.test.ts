@@ -101,6 +101,12 @@ describe("collect: summary parsing", () => {
     expect(rec.taxonomy).toBe("loop-exhausted");
   });
 
+  test("paused needs_you at stage merge with a failed PR lookup defers to Styre: pr-undelivered", () => {
+    const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "merge" });
+    const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: null });
+    expect(rec.taxonomy).toBe("pr-undelivered");
+  });
+
   test("paused needs_you before the merge stage stays loop-exhausted", () => {
     const ndjson = summaryLine({ outcome: "paused", reason: "needs_you", stage: "review" });
     const rec = collect(ndjson, PR_DIFF, RUNNABLE_PROFILE, { language: "ts", pr_opened: false });
