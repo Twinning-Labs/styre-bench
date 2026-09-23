@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 4,
+  "slug": "bench-f9abc81030ff40bcb9e43c213717b733",
+  "targetRepo": "/testbed",
+  "defaultBranch": "master",
+  "checksSystem": "none",
+  "components": [
+    {
+      "name": "frontend",
+      "kind": "node",
+      "role": "primary",
+      "label": "karma/jasmine browser test suite for sphinx static JS",
+      "paths": [
+        "src/**",
+        "static/**",
+        "package.json",
+        "sphinx/themes/basic/static/doctools.js",
+        "sphinx/themes/basic/static/underscore.js",
+        "sphinx/themes/basic/static/jquery.js",
+        "tests/js/**",
+        "karma.conf.js",
+        "package-lock.json"
+      ],
+      "commands": {
+        "test": "npm run test",
+        "build": {
+          "unavailable": true
+        },
+        "check": {
+          "unavailable": true
+        }
+      },
+      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"],
+      "prepare": "npm ci",
+      "testEnvironment": {
+        "version": 1,
+        "policy": "existing",
+        "suiteCommand": "npm run test",
+        "workspaceDir": ".",
+        "adapter": "karma",
+        "manager": "npm",
+        "configFile": "karma.conf.js",
+        "browsers": ["Firefox"]
+      }
+    },
+    {
+      "name": "python",
+      "kind": "python",
+      "role": "primary",
+      "label": "sphinx documentation generator python library and cli tool",
+      "paths": [
+        "**",
+        "sphinx/**",
+        "tests/**",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+        "babel.cfg",
+        "bindep.txt",
+        "utils/**",
+        "Makefile",
+        "MANIFEST.in"
+      ],
+      "commands": {
+        "test": "python3 -m tox -e py39 --current-env --no-provision",
+        "build": {
+          "unavailable": true
+        },
+        "check": {
+          "unavailable": true
+        }
+      },
+      "extensions": [".py", ".pyi"],
+      "prepare": "pip install tox",
+      "testEnvironment": {
+        "version": 1,
+        "policy": "existing",
+        "suiteCommand": "python3 -m tox -e py39 --current-env --no-provision",
+        "workspaceDir": ".",
+        "adapter": "python",
+        "framework": "pytest",
+        "checkLauncher": "python3 -m tox -e py39 --current-env --no-provision --"
+      },
+      "testAction": {
+        "framework": "pytest",
+        "launcher": "python3 -m tox -e py39 --current-env --no-provision --"
+      }
+    },
+    {
+      "name": "tests-roots-test-setup",
+      "kind": "python",
+      "role": "fixture",
+      "label": "stub sphinx project fixture for setup_command tests",
+      "paths": ["tests/roots/test-setup/**"],
+      "commands": {
+        "test": {
+          "unresolved": "No declared Python test framework. Select an existing runner or an explicit test-authoring workflow."
+        },
+        "build": {
+          "unavailable": true
+        },
+        "check": {
+          "unavailable": true
+        }
+      },
+      "extensions": [".py", ".pyi"],
+      "prepare": "pip install -e .",
+      "dir": "tests/roots/test-setup"
+    },
+    {
+      "name": "tests-roots-test-theming",
+      "kind": "python",
+      "role": "fixture",
+      "label": "stub sphinx project fixture for theming tests (includes a sample sphinx theme package)",
+      "paths": ["tests/roots/test-theming/**"],
+      "commands": {
+        "test": {
+          "unresolved": "No declared Python test framework. Select an existing runner or an explicit test-authoring workflow."
+        },
+        "build": {
+          "unavailable": true
+        },
+        "check": {
+          "unavailable": true
+        }
+      },
+      "extensions": [".py", ".pyi"],
+      "prepare": "pip install -e .",
+      "dir": "tests/roots/test-theming"
+    }
+  ],
+  "repoCommands": {},
+  "promptVars": {},
+  "runtimeContext": {
+    "topology": {
+      "type": "web-service",
+      "detail": "Python documentation-generator CLI tool exposing four console_scripts entry points (sphinx-build, sphinx-quickstart, sphinx-apidoc, sphinx-autogen) plus a distutils build_sphinx command via setuptools. The node package.json and karma.conf.js exist solely to run Karma/Jasmine browser-side unit tests for the bundled doctools.js static asset; there is no web service or HTTP server in the package itself."
+    },
+    "data": {
+      "presence": "absent",
+      "detail": "No database, ORM, or migration tooling. Sphinx reads reStructuredText/Markdown source files from disk and writes output (HTML, LaTeX, PDF, etc.) to a configurable output directory. Incremental build state is cached as pickled Python objects in a .doctrees/ directory alongside the build output, but no external data store or schema is involved."
+    },
+    "caching": {
+      "presence": "absent",
+      "detail": "No external caching service (Redis, Memcached, etc.). Sphinx performs incremental builds by serialising the BuildEnvironment to a pickle file (.doctrees/environment.pickle) on disk between runs; this is a local file-based optimisation internal to the tool rather than a runtime cache layer."
+    },
+    "observability": {
+      "presence": "present",
+      "detail": "Custom logging wrapper in sphinx/util/logging.py (sphinx.util.logging) wraps Python stdlib logging with colorised console output, a VERBOSE level (15) between INFO and DEBUG, verbosity-to-level mapping, per-node source-location context for warnings, and MemoryHandler-based deferred/suppressed-duplicate warning filtering. No external APM, metrics, or distributed-tracing agent is present."
+    },
+    "configSecrets": {
+      "presence": "present",
+      "detail": "Primary configuration is a user-supplied conf.py Python file in the documentation source directory, evaluated at build time. Runtime behaviour is also influenced by a small set of environment variables: SOURCE_DATE_EPOCH (reproducible build timestamps in config.py and builders/gettext.py), PYTHONWARNINGS, SPHINX_APIDOC_OPTIONS, DOCUTILSCONFIG, PAPER (paper size for LaTeX), and MAKE. No secrets-management system (Vault, AWS SSM, dotenv, etc.) is used; there are no .env files in the repository."
+    },
+    "documentation": {
+      "presence": "present",
+      "detail": "Extensive RST documentation in doc/ organised into usage guides (quickstart, configuration, builders, extensions, reStructuredText reference, theming, i18n), developer/extension API reference under doc/extdev/, developer tutorials under doc/development/tutorials/, man pages for all four CLI commands under doc/man/, and a websupport API section. The project documents itself with Sphinx; tox has a dedicated docs environment running setup.py build_sphinx, and a docslint environment runs utils/doclinter.py over CHANGES, CONTRIBUTING.rst, README.rst, and doc/."
+    },
+    "releasePackaging": {
+      "mechanism": "pypi",
+      "detail": "Packaged and distributed via PyPI using setuptools (setup.py / setup.cfg). setup.cfg defines a release alias (egg_info -Db '') to strip the dev tag and a signed upload configuration (upload --sign --identity=36580288). The package includes compiled gettext .mo catalogues and static JS/theme assets via include_package_data=True and MANIFEST.in. No semantic-release, GitHub Actions release workflow, or other release-automation tool is configured."
+    }
+  },
+  "analyticsId": "00000000-0000-4000-8000-000000000000"
+}

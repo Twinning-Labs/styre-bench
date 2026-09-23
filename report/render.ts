@@ -463,6 +463,7 @@ const TAXONOMY_ORDER = [
   "pr-undelivered",
   "loop-exhausted",
   "probe",
+  "collect-error",
   "parked",
   "infra",
   "dropped-gold-unresolved",

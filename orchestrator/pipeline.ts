@@ -345,7 +345,12 @@ export async function defaultCollectStage(
     readFile(result.profilePath, "utf8"),
     readFile(result.transcriptPath, "utf8").catch(() => ""),
   ]);
-  const profile = parseProbeProfile(JSON.parse(profileText));
+  let profile: ProbeProfile;
+  try {
+    profile = parseProbeProfile(JSON.parse(profileText));
+  } catch (err) {
+    throw new CollectContractError(`profile.json: ${err instanceof Error ? err.message : err}`);
+  }
 
   // The forge is consulted ONLY for `pr_opened`. Its diff is deliberately NOT fetched: the
   // PR's merge-base is the clean upstream base_commit, so a PR diff re-admits the image's own
@@ -368,7 +373,12 @@ export async function defaultCollectStage(
   const rawDiff = await readFile(result.rawCandidateDiffPath, "utf8");
 
   const ctx: CollectCtx = { language: inst.language, pr_opened };
-  const record = collectPure(ndjson, rawDiff, profile, ctx);
+  let record: Partial<TaskRecord>;
+  try {
+    record = collectPure(ndjson, rawDiff, profile, ctx);
+  } catch (err) {
+    throw new CollectContractError(`run.ndjson: ${err instanceof Error ? err.message : err}`);
+  }
   const strippedDiff = extractStrippedDiff(rawDiff);
   const addedTestPaths = addedPaths(strippedDiff).filter((p) => isTestPath(p, inst.language));
 
@@ -576,6 +586,44 @@ function ticketFixOverlapOf(inst: Instance): TicketFixOverlap | null {
   }
 }
 
+/** Thrown by collection when an artifact the container DID produce cannot be read under the
+ *  contract this rig expects (a profile or NDJSON shape it does not understand). Deterministic:
+ *  re-running the paid attempt reproduces it, so it is never an infra retry. */
+export class CollectContractError extends Error {
+  override name = "CollectContractError";
+}
+
+/** A collect failure AFTER the container ran. The container spent real money, so its measured
+ *  transcript cost is charged (the per-task cap must see it) and its evidence dir is kept. A
+ *  `CollectContractError` stops as `collect-error`; anything else (e.g. a missing artifact from a
+ *  killed container) stays `infra`, retried only within the cap. Both are logged: never silent. */
+async function collectFailureStage(
+  inst: Instance,
+  err: unknown,
+  result: RunStyreResult,
+): Promise<CollectStageResult> {
+  const contract = err instanceof CollectContractError;
+  const message = err instanceof Error ? err.message : String(err);
+  const transcript = await readFile(result.transcriptPath, "utf8").catch(() => "");
+  const usage = sumTranscriptUsage(transcript);
+  console.error(
+    `[collect] ${inst.id}: ${contract ? "artifact contract error (not retried)" : "collect failed"}: ${message} — evidence kept at ${result.outDir}`,
+  );
+  const stage = infraStageFromError(err, "collect");
+  return {
+    ...stage,
+    record: {
+      ...stage.record,
+      taxonomy: contract ? "collect-error" : "infra",
+      cost_usd_measured: usage.costUsd,
+      tokens_in: usage.tokensIn,
+      tokens_out: usage.tokensOut,
+      evidence_dir: result.outDir,
+    },
+    transcript,
+  };
+}
+
 function infraStageFromError(err: unknown, where: string): CollectStageResult {
   const message = err instanceof Error ? err.message : String(err);
   return {
@@ -629,12 +677,15 @@ async function attemptOnce(
 
   let attemptFailed = false;
   let stage: CollectStageResult;
+  let runResult: RunStyreResult | undefined;
   try {
-    const runResult = await deps.run(inst, seed, binaryPath, cfg);
+    runResult = await deps.run(inst, seed, binaryPath, cfg);
     stage = await deps.collect(inst, seed, runResult);
   } catch (err) {
     attemptFailed = true;
-    stage = infraStageFromError(err, "run/collect");
+    stage = runResult
+      ? await collectFailureStage(inst, err, runResult)
+      : infraStageFromError(err, "run");
   }
 
   try {
@@ -901,7 +952,10 @@ export async function runInstance(
     cost_usd_estimated: taskEstimatedUsd,
   };
 
-  if (stage.record.taxonomy === "probe") {
+  // Nothing trustworthy was collected (probe: no profile; collect-error: artifacts this rig
+  // cannot read), so there is no candidate to score here. collect-error keeps the evidence dir,
+  // including the in-container candidate.raw.diff, for offline scoring once the reader is fixed.
+  if (stage.record.taxonomy === "probe" || stage.record.taxonomy === "collect-error") {
     return withCollect;
   }
 

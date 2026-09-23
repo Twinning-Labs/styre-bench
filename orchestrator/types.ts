@@ -142,7 +142,7 @@ export interface TaskRecord {
   /** Free string, not a closed union — see `report/render.ts`'s `TAXONOMY_ORDER` /
    *  measurement contracts for the canonical known values: "resolved" |
    *  "opened-but-unresolved" | "unresolved-pr-unconfirmed" | "pr-undelivered" |
-   *  "loop-exhausted" | "probe" | "parked" | "infra" |
+   *  "loop-exhausted" | "probe" | "collect-error" | "parked" | "infra" |
    *  "dropped-gold-unresolved" | "dropped-base-passes" | "dropped-flaky" | "unscored"
    *  (SMOKE=2 Option-B oracle-bypass — a successful bypass run with no oracle verdict;
    *  `resolved` is `null` on these records).

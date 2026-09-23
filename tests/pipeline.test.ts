@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  CollectContractError,
   type CollectStageResult,
   type LeakResult,
   type PipelineConfig,
@@ -1407,5 +1411,57 @@ describe("measurement boundary failures", () => {
     expect(rec.suspected_leak).toBeNull();
     expect(rec.leak_check?.status).toBe("error");
     expect(rec.leak_reasons).toEqual(["detector-failed"]);
+  });
+});
+
+// A collector that cannot read artifacts the container DID produce is deterministic: re-running a
+// paid attempt reproduces it. The 23 Sept Sphinx run re-ran a finished, pr-ready attempt twice
+// because a profile-contract error was labelled infra, and the cost cap never engaged because a
+// failed collect charged nothing. Contract errors stop loudly with the evidence kept; any attempt
+// whose container ran is charged its measured transcript cost.
+describe("runInstance: collect failures after the container ran", () => {
+  function evidenceWithCost(usd: number): RunStyreResult {
+    const dir = mkdtempSync(join(tmpdir(), "bench-collect-fail-"));
+    writeFileSync(
+      join(dir, "transcript.jsonl"),
+      `${JSON.stringify({ type: "result", total_cost_usd: usd })}\n`,
+    );
+    return { ...RUN_RESULT, outDir: dir, transcriptPath: join(dir, "transcript.jsonl") };
+  }
+
+  test("an artifact contract error is not retried, keeps its evidence and measured cost, and says why", async () => {
+    const result = evidenceWithCost(12.5);
+    const { deps, calls } = trackedDeps({
+      run: async () => result,
+      collect: async () => {
+        throw new CollectContractError(
+          "profile.json: components[3].commands.test: unexpected shape",
+        );
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg(), { deps });
+    expect(calls.run).toBe(1);
+    expect(rec.taxonomy).toBe("collect-error");
+    expect(rec.evidence_dir).toBe(result.outDir);
+    expect(rec.cost_usd_measured).toBe(12.5);
+    expect(rec.status).toContain("components[3].commands.test");
+    expect(rec.resolved).toBeNull();
+    expect(rec.score_attempted).toBe(false);
+  });
+
+  test("a transient collect failure is retried only within the cost cap, charged by its transcript", async () => {
+    const result = evidenceWithCost(16);
+    const { deps, calls } = trackedDeps({
+      run: async () => result,
+      collect: async () => {
+        throw new Error("ENOENT: run.ndjson");
+      },
+    });
+    const rec = await runInstance(makeInstance(), STYRE_BINS, makeCfg({ perTaskCostCapUsd: 15 }), {
+      deps,
+    });
+    expect(calls.run).toBe(1); // $16 measured already exceeds the $15 cap: no second paid attempt
+    expect(rec.taxonomy).toBe("infra");
+    expect(rec.cost_usd_measured).toBe(16);
   });
 });
